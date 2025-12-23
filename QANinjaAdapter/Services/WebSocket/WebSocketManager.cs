@@ -250,11 +250,8 @@ namespace QANinjaAdapter.Services.WebSocket
                     bool isFullMode = isIndex ? (packetLength == 32) : (packetLength == 184);
                     bool isIndexPacket = isIndex && (packetLength == 8 || packetLength == 28 || packetLength == 32);
 
-                    // If it's an MCX segment, override isFullMode to false if it was true.
-                    if (isMcxSegment && isFullMode)
-                    {
-                        isFullMode = false; // Force to not parse beyond quote mode for MCX
-                    }
+                    // MCX packets follow the same structure as NSE (184 bytes for full mode)
+                    // Python testing confirmed timestamps and OI are present in MCX full mode packets
 
                     // Validate packet length based on instrument type
                     bool isValidPacket = isLtpMode || isQuoteMode || isFullMode ||
@@ -292,7 +289,7 @@ namespace QANinjaAdapter.Services.WebSocket
             {
                 InstrumentToken = ZerodhaBinaryReader.ReadInt32BE(data, offset),
                 InstrumentIdentifier = symbol,
-                HasMarketDepth = isFullMode && !isMcxSegment,
+                HasMarketDepth = false, // Quote mode doesn't include market depth
                 IsIndex = isIndex,
                 LastTradeTime = DateTime.Now,
                 ExchangeTimestamp = DateTime.Now
@@ -309,12 +306,8 @@ namespace QANinjaAdapter.Services.WebSocket
             else if (isQuoteMode || isFullMode || (isMcxSegment && packetLength == 184))
             {
                 ParseTradePacket(data, offset, packetLength, tickData);
-                
-                if (isFullMode && !isMcxSegment)
-                {
-                    ParseFullData(data, offset, tickData);
-                    ParseMarketDepth(data, offset, tickData);
-                }
+                // Quote mode ends at byte 44 - no timestamps, OI, or depth
+                // System time is used for timestamps (already set in tickData initialization)
             }
 
             return tickData;

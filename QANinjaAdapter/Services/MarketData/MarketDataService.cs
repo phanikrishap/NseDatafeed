@@ -189,13 +189,14 @@ namespace QANinjaAdapter.Services.MarketData
                     int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
                     Logger.Info($"[TICK-SUBSCRIBE] Got token {tokenInt} for symbol='{symbol}'");
 
-                    Logger.Debug($"[TICK-SUBSCRIBE] Subscribing to token {tokenInt} in 'full' mode...");
-                    await _webSocketManager.SubscribeAsync(ws, tokenInt, "full");
+                    Logger.Debug($"[TICK-SUBSCRIBE] Subscribing to token {tokenInt} in 'quote' mode...");
+                    await _webSocketManager.SubscribeAsync(ws, tokenInt, "quote");
                     Logger.Info($"[TICK-SUBSCRIBE] Subscribed to token {tokenInt} for {nativeSymbolName}");
 
                     // Get segment and index info
                     string segment = _instrumentManager.GetSegmentForToken(tokenInt);
-                    bool isMcxSegment = !string.IsNullOrEmpty(segment) && segment.Equals("MCX", StringComparison.OrdinalIgnoreCase);
+                    // Relaxed check: match "MCX" or "MCX-OPT" or "MCX-FUT"
+                    bool isMcxSegment = !string.IsNullOrEmpty(segment) && segment.ToUpperInvariant().Contains("MCX");
 
                     bool isIndex = false;
                     if (l1Subscriptions.TryGetValue(nativeSymbolName, out var sub))
