@@ -20,20 +20,15 @@ namespace QABrokerAPI.Zerodha.Websockets;
 
 public class WebSocketConnectionFunc
 {
-    private readonly Func<bool> _exitFunction;
+    public Func<bool> ExitFunction { get; }
+    public bool IsTimeout { get; }
+    public TimeSpan Timeout { get; }
 
-    public WebSocketConnectionFunc(Func<bool> exitFunction)
+    public WebSocketConnectionFunc(Func<bool> exitFunction, bool isTimeout = false, TimeSpan? timeout = null)
     {
         Guard.AgainstNull((object)exitFunction, nameof(exitFunction));
-        this._exitFunction = exitFunction;
+        this.ExitFunction = exitFunction;
+        this.IsTimeout = isTimeout;
+        this.Timeout = timeout ?? TimeSpan.Zero;
     }
-
-    public bool ExitFunction()
-    {
-        return this._exitFunction();
-    }
-
-    // Add these missing properties
-    public bool IsTimeout { get { return false; } } // Default to false
-    public int Timeout { get { return 0; } } // Default to 0 (no timeout)
 }

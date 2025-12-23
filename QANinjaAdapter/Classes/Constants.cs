@@ -11,5 +11,11 @@ namespace QANinjaAdapter.Classes
         
         public const string ProviderName = "Zerodha";
         public const int ProviderId = 1019;
+
+        // File and Directory Paths
+        public const string BaseDataFolder = "NinjaTrader 8\\QAAdapter\\";
+        public const string ConfigFileName = "config.json";
+        public const string MappedInstrumentsFileName = "mapped_instruments.json";
+        public const string InstrumentDbFileName = "InstrumentMasters.db";
     }
 }

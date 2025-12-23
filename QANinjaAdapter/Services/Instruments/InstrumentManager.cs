@@ -13,6 +13,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Core;
 using NinjaTrader.Core.FloatingPoint;
 using QABrokerAPI.Common.Enums;
+using QANinjaAdapter.Classes;
 using QANinjaAdapter.Classes.Binance.Symbols;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Zerodha;
@@ -25,14 +26,12 @@ namespace QANinjaAdapter.Services.Instruments
     public class InstrumentManager
     {
         private static InstrumentManager _instance;
-        private readonly Dictionary<string, long> _instrumentTokenCache = new Dictionary<string, long>();
         private readonly ZerodhaClient _zerodhaClient;
         
-        // File paths
-        private const string JSON_FILE_PATH = "NinjaTrader 8\\QAAdapter\\mapped_instruments.json";
-        private const string SQLITE_DB_PATH = "NinjaTrader 8\\QAAdapter\\InstrumentMasters.db";
-        private Dictionary<string, long> _symbolToTokenMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        private Dictionary<long, InstrumentData> _tokenToInstrumentDataMap = new Dictionary<long, InstrumentData>();
+        // Cache for all instrument data and tokens
+        private readonly Dictionary<string, long> _symbolToTokenMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<long, InstrumentData> _tokenToInstrumentDataMap = new Dictionary<long, InstrumentData>();
+        
         private string _sqliteDbFullPath;
         private bool _isInitialized = false;
 
@@ -63,13 +62,12 @@ namespace QANinjaAdapter.Services.Instruments
         {
             if (_isInitialized) return;
 
-            string jsonFilePath = string.Empty;
+            string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.MappedInstrumentsFileName);
+            _sqliteDbFullPath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.InstrumentDbFileName);
+
             try
             {
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                jsonFilePath = Path.Combine(documentsPath, JSON_FILE_PATH);
-                _sqliteDbFullPath = Path.Combine(documentsPath, SQLITE_DB_PATH);
-
                 if (!File.Exists(jsonFilePath))
                 {
                     Logger.Info($"InstrumentManager: Instrument mapping file not found at: {jsonFilePath}");
@@ -78,7 +76,7 @@ namespace QANinjaAdapter.Services.Instruments
 
                 string jsonContent = File.ReadAllText(jsonFilePath);
                 var instruments = JsonConvert.DeserializeObject<List<InstrumentData>>(jsonContent);
-                
+
                 if (instruments != null)
                 {
                     foreach (var instrument in instruments)
@@ -87,16 +85,16 @@ namespace QANinjaAdapter.Services.Instruments
                         {
                             _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
                             _tokenToInstrumentDataMap[instrument.instrument_token] = instrument;
-                            
+
                             // Also map zerodhaSymbol if it's different
-                            if (!string.IsNullOrEmpty(instrument.zerodhaSymbol) && 
+                            if (!string.IsNullOrEmpty(instrument.zerodhaSymbol) &&
                                 !instrument.zerodhaSymbol.Equals(instrument.symbol, StringComparison.OrdinalIgnoreCase))
                             {
                                 _symbolToTokenMap[instrument.zerodhaSymbol] = instrument.instrument_token;
                             }
                         }
                     }
-                    
+
                     _isInitialized = true;
                     Logger.Info($"InstrumentManager: Loaded {_symbolToTokenMap.Count} instrument mappings and {_tokenToInstrumentDataMap.Count} token-to-data mappings from {jsonFilePath}");
                 }
@@ -176,7 +174,7 @@ namespace QANinjaAdapter.Services.Instruments
                 // Append to JSON file (Thread safe ideally, but for MVP straight write)
                 // Note: Reading whole file and writing back is inefficient but safe for consistency
                 string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string jsonFilePath = Path.Combine(documentsPath, JSON_FILE_PATH);
+                string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.MappedInstrumentsFileName);
                 
                 List<InstrumentData> currentList = new List<InstrumentData>();
                 if (File.Exists(jsonFilePath))
@@ -424,11 +422,11 @@ namespace QANinjaAdapter.Services.Instruments
         {
             try
             {
-                // Only load if not already loaded
-                if (_instrumentTokenCache.Count > 0)
+                // Only load if not already populated from JSON or DB
+                if (_symbolToTokenMap.Count > 500) // Arbitrary threshold to check if broadly populated
                     return;
 
-                Logger.Info("InstrumentManager: Attempting to load instrument tokens from Zerodha API...");
+                Logger.Info("InstrumentManager: Broadening instrument cache from Zerodha API...");
 
                 using (HttpClient client = _zerodhaClient.CreateAuthorizedClient())
                 {
@@ -478,20 +476,20 @@ namespace QANinjaAdapter.Services.Instruments
                                 // Use both exchange and symbol to create a unique key
                                 string key = $"{exchange}:{tradingSymbol}";
 
-                                if (!_instrumentTokenCache.ContainsKey(key))
+                                if (!_symbolToTokenMap.ContainsKey(key))
                                 {
-                                    _instrumentTokenCache[key] = instrumentToken;
+                                    _symbolToTokenMap[key] = instrumentToken;
                                 }
 
                                 // Also add just the symbol for convenience
-                                if (!_instrumentTokenCache.ContainsKey(tradingSymbol))
+                                if (!_symbolToTokenMap.ContainsKey(tradingSymbol))
                                 {
-                                    _instrumentTokenCache[tradingSymbol] = instrumentToken;
+                                    _symbolToTokenMap[tradingSymbol] = instrumentToken;
                                 }
                             }
                         }
 
-                        Logger.Info($"InstrumentManager: Loaded {_instrumentTokenCache.Count} instrument tokens");
+                        Logger.Info($"InstrumentManager: Loaded {_symbolToTokenMap.Count} instrument tokens into cache");
                     }
                     else
                     {
@@ -719,7 +717,7 @@ namespace QANinjaAdapter.Services.Instruments
         public async Task EnsureDatabaseExists()
         {
             string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            _sqliteDbFullPath = Path.Combine(documentsPath, SQLITE_DB_PATH);
+            _sqliteDbFullPath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.InstrumentDbFileName);
 
             if (!File.Exists(_sqliteDbFullPath))
             {
@@ -802,7 +800,7 @@ namespace QANinjaAdapter.Services.Instruments
                 try
                 {
                     string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                    string jsonFilePath = Path.Combine(documentsPath, JSON_FILE_PATH);
+                    string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.MappedInstrumentsFileName);
 
                     Logger.Info($"Reading symbols from JSON file: {jsonFilePath}");
 
@@ -890,7 +888,7 @@ namespace QANinjaAdapter.Services.Instruments
                                     break;
                             }
 
-                            _instrumentTokenCache[instrument.symbol] = instrument.instrument_token;
+                            _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
 
                             // Add to the collection
                             exchangeInformation.Add(symbolObject);

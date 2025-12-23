@@ -8,8 +8,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Models.MarketData;
+using QANinjaAdapter.Services.Auth;
+using QANinjaAdapter.Classes;
 using QANinjaAdapter.Services.Zerodha;
 using QANinjaAdapter;
+using QABrokerAPI.Zerodha.Utility;
 
 namespace QANinjaAdapter.Services.WebSocket
 {
@@ -216,7 +219,7 @@ namespace QANinjaAdapter.Services.WebSocket
             try
             {
                 int offset = 0;
-                int packetCount = ReadInt16BE(data, offset);
+                int packetCount = QABrokerAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt16BE(data, offset);
                 offset += 2;
 
                 //NinjaTrader.NinjaScript.NinjaScript.Log(
@@ -229,7 +232,7 @@ namespace QANinjaAdapter.Services.WebSocket
                     if (offset + 2 > data.Length)
                         break;
 
-                    int packetLength = ReadInt16BE(data, offset);
+                    int packetLength = QABrokerAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt16BE(data, offset);
                     offset += 2;
 
                     // Check if we have enough data for the packet content
@@ -257,331 +260,166 @@ namespace QANinjaAdapter.Services.WebSocket
 
                     if (!isValidPacket)
                     {
-                        offset += packetLength; // Skip this packet
+                        offset += packetLength;
                         continue;
                     }
 
                     // Check if this is our subscribed token
-                    int iToken = ReadInt32BE(data, offset);
+                    int iToken = QABrokerAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt32BE(data, offset);
                     if (iToken != expectedToken)
                     {
-                        offset += packetLength; // Skip this packet
+                        offset += packetLength;
                         continue;
                     }
 
-                    // Create a new ZerodhaTickData object with default values
-                    var tickData = new Models.MarketData.ZerodhaTickData
-                    {
-                        InstrumentToken = iToken,
-                        InstrumentIdentifier = nativeSymbolName,
-                        HasMarketDepth = isFullMode,
-                        IsIndex = false,
-                        LastTradePrice = 0,
-                        LastTradeQty = 0,
-                        AverageTradePrice = 0,
-                        TotalQtyTraded = 0,
-                        BuyQty = 0,
-                        SellQty = 0,
-                        Open = 0,
-                        High = 0,
-                        Low = 0,
-                        Close = 0,
-                        OpenInterest = 0,
-                        OpenInterestDayHigh = 0,
-                        OpenInterestDayLow = 0,
-                        // Initialize with current time in Local kind
-                        LastTradeTime = DateTime.Now,
-                        ExchangeTimestamp = DateTime.Now
-                    };
-
-                    //NinjaTrader.NinjaScript.NinjaScript.Log(
-                    //    $"[PARSE-DEBUG] Found matching token {iToken} for {nativeSymbolName}, packet mode: LTP={isLtpMode}, Quote={isQuoteMode}, Full={isFullMode}, Length={packetLength}",
-                    //    NinjaTrader.Cbi.LogLevel.Information);
-
-                    // Parse the packet based on mode
-                    if (isLtpMode)
-                    {
-                        // LTP mode - only last traded price (same for index and tradeable)
-                        if (offset + 4 + 4 <= data.Length)
-                        {
-                            int lastTradedPrice = ReadInt32BE(data, offset + 4);
-                            tickData.LastTradePrice = lastTradedPrice / 100.0;
-                        }
-
-                        // Log LTP mode parsing (disabled - too verbose)
-                        // NinjaTrader.NinjaScript.NinjaScript.Log(
-                        //     $"[PARSE-LTP] {nativeSymbolName}: LTP={tickData.LastTradePrice}, Time={tickData.LastTradeTime:HH:mm:ss.fff}",
-                        //     NinjaTrader.Cbi.LogLevel.Information);
-                    }
-                    else if (isIndex && (isQuoteMode || isFullMode))
-                    {
-                        // INDEX packet structure (Quote=28 bytes, Full=32 bytes):
-                        // 0-4:   Token
-                        // 4-8:   Last traded price
-                        // 8-12:  High
-                        // 12-16: Low
-                        // 16-20: Open
-                        // 20-24: Close
-                        // 24-28: Price change (Quote mode ends here)
-                        // 28-32: Exchange timestamp (Full mode)
-
-                        tickData.IsIndex = true;
-
-                        if (offset + 4 + 4 <= data.Length)
-                        {
-                            int lastTradedPrice = ReadInt32BE(data, offset + 4);
-                            tickData.LastTradePrice = lastTradedPrice / 100.0;
-                        }
-
-                        if (offset + 8 + 4 <= data.Length)
-                            tickData.High = ReadInt32BE(data, offset + 8) / 100.0;
-
-                        if (offset + 12 + 4 <= data.Length)
-                            tickData.Low = ReadInt32BE(data, offset + 12) / 100.0;
-
-                        if (offset + 16 + 4 <= data.Length)
-                            tickData.Open = ReadInt32BE(data, offset + 16) / 100.0;
-
-                        if (offset + 20 + 4 <= data.Length)
-                            tickData.Close = ReadInt32BE(data, offset + 20) / 100.0;
-
-                        // Price change at offset 24 (not used, can be calculated from LTP and Close)
-
-                        // Exchange timestamp for Full mode
-                        if (isFullMode && offset + 28 + 4 <= data.Length)
-                        {
-                            int exchangeTimestamp = ReadInt32BE(data, offset + 28);
-                            if (exchangeTimestamp > 0)
-                            {
-                                tickData.ExchangeTimestamp = UnixSecondsToLocalTime(exchangeTimestamp);
-                                tickData.LastTradeTime = tickData.ExchangeTimestamp;
-                            }
-                        }
-
-                        Logger.Info($"[PARSE-INDEX] {nativeSymbolName}: LTP={tickData.LastTradePrice}, Open={tickData.Open}, High={tickData.High}, Low={tickData.Low}, Close={tickData.Close}");
-                    }
-                    else if (isQuoteMode || isFullMode || (isMcxSegment && packetLength == 184))
-                    {
-                        // Quote or Full mode - more fields
-                        if (offset + 4 + 4 <= data.Length)
-                        {
-                            int lastTradedPrice = ReadInt32BE(data, offset + 4);
-                            tickData.LastTradePrice = lastTradedPrice / 100.0;
-                        }
-                        
-                        if (offset + 8 + 4 <= data.Length)
-                            tickData.LastTradeQty = ReadInt32BE(data, offset + 8);
-                        
-                        if (offset + 12 + 4 <= data.Length)
-                            tickData.AverageTradePrice = ReadInt32BE(data, offset + 12) / 100.0;
-                        
-                        if (offset + 16 + 4 <= data.Length)
-                            tickData.TotalQtyTraded = ReadInt32BE(data, offset + 16);
-                        
-                        if (offset + 20 + 4 <= data.Length)
-                            tickData.BuyQty = ReadInt32BE(data, offset + 20);
-                        
-                        if (offset + 24 + 4 <= data.Length)
-                            tickData.SellQty = ReadInt32BE(data, offset + 24);
-                        
-                        if (offset + 28 + 4 <= data.Length)
-                            tickData.Open = ReadInt32BE(data, offset + 28) / 100.0;
-                        
-                        if (offset + 32 + 4 <= data.Length)
-                            tickData.High = ReadInt32BE(data, offset + 32) / 100.0;
-                        
-                        if (offset + 36 + 4 <= data.Length)
-                            tickData.Low = ReadInt32BE(data, offset + 36) / 100.0;
-                        
-                        if (offset + 40 + 4 <= data.Length)
-                            tickData.Close = ReadInt32BE(data, offset + 40) / 100.0;
-
-                        // Log Quote mode parsing (disabled - too verbose)
-                        // NinjaTrader.NinjaScript.NinjaScript.Log(
-                        //     $"[PARSE-QUOTE] {nativeSymbolName}: LTP={tickData.LastTradePrice}, LTQ={tickData.LastTradeQty}, Vol={tickData.TotalQtyTraded}",
-                        //     NinjaTrader.Cbi.LogLevel.Information);
-
-                        // Get exchange timestamp if available (only for true Full mode, not MCX full)
-                        if (isFullMode)
-                        {
-                            if (offset + 44 + 4 <= data.Length)
-                            {
-                                int lastTradedTimestamp = ReadInt32BE(data, offset + 44);
-                                if (lastTradedTimestamp > 0)
-                                {
-                                    tickData.LastTradeTime = UnixSecondsToLocalTime(lastTradedTimestamp);
-                                }
-                            }
-
-                            if (offset + 48 + 4 <= data.Length)
-                                tickData.OpenInterest = ReadInt32BE(data, offset + 48);
-                            
-                            if (offset + 52 + 4 <= data.Length)
-                                tickData.OpenInterestDayHigh = ReadInt32BE(data, offset + 52);
-                            
-                            if (offset + 56 + 4 <= data.Length)
-                                tickData.OpenInterestDayLow = ReadInt32BE(data, offset + 56);
-                            
-                            if (offset + 60 + 4 <= data.Length)
-                            {
-                                int exchangeTimestamp = ReadInt32BE(data, offset + 60);
-                                if (exchangeTimestamp > 0)
-                                {
-                                    tickData.ExchangeTimestamp = UnixSecondsToLocalTime(exchangeTimestamp);
-                                }
-                            }
-
-                            // Log Full mode timestamp parsing (disabled - too verbose)
-                            // NinjaTrader.NinjaScript.NinjaScript.Log(
-                            //     $"[PARSE-FULL-TIME] {nativeSymbolName}: LastTradeTime={tickData.LastTradeTime:HH:mm:ss.fff}, ExchangeTime={tickData.ExchangeTimestamp:HH:mm:ss.fff}",
-                            //     NinjaTrader.Cbi.LogLevel.Information);
-
-                            // Parse market depth if available
-                            if (isFullMode)
-                            {
-                                // Initialize depth arrays
-                                for (int j = 0; j < 5; j++)
-                                {
-                                    tickData.BidDepth[j] = new Models.DepthEntry { Quantity = 0, Price = 0, Orders = 0 };
-                                    tickData.AskDepth[j] = new Models.DepthEntry { Quantity = 0, Price = 0, Orders = 0 };
-                                }
-                                
-                                // Process bids (5 levels)
-                                for (int j = 0; j < 5; j++)
-                                {
-                                    int depthOffset = offset + 64 + (j * 12);
-                                    if (depthOffset + 12 <= data.Length)
-                                    {
-                                        int qty = ReadInt32BE(data, depthOffset);
-                                        int price = ReadInt32BE(data, depthOffset + 4);
-                                        short orders = ReadInt16BE(data, depthOffset + 8);
-
-                                        tickData.BidDepth[j] = new Models.DepthEntry
-                                        {
-                                            Quantity = qty,
-                                            Price = price / 100.0,
-                                            Orders = orders
-                                        };
-                                    }
-                                }
-
-                                // Process asks (5 levels)
-                                for (int j = 0; j < 5; j++)
-                                {
-                                    int depthOffset = offset + 124 + (j * 12);
-                                    if (depthOffset + 12 <= data.Length)
-                                    {
-                                        int qty = ReadInt32BE(data, depthOffset);
-                                        int price = ReadInt32BE(data, depthOffset + 4);
-                                        short orders = ReadInt16BE(data, depthOffset + 8);
-
-                                        tickData.AskDepth[j] = new Models.DepthEntry
-                                        {
-                                            Quantity = qty,
-                                            Price = price / 100.0,
-                                            Orders = orders
-                                        };
-                                    }
-                                }
-
-                                // Count non-null bid and ask entries
-                                int bidCount = 0;
-                                int askCount = 0;
-                                
-                                foreach (var bid in tickData.BidDepth)
-                                {
-                                    if (bid != null && bid.Quantity > 0)
-                                        bidCount++;
-                                }
-                                
-                                foreach (var ask in tickData.AskDepth)
-                                {
-                                    if (ask != null && ask.Quantity > 0)
-                                        askCount++;
-                                }
-                                
-                                // Log market depth parsing (disabled - too verbose)
-                                // NinjaTrader.NinjaScript.NinjaScript.Log(
-                                //     $"[PARSE-DEPTH] {nativeSymbolName}: Parsed market depth with {bidCount} bids and {askCount} asks",
-                                //     NinjaTrader.Cbi.LogLevel.Information);
-                            }
-                        }
-                    }
-
-                    // Log the parsed tick data (disabled - too verbose)
-                    // NinjaTrader.NinjaScript.NinjaScript.Log(
-                    //     $"[PARSE-SUCCESS] {nativeSymbolName}: LTP={tickData.LastTradePrice}, LTQ={tickData.LastTradeQty}, Vol={tickData.TotalQtyTraded}, Time={tickData.LastTradeTime:HH:mm:ss.fff}",
-                    //     NinjaTrader.Cbi.LogLevel.Information);
-
-                    return tickData;
+                    return ParseSinglePacket(data, offset, packetLength, nativeSymbolName, isIndex, isMcxSegment, isLtpMode, isQuoteMode, isFullMode);
                 }
             }
             catch (Exception ex)
             {
-                NinjaTrader.NinjaScript.NinjaScript.Log(
-                    $"[PARSE-ERROR] Exception parsing binary message for {nativeSymbolName}: {ex.Message}",
-                    NinjaTrader.Cbi.LogLevel.Error);
+                Logger.Error($"WebSocketManager: Exception parsing binary message for {nativeSymbolName}: {ex.Message}", ex);
             }
 
-            // If we get here, we didn't find a matching packet or there was an error
-            // Return a default tick data object with current time
-            var defaultTickData = new Models.MarketData.ZerodhaTickData
+            return CreateDefaultTick(expectedToken, nativeSymbolName);
+        }
+
+        private ZerodhaTickData ParseSinglePacket(byte[] data, int offset, int packetLength, string symbol, bool isIndex, bool isMcxSegment, bool isLtpMode, bool isQuoteMode, bool isFullMode)
+        {
+            var tickData = new ZerodhaTickData
             {
-                InstrumentToken = expectedToken,
-                InstrumentIdentifier = nativeSymbolName,
-                LastTradePrice = 0,
-                LastTradeQty = 0,
-                TotalQtyTraded = 0,
+                InstrumentToken = ZerodhaBinaryReader.ReadInt32BE(data, offset),
+                InstrumentIdentifier = symbol,
+                HasMarketDepth = isFullMode && !isMcxSegment,
+                IsIndex = isIndex,
                 LastTradeTime = DateTime.Now,
                 ExchangeTimestamp = DateTime.Now
             };
 
-            // Log default tick data (disabled - too verbose)
-            // NinjaTrader.NinjaScript.NinjaScript.Log(
-            //     $"[PARSE-DEFAULT] Returning default tick data for {nativeSymbolName}",
-            //     NinjaTrader.Cbi.LogLevel.Warning);
+            if (isLtpMode)
+            {
+                ParseLtpPacket(data, offset, tickData);
+            }
+            else if (isIndex && (isQuoteMode || isFullMode))
+            {
+                ParseIndexPacket(data, offset, packetLength, tickData);
+            }
+            else if (isQuoteMode || isFullMode || (isMcxSegment && packetLength == 184))
+            {
+                ParseTradePacket(data, offset, packetLength, tickData);
+                
+                if (isFullMode && !isMcxSegment)
+                {
+                    ParseFullData(data, offset, tickData);
+                    ParseMarketDepth(data, offset, tickData);
+                }
+            }
 
-            return defaultTickData;
+            return tickData;
         }
 
-        /// <summary>
-        /// Reads a 16-bit integer in big-endian format
-        /// </summary>
-        /// <param name="buffer">The buffer to read from</param>
-        /// <param name="offset">The offset to start reading at</param>
-        /// <returns>The 16-bit integer</returns>
-        public static short ReadInt16BE(byte[] buffer, int offset)
+        private void ParseLtpPacket(byte[] data, int offset, ZerodhaTickData tick)
         {
-            return (short)((buffer[offset] << 8) | buffer[offset + 1]);
+            if (offset + 8 <= data.Length)
+            {
+                tick.LastTradePrice = ZerodhaBinaryReader.ReadInt32BE(data, offset + 4) / 100.0;
+            }
         }
 
-        /// <summary>
-        /// Reads a 32-bit integer in big-endian format
-        /// </summary>
-        /// <param name="buffer">The buffer to read from</param>
-        /// <param name="offset">The offset to start reading at</param>
-        /// <returns>The 32-bit integer</returns>
-        public static int ReadInt32BE(byte[] buffer, int offset)
+        private void ParseIndexPacket(byte[] data, int offset, int length, ZerodhaTickData tick)
         {
-            return (buffer[offset] << 24) |
-                   (buffer[offset + 1] << 16) |
-                   (buffer[offset + 2] << 8) |
-                   buffer[offset + 3];
+            tick.IsIndex = true;
+            if (offset + 8 <= data.Length) tick.LastTradePrice = ZerodhaBinaryReader.ReadInt32BE(data, offset + 4) / 100.0;
+            if (offset + 12 <= data.Length) tick.High = ZerodhaBinaryReader.ReadInt32BE(data, offset + 8) / 100.0;
+            if (offset + 16 <= data.Length) tick.Low = ZerodhaBinaryReader.ReadInt32BE(data, offset + 12) / 100.0;
+            if (offset + 20 <= data.Length) tick.Open = ZerodhaBinaryReader.ReadInt32BE(data, offset + 16) / 100.0;
+            if (offset + 24 <= data.Length) tick.Close = ZerodhaBinaryReader.ReadInt32BE(data, offset + 20) / 100.0;
+
+            if (length >= 32 && offset + 32 <= data.Length)
+            {
+                int timestamp = ZerodhaBinaryReader.ReadInt32BE(data, offset + 28);
+                if (timestamp > 0)
+                {
+                    tick.ExchangeTimestamp = ZerodhaBinaryReader.UnixSecondsToLocalTime(timestamp);
+                    tick.LastTradeTime = tick.ExchangeTimestamp;
+                }
+            }
         }
 
-        /// <summary>
-        /// Converts a Unix timestamp to local time
-        /// </summary>
-        /// <param name="unixTimestamp">The Unix timestamp</param>
-        /// <returns>The local DateTime</returns>
-        private static DateTime UnixSecondsToLocalTime(int unixTimestamp)
+        private void ParseTradePacket(byte[] data, int offset, int length, ZerodhaTickData tick)
         {
-            var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            DateTime utcTime = epoch.AddSeconds(unixTimestamp);
-            DateTime localTime = utcTime.ToLocalTime();
-            
-            // Ensure the Kind property is set correctly
-            return new DateTime(localTime.Ticks, DateTimeKind.Local);
+            if (offset + 8 <= data.Length) tick.LastTradePrice = ZerodhaBinaryReader.ReadInt32BE(data, offset + 4) / 100.0;
+            if (offset + 12 <= data.Length) tick.LastTradeQty = ZerodhaBinaryReader.ReadInt32BE(data, offset + 8);
+            if (offset + 16 <= data.Length) tick.AverageTradePrice = ZerodhaBinaryReader.ReadInt32BE(data, offset + 12) / 100.0;
+            if (offset + 20 <= data.Length) tick.TotalQtyTraded = ZerodhaBinaryReader.ReadInt32BE(data, offset + 16);
+            if (offset + 24 <= data.Length) tick.BuyQty = ZerodhaBinaryReader.ReadInt32BE(data, offset + 20);
+            if (offset + 28 <= data.Length) tick.SellQty = ZerodhaBinaryReader.ReadInt32BE(data, offset + 24);
+            if (offset + 32 <= data.Length) tick.Open = ZerodhaBinaryReader.ReadInt32BE(data, offset + 28) / 100.0;
+            if (offset + 36 <= data.Length) tick.High = ZerodhaBinaryReader.ReadInt32BE(data, offset + 32) / 100.0;
+            if (offset + 40 <= data.Length) tick.Low = ZerodhaBinaryReader.ReadInt32BE(data, offset + 36) / 100.0;
+            if (offset + 44 <= data.Length) tick.Close = ZerodhaBinaryReader.ReadInt32BE(data, offset + 40) / 100.0;
+        }
+
+        private void ParseFullData(byte[] data, int offset, ZerodhaTickData tick)
+        {
+            if (offset + 48 <= data.Length)
+            {
+                int lastTradedTimestamp = ZerodhaBinaryReader.ReadInt32BE(data, offset + 44);
+                if (lastTradedTimestamp > 0) tick.LastTradeTime = ZerodhaBinaryReader.UnixSecondsToLocalTime(lastTradedTimestamp);
+            }
+
+            if (offset + 52 <= data.Length) tick.OpenInterest = ZerodhaBinaryReader.ReadInt32BE(data, offset + 48);
+            if (offset + 56 <= data.Length) tick.OpenInterestDayHigh = ZerodhaBinaryReader.ReadInt32BE(data, offset + 52);
+            if (offset + 60 <= data.Length) tick.OpenInterestDayLow = ZerodhaBinaryReader.ReadInt32BE(data, offset + 56);
+
+            if (offset + 64 <= data.Length)
+            {
+                int exchangeTimestamp = ZerodhaBinaryReader.ReadInt32BE(data, offset + 60);
+                if (exchangeTimestamp > 0) tick.ExchangeTimestamp = ZerodhaBinaryReader.UnixSecondsToLocalTime(exchangeTimestamp);
+            }
+        }
+
+        private void ParseMarketDepth(byte[] data, int offset, ZerodhaTickData tick)
+        {
+            // Process bids (5 levels)
+            for (int j = 0; j < 5; j++)
+            {
+                int depthOffset = offset + 64 + (j * 12);
+                if (depthOffset + 12 <= data.Length)
+                {
+                    tick.BidDepth[j] = new DepthEntry
+                    {
+                        Quantity = ZerodhaBinaryReader.ReadInt32BE(data, depthOffset),
+                        Price = ZerodhaBinaryReader.ReadInt32BE(data, depthOffset + 4) / 100.0,
+                        Orders = ZerodhaBinaryReader.ReadInt16BE(data, depthOffset + 8)
+                    };
+                }
+            }
+
+            // Process asks (5 levels)
+            for (int j = 0; j < 5; j++)
+            {
+                int depthOffset = offset + 124 + (j * 12);
+                if (depthOffset + 12 <= data.Length)
+                {
+                    tick.AskDepth[j] = new DepthEntry
+                    {
+                        Quantity = ZerodhaBinaryReader.ReadInt32BE(data, depthOffset),
+                        Price = ZerodhaBinaryReader.ReadInt32BE(data, depthOffset + 4) / 100.0,
+                        Orders = ZerodhaBinaryReader.ReadInt16BE(data, depthOffset + 8)
+                    };
+                }
+            }
+        }
+
+        private ZerodhaTickData CreateDefaultTick(int token, string symbol)
+        {
+            return new ZerodhaTickData
+            {
+                InstrumentToken = token,
+                InstrumentIdentifier = symbol,
+                LastTradeTime = DateTime.Now,
+                ExchangeTimestamp = DateTime.Now
+            };
         }
     }
 }

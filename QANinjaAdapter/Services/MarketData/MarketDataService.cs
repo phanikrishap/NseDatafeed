@@ -10,6 +10,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using QABrokerAPI.Common.Enums;
 using QABrokerAPI.Zerodha.Websockets;
+using QABrokerAPI.Zerodha.Utility;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Models.MarketData;
 using QANinjaAdapter.Services.Configuration;
@@ -488,7 +489,7 @@ namespace QANinjaAdapter.Services.MarketData
             }
 
             int offset = 0;
-            int packetCount = WebSocketManager.ReadInt16BE(data, offset);
+            int packetCount = QABrokerAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt16BE(data, offset);
             offset += 2;
 
             for (int i = 0; i < packetCount; i++)
@@ -497,7 +498,7 @@ namespace QANinjaAdapter.Services.MarketData
                 if (offset + 2 > data.Length)
                     break;
 
-                int packetLength = WebSocketManager.ReadInt16BE(data, offset);
+                int packetLength = QABrokerAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt16BE(data, offset);
                 offset += 2;
 
                 // Check if we have enough data for the packet content
@@ -512,7 +513,7 @@ namespace QANinjaAdapter.Services.MarketData
                 }
 
                 // Check if this is our subscribed token
-                int iToken = WebSocketManager.ReadInt32BE(data, offset);
+                int iToken = QABrokerAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt32BE(data, offset);
                 if (iToken != tokenInt)
                 {
                     offset += packetLength; // Skip this packet
@@ -541,7 +542,7 @@ namespace QANinjaAdapter.Services.MarketData
             try
             {
                 // Get the instrument token
-                int iToken = WebSocketManager.ReadInt32BE(data, offset);
+                int iToken = QABrokerAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt32BE(data, offset);
 
                 // Get segment information for MCX check
                 string segment = _instrumentManager.GetSegmentForToken(iToken);

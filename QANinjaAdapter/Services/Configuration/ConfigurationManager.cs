@@ -5,6 +5,9 @@ using System.Windows;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using QANinjaAdapter.Services.Auth;
+using QABrokerAPI.Zerodha.Utility;
+using QANinjaAdapter.Models;
+using QANinjaAdapter.Classes;
 
 namespace QANinjaAdapter.Services.Configuration
 {
@@ -13,8 +16,8 @@ namespace QANinjaAdapter.Services.Configuration
     /// </summary>
     public class ConfigurationManager
     {
-        // Configuration file path
-        private const string CONFIG_FILE_PATH = "NinjaTrader 8\\QAAdapter\\config.json";
+        // Event for configuration errors that UI might want to show
+        public event EventHandler<string> ConfigurationError;
         
         // Singleton instance
         private static ConfigurationManager _instance;
@@ -94,13 +97,14 @@ namespace QANinjaAdapter.Services.Configuration
             {
                 // Get the user's Documents folder path
                 string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string fullConfigPath = Path.Combine(documentsPath, CONFIG_FILE_PATH);
+                string fullConfigPath = Path.Combine(documentsPath, QANinjaAdapter.Classes.Constants.BaseDataFolder, QANinjaAdapter.Classes.Constants.ConfigFileName);
 
                 // Check if config file exists
                 if (!File.Exists(fullConfigPath))
                 {
-                    MessageBox.Show($"Configuration file not found at: {fullConfigPath}",
-                        "Configuration Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    string error = $"Configuration file not found at: {fullConfigPath}";
+                    Logger.Error(error);
+                    ConfigurationError?.Invoke(this, error);
                     return false;
                 }
 
@@ -113,8 +117,9 @@ namespace QANinjaAdapter.Services.Configuration
 
                 if (activeBrokers == null)
                 {
-                    MessageBox.Show("No active broker specified in the configuration file.",
-                        "Configuration Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    string error = "No active broker specified in the configuration file.";
+                    Logger.Error(error);
+                    ConfigurationError?.Invoke(this, error);
                     return false;
                 }
 
@@ -124,8 +129,9 @@ namespace QANinjaAdapter.Services.Configuration
 
                 if (string.IsNullOrEmpty(_activeWebSocketBroker) || string.IsNullOrEmpty(_activeHistoricalBroker))
                 {
-                    MessageBox.Show("Websocket or Historical broker not specified in Active configuration.",
-                        "Configuration Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    string error = "Websocket or Historical broker not specified in Active configuration.";
+                    Logger.Error(error);
+                    ConfigurationError?.Invoke(this, error);
                     return false;
                 }
 
@@ -141,8 +147,9 @@ namespace QANinjaAdapter.Services.Configuration
                 }
                 else
                 {
-                    MessageBox.Show($"Configuration for websocket broker '{_activeWebSocketBroker}' not found.",
-                        "Configuration Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    string error = $"Configuration for websocket broker '{_activeWebSocketBroker}' not found.";
+                    Logger.Error(error);
+                    ConfigurationError?.Invoke(this, error);
                     return false;
                 }
 
@@ -158,8 +165,9 @@ namespace QANinjaAdapter.Services.Configuration
                     }
                     else
                     {
-                        MessageBox.Show($"Configuration for historical broker '{_activeHistoricalBroker}' not found.",
-                            "Configuration Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        string error = $"Configuration for historical broker '{_activeHistoricalBroker}' not found.";
+                        Logger.Error(error);
+                        ConfigurationError?.Invoke(this, error);
                         return false;
                     }
                 }
@@ -175,8 +183,9 @@ namespace QANinjaAdapter.Services.Configuration
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading configuration: {ex.Message}",
-                    "Configuration Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                string error = $"Error loading configuration: {ex.Message}";
+                Logger.Error(error, ex);
+                ConfigurationError?.Invoke(this, error);
                 return false;
             }
         }
@@ -326,7 +335,7 @@ namespace QANinjaAdapter.Services.Configuration
             try
             {
                 string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string fullConfigPath = Path.Combine(documentsPath, CONFIG_FILE_PATH);
+                string fullConfigPath = Path.Combine(documentsPath, QANinjaAdapter.Classes.Constants.BaseDataFolder, QANinjaAdapter.Classes.Constants.ConfigFileName);
 
                 string json = _config.ToString(Formatting.Indented);
                 File.WriteAllText(fullConfigPath, json);

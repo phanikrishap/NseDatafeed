@@ -189,7 +189,6 @@
     <Compile Include="Classes\Binance\Symbols\SymbolsRoot.cs" />
     <Compile Include="Classes\Record.cs" />
     <Compile Include="Classes\Constants.cs" />
-    <Compile Include="Classes\WebSocketConnectionFunc.cs" />
     <Compile Include="Connector.cs" />
     <Compile Include="Models\DepthEntry.cs" />
     <Compile Include="Models\MappedInstrument.cs" />

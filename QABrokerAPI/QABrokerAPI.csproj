@@ -237,6 +237,7 @@
     <Compile Include="Zerodha\Websockets\UserDataWebSocketMessages.cs" />
     <Compile Include="Zerodha\Websockets\WebSocketConnectionFunc.cs" />
     <Compile Include="Zerodha\ZerodhaRequestClient.cs" />
+    <Compile Include="Zerodha\Utility\ZerodhaBinaryReader.cs" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Upstox\" />
