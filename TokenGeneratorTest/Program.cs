@@ -288,11 +288,10 @@ namespace TokenGeneratorTest
         {
             try
             {
-                // Only download NFO and BFO (derivatives segments)
-                string[] exchanges = new[] { "NFO", "BFO" };
-
+                // Download ALL instruments (no exchange filter) - needed for INDICES segment (GIFT NIFTY, NIFTY 50, SENSEX)
+                // The downloader will automatically add indicator mappings to mapped_instruments.json
                 var downloader = new InstrumentDownloader(apiKey, accessToken, INSTRUMENTS_PATH, DB_PATH);
-                int count = await downloader.DownloadAndSaveInstrumentsAsync(exchanges);
+                int count = await downloader.DownloadAndSaveInstrumentsAsync(null); // null = all exchanges
 
                 Console.WriteLine($"    Downloaded {count} instruments");
                 Console.WriteLine($"    JSON: {INSTRUMENTS_PATH}");

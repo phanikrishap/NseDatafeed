@@ -14,6 +14,7 @@ using NinjaTrader.Core;
 using NinjaTrader.Core.FloatingPoint;
 using QABrokerAPI.Common.Enums;
 using QANinjaAdapter.Classes.Binance.Symbols;
+using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Zerodha;
 
 namespace QANinjaAdapter.Services.Instruments
@@ -55,10 +56,10 @@ namespace QANinjaAdapter.Services.Instruments
         {
             _zerodhaClient = ZerodhaClient.Instance;
             // Load the instrument tokens on initialization
-            _ = EnsureInitialized();
+            EnsureInitialized();
         }
-        
-        private async Task EnsureInitialized()
+
+        private void EnsureInitialized()
         {
             if (_isInitialized) return;
 
@@ -107,6 +108,142 @@ namespace QANinjaAdapter.Services.Instruments
                 throw;
             }
         }
+
+        /// <summary>
+        /// Gets the instrument mapping by NT symbol name (e.g., "GIFT_NIFTY", "NIFTY 50", "SENSEX")
+        /// </summary>
+        public MappedInstrument GetMappingByNtSymbol(string ntSymbol)
+        {
+            if (string.IsNullOrEmpty(ntSymbol))
+                return null;
+
+            // First check if we have the token for this symbol
+            if (_symbolToTokenMap.TryGetValue(ntSymbol, out long token))
+            {
+                // Then get the instrument data
+                if (_tokenToInstrumentDataMap.TryGetValue(token, out InstrumentData data))
+                {
+                    // Convert InstrumentData to MappedInstrument
+                    return new MappedInstrument
+                    {
+                        symbol = data.symbol,
+                        zerodhaSymbol = data.zerodhaSymbol,
+                        underlying = data.underlying,
+                        expiry = string.IsNullOrEmpty(data.expiry) ? (DateTime?)null : DateTime.Parse(data.expiry),
+                        strike = data.strike,
+                        option_type = data.option_type,
+                        segment = data.segment,
+                        instrument_token = data.instrument_token,
+                        exchange_token = (int?)data.exchange_token,
+                        tick_size = data.tick_size,
+                        lot_size = data.lot_size
+                    };
+                }
+            }
+
+            Logger.Debug($"InstrumentManager.GetMappingByNtSymbol: No mapping found for '{ntSymbol}'");
+            return null;
+        }
+
+        /// <summary>
+        /// Adds a mapped instrument dynamically to memory and JSON file
+        /// </summary>
+        public void AddMappedInstrument(MappedInstrument instrument)
+        {
+            try 
+            {
+                if (instrument == null || string.IsNullOrEmpty(instrument.symbol)) return;
+
+                // Update memory maps
+                _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
+                
+                var data = new InstrumentData {
+                    symbol = instrument.symbol,
+                    zerodhaSymbol = instrument.zerodhaSymbol,
+                    underlying = instrument.underlying,
+                    expiry = instrument.expiry?.ToString("yyyy-MM-dd"), // formatting
+                    strike = instrument.strike,
+                    option_type = instrument.option_type,
+                    segment = instrument.segment,
+                    instrument_token = instrument.instrument_token,
+                    exchange_token = (long)(instrument.exchange_token ?? 0),
+                    tick_size = instrument.tick_size,
+                    lot_size = instrument.lot_size
+                };
+                
+                _tokenToInstrumentDataMap[instrument.instrument_token] = data;
+                
+                // Append to JSON file (Thread safe ideally, but for MVP straight write)
+                // Note: Reading whole file and writing back is inefficient but safe for consistency
+                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                string jsonFilePath = Path.Combine(documentsPath, JSON_FILE_PATH);
+                
+                List<InstrumentData> currentList = new List<InstrumentData>();
+                if (File.Exists(jsonFilePath))
+                {
+                    string content = File.ReadAllText(jsonFilePath);
+                    currentList = JsonConvert.DeserializeObject<List<InstrumentData>>(content) ?? new List<InstrumentData>();
+                }
+                
+                // Remove existing if any
+                currentList.RemoveAll(x => x.symbol == instrument.symbol);
+                currentList.Add(data);
+                
+                File.WriteAllText(jsonFilePath, JsonConvert.SerializeObject(currentList, Formatting.Indented));
+                
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: Error adding mapped instrument {instrument.symbol}. Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gets unique expiry dates for a given underlying from the database
+        /// </summary>
+        public async Task<List<DateTime>> GetExpiriesForUnderlying(string underlying)
+        {
+            // Ensure database exists first
+            await EnsureDatabaseExists();
+
+            var expiries = new List<DateTime>();
+            if (string.IsNullOrEmpty(_sqliteDbFullPath) || !File.Exists(_sqliteDbFullPath))
+            {
+                Logger.Warn($"InstrumentManager: Database not available for expiry lookup of {underlying}");
+                return expiries;
+            }
+
+            try
+            {
+                using (var connection = new SQLiteConnection($"Data Source={_sqliteDbFullPath};Version=3;Read Only=True;"))
+                {
+                    connection.Open();
+                    string query = "SELECT DISTINCT expiry FROM instruments WHERE underlying = @underlying AND expiry IS NOT NULL AND expiry != '' ORDER BY expiry";
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@underlying", underlying);
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            while (reader.Read())
+                            {
+                                string dateStr = reader.GetString(0);
+                                if (DateTime.TryParse(dateStr, out DateTime dt))
+                                {
+                                    expiries.Add(dt);
+                                }
+                            }
+                        }
+                    }
+                }
+                Logger.Info($"InstrumentManager: Found {expiries.Count} expiries for {underlying}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: Error fetching expiries for {underlying}: {ex.Message}");
+            }
+            return expiries;
+        }
+
         
         private class InstrumentData
         {
@@ -128,22 +265,22 @@ namespace QANinjaAdapter.Services.Instruments
         /// </summary>
         /// <param name="symbol">The symbol to get the token for</param>
         /// <returns>The instrument token</returns>
-        public async Task<long> GetInstrumentToken(string symbol)
+        public Task<long> GetInstrumentToken(string symbol)
         {
             try
             {
-                await EnsureInitialized();
+                EnsureInitialized();
 
                 // First try exact match in JSON mappings (custom mappings like NIFTY_I)
                 if (_symbolToTokenMap.TryGetValue(symbol, out long token))
-                    return token;
+                    return Task.FromResult(token);
 
                 // If not found, try case-insensitive search in JSON mappings
                 var match = _symbolToTokenMap.FirstOrDefault(kvp =>
                     string.Equals(kvp.Key, symbol, StringComparison.OrdinalIgnoreCase));
 
                 if (!match.Equals(default(KeyValuePair<string, long>)))
-                    return match.Value;
+                    return Task.FromResult(match.Value);
 
                 // Check if this is a NIFTY futures symbol - map to NIFTY_I (continuous contract)
                 // Matches patterns like NIFTY25MAYFUT, NIFTY25DECFUT, etc.
@@ -153,7 +290,7 @@ namespace QANinjaAdapter.Services.Instruments
                     Logger.Info($"InstrumentManager: Mapped '{symbol}' to continuous contract '{continuousSymbol}' with token {token}");
                     // Cache this mapping for future lookups
                     _symbolToTokenMap[symbol] = token;
-                    return token;
+                    return Task.FromResult(token);
                 }
 
                 // Fall back to SQLite database lookup
@@ -162,7 +299,7 @@ namespace QANinjaAdapter.Services.Instruments
                 {
                     // Cache the result for future lookups
                     _symbolToTokenMap[symbol] = token;
-                    return token;
+                    return Task.FromResult(token);
                 }
 
                 throw new KeyNotFoundException($"Instrument token not found for symbol: {symbol}");
@@ -170,7 +307,7 @@ namespace QANinjaAdapter.Services.Instruments
             catch (Exception ex)
             {
                 Logger.Error($"InstrumentManager: Error getting instrument token for symbol '{symbol}'. Error: {ex.Message}", ex);
-                return 0;
+                return Task.FromResult(0L);
             }
         }
 
@@ -370,6 +507,289 @@ namespace QANinjaAdapter.Services.Instruments
         }
 
         /// <summary>
+        /// Downloads instruments from Zerodha API and creates/updates the SQLite database
+        /// </summary>
+        /// <returns>True if successful, false otherwise</returns>
+        public async Task<bool> DownloadAndCreateInstrumentDatabase()
+        {
+            try
+            {
+                Logger.Info("InstrumentManager: Downloading instruments from Zerodha API to create SQLite database...");
+
+                using (HttpClient client = _zerodhaClient.CreateAuthorizedClient())
+                {
+                    string url = "https://api.kite.trade/instruments";
+                    HttpResponseMessage response = await client.GetAsync(url);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        string errorContent = await response.Content.ReadAsStringAsync();
+                        Logger.Error($"InstrumentManager: Failed to download instruments. Status: {response.StatusCode}, Error: {errorContent}");
+                        return false;
+                    }
+
+                    string csvContent = await response.Content.ReadAsStringAsync();
+                    string[] lines = csvContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+                    if (lines.Length <= 1)
+                    {
+                        Logger.Warn("InstrumentManager: No instruments found in CSV.");
+                        return false;
+                    }
+
+                    // Parse headers to get column indices
+                    string[] headers = lines[0].Split(',');
+                    var columnIndices = new Dictionary<string, int>();
+                    for (int i = 0; i < headers.Length; i++)
+                    {
+                        columnIndices[headers[i].Trim()] = i;
+                    }
+
+                    // Ensure required columns exist
+                    string[] requiredColumns = { "instrument_token", "exchange_token", "tradingsymbol", "name",
+                        "expiry", "strike", "tick_size", "lot_size", "instrument_type", "segment", "exchange" };
+                    foreach (var col in requiredColumns)
+                    {
+                        if (!columnIndices.ContainsKey(col))
+                        {
+                            Logger.Error($"InstrumentManager: Required column '{col}' not found in CSV.");
+                            return false;
+                        }
+                    }
+
+                    // Ensure directory exists
+                    string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                    string dbDir = Path.Combine(documentsPath, "NinjaTrader 8", "QAAdapter");
+                    if (!Directory.Exists(dbDir))
+                        Directory.CreateDirectory(dbDir);
+
+                    _sqliteDbFullPath = Path.Combine(dbDir, "InstrumentMasters.db");
+
+                    // Delete existing database to recreate fresh
+                    if (File.Exists(_sqliteDbFullPath))
+                    {
+                        File.Delete(_sqliteDbFullPath);
+                        Logger.Info("InstrumentManager: Deleted existing database for fresh download.");
+                    }
+
+                    // Create SQLite database
+                    using (var connection = new SQLiteConnection($"Data Source={_sqliteDbFullPath};Version=3;"))
+                    {
+                        connection.Open();
+
+                        // Create table
+                        string createTableSql = @"
+                            CREATE TABLE IF NOT EXISTS instruments (
+                                instrument_token INTEGER PRIMARY KEY,
+                                exchange_token INTEGER,
+                                tradingsymbol TEXT,
+                                name TEXT,
+                                expiry TEXT,
+                                strike REAL,
+                                tick_size REAL,
+                                lot_size INTEGER,
+                                instrument_type TEXT,
+                                segment TEXT,
+                                exchange TEXT,
+                                underlying TEXT
+                            );
+                            CREATE INDEX IF NOT EXISTS idx_tradingsymbol ON instruments(tradingsymbol);
+                            CREATE INDEX IF NOT EXISTS idx_underlying ON instruments(underlying);
+                            CREATE INDEX IF NOT EXISTS idx_expiry ON instruments(expiry);
+                            CREATE INDEX IF NOT EXISTS idx_segment ON instruments(segment);
+                        ";
+                        using (var cmd = new SQLiteCommand(createTableSql, connection))
+                        {
+                            cmd.ExecuteNonQuery();
+                        }
+
+                        // Insert data using transaction for performance
+                        using (var transaction = connection.BeginTransaction())
+                        {
+                            string insertSql = @"INSERT OR REPLACE INTO instruments
+                                (instrument_token, exchange_token, tradingsymbol, name, expiry, strike,
+                                 tick_size, lot_size, instrument_type, segment, exchange, underlying)
+                                VALUES (@token, @exchToken, @symbol, @name, @expiry, @strike,
+                                        @tickSize, @lotSize, @instrType, @segment, @exchange, @underlying)";
+
+                            using (var cmd = new SQLiteCommand(insertSql, connection))
+                            {
+                                cmd.Parameters.Add("@token", System.Data.DbType.Int64);
+                                cmd.Parameters.Add("@exchToken", System.Data.DbType.Int64);
+                                cmd.Parameters.Add("@symbol", System.Data.DbType.String);
+                                cmd.Parameters.Add("@name", System.Data.DbType.String);
+                                cmd.Parameters.Add("@expiry", System.Data.DbType.String);
+                                cmd.Parameters.Add("@strike", System.Data.DbType.Double);
+                                cmd.Parameters.Add("@tickSize", System.Data.DbType.Double);
+                                cmd.Parameters.Add("@lotSize", System.Data.DbType.Int32);
+                                cmd.Parameters.Add("@instrType", System.Data.DbType.String);
+                                cmd.Parameters.Add("@segment", System.Data.DbType.String);
+                                cmd.Parameters.Add("@exchange", System.Data.DbType.String);
+                                cmd.Parameters.Add("@underlying", System.Data.DbType.String);
+
+                                int insertedCount = 0;
+                                for (int i = 1; i < lines.Length; i++)
+                                {
+                                    string[] fields = lines[i].Split(',');
+                                    if (fields.Length < headers.Length)
+                                        continue;
+
+                                    try
+                                    {
+                                        cmd.Parameters["@token"].Value = long.Parse(fields[columnIndices["instrument_token"]]);
+                                        cmd.Parameters["@exchToken"].Value = long.TryParse(fields[columnIndices["exchange_token"]], out long et) ? et : 0;
+                                        cmd.Parameters["@symbol"].Value = fields[columnIndices["tradingsymbol"]];
+                                        cmd.Parameters["@name"].Value = fields[columnIndices["name"]];
+                                        cmd.Parameters["@expiry"].Value = fields[columnIndices["expiry"]];
+                                        cmd.Parameters["@strike"].Value = double.TryParse(fields[columnIndices["strike"]], out double s) ? s : 0;
+                                        cmd.Parameters["@tickSize"].Value = double.TryParse(fields[columnIndices["tick_size"]], out double ts) ? ts : 0.05;
+                                        cmd.Parameters["@lotSize"].Value = int.TryParse(fields[columnIndices["lot_size"]], out int ls) ? ls : 1;
+                                        cmd.Parameters["@instrType"].Value = fields[columnIndices["instrument_type"]];
+                                        cmd.Parameters["@segment"].Value = fields[columnIndices["segment"]];
+                                        cmd.Parameters["@exchange"].Value = fields[columnIndices["exchange"]];
+
+                                        // Extract underlying from tradingsymbol for options/futures
+                                        string tradingSymbol = fields[columnIndices["tradingsymbol"]];
+                                        string instrType = fields[columnIndices["instrument_type"]];
+                                        string underlying = ExtractUnderlying(tradingSymbol, instrType);
+                                        cmd.Parameters["@underlying"].Value = underlying;
+
+                                        cmd.ExecuteNonQuery();
+                                        insertedCount++;
+
+                                        if (insertedCount % 10000 == 0)
+                                        {
+                                            Logger.Info($"InstrumentManager: Inserted {insertedCount} instruments...");
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Logger.Warn($"InstrumentManager: Error inserting row {i}: {ex.Message}");
+                                    }
+                                }
+
+                                transaction.Commit();
+                                Logger.Info($"InstrumentManager: Successfully created SQLite database with {insertedCount} instruments at {_sqliteDbFullPath}");
+                            }
+                        }
+                    }
+
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: Error creating instrument database: {ex.Message}", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Extracts the underlying symbol from a trading symbol
+        /// </summary>
+        private string ExtractUnderlying(string tradingSymbol, string instrumentType)
+        {
+            if (string.IsNullOrEmpty(tradingSymbol))
+                return "";
+
+            // For options and futures, extract the underlying
+            // NIFTY24DEC24500CE -> NIFTY
+            // BANKNIFTY24DEC52000PE -> BANKNIFTY
+            // SENSEX24D2780000CE -> SENSEX
+
+            if (instrumentType == "CE" || instrumentType == "PE" ||
+                instrumentType == "FUT" || instrumentType.Contains("OPT"))
+            {
+                // Find where the date/numbers start
+                int i = 0;
+                while (i < tradingSymbol.Length && !char.IsDigit(tradingSymbol[i]))
+                {
+                    i++;
+                }
+                if (i > 0)
+                    return tradingSymbol.Substring(0, i);
+            }
+
+            return tradingSymbol;
+        }
+
+        /// <summary>
+        /// Ensures the SQLite database exists, downloading if necessary
+        /// </summary>
+        public async Task EnsureDatabaseExists()
+        {
+            string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            _sqliteDbFullPath = Path.Combine(documentsPath, SQLITE_DB_PATH);
+
+            if (!File.Exists(_sqliteDbFullPath))
+            {
+                Logger.Info("InstrumentManager: SQLite database not found, downloading from Zerodha API...");
+                await DownloadAndCreateInstrumentDatabase();
+            }
+            else
+            {
+                // Check if database is stale (older than 1 day)
+                var fileInfo = new FileInfo(_sqliteDbFullPath);
+                if (DateTime.Now - fileInfo.LastWriteTime > TimeSpan.FromDays(1))
+                {
+                    Logger.Info("InstrumentManager: SQLite database is older than 1 day, refreshing...");
+                    await DownloadAndCreateInstrumentDatabase();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Looks up an option instrument token from the SQLite database
+        /// </summary>
+        public async Task<long> GetOptionToken(string underlying, DateTime expiry, double strike, string optionType)
+        {
+            await EnsureDatabaseExists();
+
+            if (string.IsNullOrEmpty(_sqliteDbFullPath) || !File.Exists(_sqliteDbFullPath))
+                return 0;
+
+            try
+            {
+                using (var connection = new SQLiteConnection($"Data Source={_sqliteDbFullPath};Version=3;Read Only=True;"))
+                {
+                    connection.Open();
+
+                    // Format expiry as YYYY-MM-DD for comparison
+                    string expiryStr = expiry.ToString("yyyy-MM-dd");
+
+                    // Build the trading symbol pattern
+                    // NIFTY24DEC24500CE format
+                    string query = @"SELECT instrument_token FROM instruments
+                                    WHERE underlying = @underlying
+                                    AND expiry = @expiry
+                                    AND strike = @strike
+                                    AND instrument_type = @optType
+                                    LIMIT 1";
+
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@underlying", underlying);
+                        cmd.Parameters.AddWithValue("@expiry", expiryStr);
+                        cmd.Parameters.AddWithValue("@strike", strike);
+                        cmd.Parameters.AddWithValue("@optType", optionType);
+
+                        var result = cmd.ExecuteScalar();
+                        if (result != null && result != DBNull.Value)
+                        {
+                            return Convert.ToInt64(result);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: Error looking up option token: {ex.Message}", ex);
+            }
+
+            return 0;
+        }
+
+        /// <summary>
         /// Gets exchange information for all available instruments
         /// </summary>
         /// <returns>A collection of symbol objects</returns>
@@ -546,6 +966,13 @@ namespace QANinjaAdapter.Services.Instruments
             if (symbol == "NIFTY_I")
             {
                 return "NIFTY25MAYFUT";
+            }
+
+            // Handle special index symbols - return the Zerodha symbol (with space, not underscore)
+            // GIFT_NIFTY is the NT symbol, maps to "GIFT NIFTY" in Zerodha
+            if (symbol == "GIFT_NIFTY")
+            {
+                return "GIFT NIFTY"; // Zerodha symbol has space, not underscore
             }
 
             string[] collection = symbol.Split('_');
@@ -785,6 +1212,19 @@ namespace QANinjaAdapter.Services.Instruments
                             // Just use this existing trading hours
                             tradingHoursProperty.SetValue(masterInstrument2, existingInstrument.TradingHours);
                             Logger.Info("Using existing trading hours template");
+
+                            // Must save the instrument before returning
+                            masterInstrument2.DbAdd(false);
+                            new Instrument()
+                            {
+                                Exchange = Exchange.Default,
+                                MasterInstrument = masterInstrument2
+                            }.DbAdd();
+
+                            if (!DataContext.Instance.SymbolNames.ContainsKey(validName))
+                                DataContext.Instance.SymbolNames.Add(validName, instrument.Symbol);
+
+                            ntSymbolName = validName;
                             return true;
                         }
                     }
@@ -800,9 +1240,22 @@ namespace QANinjaAdapter.Services.Instruments
                         {
                             tradingHoursNameProperty.SetValue(masterInstrument2, tradingHoursName);
                             Logger.Info($"Set TradingHoursName to {tradingHoursName}");
+
+                            // Must save the instrument before returning
+                            masterInstrument2.DbAdd(false);
+                            new Instrument()
+                            {
+                                Exchange = Exchange.Default,
+                                MasterInstrument = masterInstrument2
+                            }.DbAdd();
+
+                            if (!DataContext.Instance.SymbolNames.ContainsKey(validName))
+                                DataContext.Instance.SymbolNames.Add(validName, instrument.Symbol);
+
+                            ntSymbolName = validName;
                             return true;
                         }
-                        
+
                         return false;
                     }
                     
@@ -929,22 +1382,5 @@ namespace QANinjaAdapter.Services.Instruments
             return null;
         }
 
-        /// <summary>
-        /// Class to deserialize the JSON data
-        /// </summary>
-        private class MappedInstrument
-        {
-            public string symbol { get; set; }
-            public string underlying { get; set; }
-            public DateTime? expiry { get; set; }
-            public double? strike { get; set; }
-            public string option_type { get; set; }
-            public string segment { get; set; }
-            public long instrument_token { get; set; }
-            public int exchange_token { get; set; }
-            public string zerodhaSymbol { get; set; }
-            public double tick_size { get; set; }
-            public int lot_size { get; set; }
-        }
     }
 }

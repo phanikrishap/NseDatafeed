@@ -240,7 +240,7 @@ namespace QANinjaAdapter.Services.Configuration
         /// </summary>
         /// <param name="brokerConfig">The broker configuration object</param>
         /// <returns>True if token was generated successfully</returns>
-        public async Task<bool> TryAutoGenerateTokenAsync(JObject brokerConfig)
+        public Task<bool> TryAutoGenerateTokenAsync(JObject brokerConfig)
         {
             try
             {
@@ -249,7 +249,7 @@ namespace QANinjaAdapter.Services.Configuration
                 if (!autoLogin)
                 {
                     Logger.Info("AutoLogin is disabled for this broker.");
-                    return false;
+                    return Task.FromResult(false);
                 }
 
                 // Get credentials for token generation
@@ -266,7 +266,7 @@ namespace QANinjaAdapter.Services.Configuration
                     string.IsNullOrEmpty(totpSecret))
                 {
                     Logger.Info("Missing credentials for auto token generation. Please configure UserId, Password, and TotpSecret.");
-                    return false;
+                    return Task.FromResult(false);
                 }
 
                 Logger.Info($"Starting automatic token generation for user: {userId}");
@@ -306,7 +306,7 @@ namespace QANinjaAdapter.Services.Configuration
                 NinjaTrader.NinjaScript.NinjaScript.Log(
                     $"[QAAdapter] Zerodha token generated successfully! Expires at midnight IST.",
                     NinjaTrader.Cbi.LogLevel.Information);
-                return true;
+                return Task.FromResult(true);
             }
             catch (Exception ex)
             {
@@ -314,7 +314,7 @@ namespace QANinjaAdapter.Services.Configuration
                 NinjaTrader.NinjaScript.NinjaScript.Log(
                     $"[QAAdapter] Auto token generation FAILED: {ex.Message}",
                     NinjaTrader.Cbi.LogLevel.Error);
-                return false;
+                return Task.FromResult(false);
             }
         }
 

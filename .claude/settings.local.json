@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\QANinjaAdapter\\\\QANinjaAdapter.csproj\" /t:Build /p:Configuration=Debug /verbosity:minimal)",
+      "Bash(cmd /c:*)",
+      "Bash(powershell:*)",
+      "Bash(dir:*)",
+      "Bash(where:*)",
+      "Bash(sqlite3:*)",
+      "Bash(findstr:*)",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\TokenGeneratorTest\\\\TokenGeneratorTest.csproj\" /t:Build /p:Configuration=Debug /verbosity:minimal)",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" QANinjaAdapter.csproj /t:Build /p:Configuration=Debug /verbosity:minimal)",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" QANinjaAdapter.csproj -t:Build -p:Configuration=Debug -verbosity:minimal)",
+      "Bash(copy /Y \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\QANinjaAdapter\\\\bin\\\\Debug\\\\QANinjaAdapter.dll\" \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\bin\\\\Custom\\\\QANinjaAdapter.dll\")",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" QANinjaAdapter.csproj -t:Rebuild -p:Configuration=Debug -verbosity:minimal)",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"QANinjaAdapter.csproj\" -t:Build -p:Configuration=Debug -verbosity:minimal)"
+    ]
+  }
+}

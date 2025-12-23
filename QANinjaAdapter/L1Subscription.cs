@@ -17,5 +17,7 @@ public class L1Subscription
   public SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>> L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>();
 
     public int PreviousVolume { get; set; }
+    public double PreviousPrice { get; set; }
+    public bool IsIndex { get; set; }  // Cached flag for indices (GIFT NIFTY, NIFTY 50, SENSEX) - no volume, price updates only
     public Instrument Instrument { get; set; }
 }

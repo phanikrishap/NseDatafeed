@@ -188,6 +188,8 @@
     <Compile Include="Classes\Binance\Symbols\SymbolObject.cs" />
     <Compile Include="Classes\Binance\Symbols\SymbolsRoot.cs" />
     <Compile Include="Classes\Record.cs" />
+    <Compile Include="Classes\Constants.cs" />
+    <Compile Include="Classes\WebSocketConnectionFunc.cs" />
     <Compile Include="Connector.cs" />
     <Compile Include="Models\DepthEntry.cs" />
     <Compile Include="Models\MappedInstrument.cs" />
@@ -219,6 +221,10 @@
     <Compile Include="Services\MarketData\OptimizedTickProcessor.cs" />
     <Compile Include="Services\MarketData\PerformanceMonitor.cs" />
     <Compile Include="Services\Auth\ZerodhaTokenGenerator.cs" />
+    <Compile Include="Services\Analysis\MarketAnalyzerLogic.cs" />
+    <Compile Include="Services\Analysis\MarketAnalyzerService.cs" />
+    <Compile Include="Services\Analysis\SubscriptionManager.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerWindow.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />
   </ItemGroup>

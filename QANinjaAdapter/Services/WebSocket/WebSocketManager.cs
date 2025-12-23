@@ -195,8 +195,9 @@ namespace QANinjaAdapter.Services.WebSocket
         /// <param name="expectedToken">The expected instrument token</param>
         /// <param name="nativeSymbolName">The native symbol name</param>
         /// <param name="isMcxSegment">True if the instrument belongs to MCX segment, false otherwise</param>
+        /// <param name="isIndex">True if this is an index (NIFTY 50, SENSEX, etc.) which has a different packet structure</param>
         /// <returns>A ZerodhaTickData object containing all market data fields</returns>
-        public Models.MarketData.ZerodhaTickData ParseBinaryMessage(byte[] data, int expectedToken, string nativeSymbolName, bool isMcxSegment)
+        public Models.MarketData.ZerodhaTickData ParseBinaryMessage(byte[] data, int expectedToken, string nativeSymbolName, bool isMcxSegment, bool isIndex = false)
         {
             if (data.Length < 2)
             {
@@ -235,10 +236,13 @@ namespace QANinjaAdapter.Services.WebSocket
                     if (offset + packetLength > data.Length)
                         break;
 
-                    // Only process packets with valid length
+                    // Determine packet mode based on length
+                    // Index packets have different lengths: 8 (LTP), 28 (Quote), 32 (Full)
+                    // Tradeable instrument packets: 8 (LTP), 44 (Quote), 184 (Full)
                     bool isLtpMode = packetLength == 8;
-                    bool isQuoteMode = packetLength == 44;
-                    bool isFullMode = packetLength == 184;
+                    bool isQuoteMode = isIndex ? (packetLength == 28) : (packetLength == 44);
+                    bool isFullMode = isIndex ? (packetLength == 32) : (packetLength == 184);
+                    bool isIndexPacket = isIndex && (packetLength == 8 || packetLength == 28 || packetLength == 32);
 
                     // If it's an MCX segment, override isFullMode to false if it was true.
                     if (isMcxSegment && isFullMode)
@@ -246,7 +250,12 @@ namespace QANinjaAdapter.Services.WebSocket
                         isFullMode = false; // Force to not parse beyond quote mode for MCX
                     }
 
-                    if (!isLtpMode && !isQuoteMode && !(packetLength == 184))
+                    // Validate packet length based on instrument type
+                    bool isValidPacket = isLtpMode || isQuoteMode || isFullMode ||
+                                        (!isIndex && packetLength == 184) ||
+                                        isIndexPacket;
+
+                    if (!isValidPacket)
                     {
                         offset += packetLength; // Skip this packet
                         continue;
@@ -292,17 +301,64 @@ namespace QANinjaAdapter.Services.WebSocket
                     // Parse the packet based on mode
                     if (isLtpMode)
                     {
-                        // LTP mode - only last traded price
+                        // LTP mode - only last traded price (same for index and tradeable)
                         if (offset + 4 + 4 <= data.Length)
                         {
                             int lastTradedPrice = ReadInt32BE(data, offset + 4);
                             tickData.LastTradePrice = lastTradedPrice / 100.0;
                         }
-                        
+
                         // Log LTP mode parsing (disabled - too verbose)
                         // NinjaTrader.NinjaScript.NinjaScript.Log(
                         //     $"[PARSE-LTP] {nativeSymbolName}: LTP={tickData.LastTradePrice}, Time={tickData.LastTradeTime:HH:mm:ss.fff}",
                         //     NinjaTrader.Cbi.LogLevel.Information);
+                    }
+                    else if (isIndex && (isQuoteMode || isFullMode))
+                    {
+                        // INDEX packet structure (Quote=28 bytes, Full=32 bytes):
+                        // 0-4:   Token
+                        // 4-8:   Last traded price
+                        // 8-12:  High
+                        // 12-16: Low
+                        // 16-20: Open
+                        // 20-24: Close
+                        // 24-28: Price change (Quote mode ends here)
+                        // 28-32: Exchange timestamp (Full mode)
+
+                        tickData.IsIndex = true;
+
+                        if (offset + 4 + 4 <= data.Length)
+                        {
+                            int lastTradedPrice = ReadInt32BE(data, offset + 4);
+                            tickData.LastTradePrice = lastTradedPrice / 100.0;
+                        }
+
+                        if (offset + 8 + 4 <= data.Length)
+                            tickData.High = ReadInt32BE(data, offset + 8) / 100.0;
+
+                        if (offset + 12 + 4 <= data.Length)
+                            tickData.Low = ReadInt32BE(data, offset + 12) / 100.0;
+
+                        if (offset + 16 + 4 <= data.Length)
+                            tickData.Open = ReadInt32BE(data, offset + 16) / 100.0;
+
+                        if (offset + 20 + 4 <= data.Length)
+                            tickData.Close = ReadInt32BE(data, offset + 20) / 100.0;
+
+                        // Price change at offset 24 (not used, can be calculated from LTP and Close)
+
+                        // Exchange timestamp for Full mode
+                        if (isFullMode && offset + 28 + 4 <= data.Length)
+                        {
+                            int exchangeTimestamp = ReadInt32BE(data, offset + 28);
+                            if (exchangeTimestamp > 0)
+                            {
+                                tickData.ExchangeTimestamp = UnixSecondsToLocalTime(exchangeTimestamp);
+                                tickData.LastTradeTime = tickData.ExchangeTimestamp;
+                            }
+                        }
+
+                        Logger.Info($"[PARSE-INDEX] {nativeSymbolName}: LTP={tickData.LastTradePrice}, Open={tickData.Open}, High={tickData.High}, Low={tickData.Low}, Close={tickData.Close}");
                     }
                     else if (isQuoteMode || isFullMode || (isMcxSegment && packetLength == 184))
                     {

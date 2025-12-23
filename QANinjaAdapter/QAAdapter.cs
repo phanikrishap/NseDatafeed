@@ -5,6 +5,7 @@ using QANinjaAdapter.Classes;
 using QANinjaAdapter.Controls;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Models.MarketData;
+using QANinjaAdapter.Services.MarketData;
 using QANinjaAdapter.ViewModels;
 using NinjaTrader.Adapter;
 using NinjaTrader.Cbi;
@@ -33,12 +34,12 @@ namespace QANinjaAdapter
         private QAConnectorOptions _options;
         private readonly ConcurrentDictionary<string, L1Subscription> _l1Subscriptions = new ConcurrentDictionary<string, L1Subscription>();
         private readonly ConcurrentDictionary<string, L2Subscription> _l2Subscriptions = new ConcurrentDictionary<string, L2Subscription>();
-        private readonly List<string> _marketLiveDataSymbols = new List<string>();
-        private readonly List<string> _marketDepthDataSymbols = new List<string>();
+        private readonly HashSet<string> _marketLiveDataSymbols = new HashSet<string>();
+        private readonly HashSet<string> _marketDepthDataSymbols = new HashSet<string>();
         private static readonly object _lockLiveSymbol = new object();
         private static readonly object _lockDepthSymbol = new object();
 
-        public static void LogMe(string text) => NinjaTrader.NinjaScript.NinjaScript.Log(text, NinjaTrader.Cbi.LogLevel.Warning);
+        // Removed LogMe: Use Logger.Info or NinjaTrader native logging directly.
 
         public void Connect(IConnection connection)
         {
@@ -98,7 +99,7 @@ namespace QANinjaAdapter
                     this.SetInstruments();
                     this._ninjaConnection.ConnectionStatusCallback(ConnectionStatus.Connected, ConnectionStatus.Connected, ErrorCode.NoError, "");
 
-                    await Connector.Instance.RegisterBinanceSymbols();
+                    await Connector.Instance.RegisterInstruments();
                 }
                 else
                     this._ninjaConnection.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.LogOnFailed, "Unable to connect to provider Zerodha.");
@@ -115,10 +116,10 @@ namespace QANinjaAdapter
                 (x.InstrumentType == InstrumentType.Stock ||
                  x.InstrumentType == InstrumentType.Future ||
                  x.InstrumentType == InstrumentType.Option) &&
-                !string.IsNullOrEmpty(((IEnumerable<string>)x.ProviderNames).ElementAtOrDefault<string>(1019)))))
+                !string.IsNullOrEmpty(((IEnumerable<string>)x.ProviderNames).ElementAtOrDefault<string>(Constants.ProviderId)))))
             {
                 if (!DataContext.Instance.SymbolNames.ContainsKey(masterInstrument.Name))
-                    DataContext.Instance.SymbolNames.Add(masterInstrument.Name, masterInstrument.ProviderNames[1019]);
+                    DataContext.Instance.SymbolNames.Add(masterInstrument.Name, masterInstrument.ProviderNames[Constants.ProviderId]);
             }
         }
 
@@ -146,21 +147,11 @@ namespace QANinjaAdapter
             this._ninjaConnection.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.NoError, string.Empty);
         }
 
-        public void ResolveInstrument(
-            Instrument instrument,
-            Action<Instrument, ErrorCode, string> callback)
-        {
-        }
+        public void ResolveInstrument(Instrument instrument, Action<Instrument, ErrorCode, string> callback) { }
 
-        public void SubscribeFundamentalData(
-            Instrument instrument,
-            Action<FundamentalDataType, object> callback)
-        {
-        }
+        public void SubscribeFundamentalData(Instrument instrument, Action<FundamentalDataType, object> callback) { }
 
-        public void UnsubscribeFundamentalData(Instrument instrument)
-        {
-        }
+        public void UnsubscribeFundamentalData(Instrument instrument) { }
 
         public void SubscribeMarketData(
     Instrument instrument,
@@ -188,11 +179,15 @@ namespace QANinjaAdapter
 
                 if (!this._l1Subscriptions.TryGetValue(nativeSymbolName, out l1Subscription))
                 {
+                    // Check if this is an index symbol (no volume traded, price updates only)
+                    bool isIndex = IsIndexSymbol(nativeSymbolName);
+
                     // Create a new subscription
                     l1Subscription = new L1Subscription
                     {
                         Instrument = instrument,
-                        L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>()
+                        L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>(),
+                        IsIndex = isIndex
                     };
 
                     // Add the callback
@@ -200,6 +195,9 @@ namespace QANinjaAdapter
 
                     // Add to dictionary
                     this._l1Subscriptions.TryAdd(nativeSymbolName, l1Subscription);
+
+                    if (isIndex)
+                        Logger.Info($"QAAdapter.SubscribeMarketData: Subscribed to INDEX symbol '{nativeSymbolName}' (price updates without volume)");
                 }
                 else
                 {
@@ -219,6 +217,9 @@ namespace QANinjaAdapter
                         l1Subscription.L1Callbacks.Add(instrument, callback);
                     }
                 }
+
+                // Update OptimizedTickProcessor cache immediately so new subscriptions receive ticks
+                MarketDataService.Instance.UpdateProcessorSubscriptionCache(this._l1Subscriptions);
 
                 // Now handle the websocket subscription
                 lock (QAAdapter._lockLiveSymbol)
@@ -390,23 +391,34 @@ namespace QANinjaAdapter
                 DateTime now = DateTime.Now;
                 try
                 {
-                    var tz = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-                    now = TimeZoneInfo.ConvertTime(now, tz);
+                    now = TimeZoneInfo.ConvertTime(now, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
                 }
                 catch
                 {
                     // If timezone conversion fails, use local time
                 }
 
+                // For indices (cached flag), check if price changed to trigger update
+                bool priceChanged = Math.Abs(lastPrice - l1Subscription.PreviousPrice) > 0.0001;
+                l1Subscription.PreviousPrice = lastPrice;
+
                 // Update all callbacks with the comprehensive market data
+                int callbackCount = l1Subscription.L1Callbacks?.Count ?? 0;
+
+                // Debug logging for index symbols to trace callback flow
+                if (l1Subscription.IsIndex)
+                    Logger.Debug($"[QAAdapter] ProcessTick({nativeSymbolName}): IsIndex=true, priceChanged={priceChanged}, volumeDelta={volumeDelta}, callbackCount={callbackCount}, lastPrice={lastPrice}");
+
                 foreach (var cb in l1Subscription.L1Callbacks.Values)
                 {
                     try
                     {
-                        // Update Last price and volume (only when there's actual volume change)
-                        if (volumeDelta > 0)
+                        // Update Last price: for regular instruments when volume changes, for indices when price changes
+                        if (volumeDelta > 0 || (l1Subscription.IsIndex && priceChanged))
                         {
-                            cb(MarketDataType.Last, lastPrice, volumeDelta, now, 0L);
+                            if (l1Subscription.IsIndex)
+                                Logger.Debug($"[QAAdapter] ProcessTick({nativeSymbolName}): Invoking callback with Last={lastPrice}");
+                            cb(MarketDataType.Last, lastPrice, Math.Max(1, volumeDelta), now, 0L);
 
                             if (tickData.BuyPrice > 0)
                             {
@@ -455,25 +467,15 @@ namespace QANinjaAdapter
         }
 
         // Trading methods - implement these if Zerodha trading is needed
-        public void Cancel(NinjaTrader.Cbi.Order[] orders)
-        {
-        }
+        public void Cancel(NinjaTrader.Cbi.Order[] orders) { }
 
-        public void Change(NinjaTrader.Cbi.Order[] orders)
-        {
-        }
+        public void Change(NinjaTrader.Cbi.Order[] orders) { }
 
-        public void Submit(NinjaTrader.Cbi.Order[] orders)
-        {
-        }
+        public void Submit(NinjaTrader.Cbi.Order[] orders) { }
 
-        public void SubscribeAccount(NinjaTrader.Cbi.Account account)
-        {
-        }
+        public void SubscribeAccount(NinjaTrader.Cbi.Account account) { }
 
-        public void UnsubscribeAccount(NinjaTrader.Cbi.Account account)
-        {
-        }
+        public void UnsubscribeAccount(NinjaTrader.Cbi.Account account) { }
 
         private int HowManyBarsFromDays(DateTime startDate) => (DateTime.Now - startDate).Days;
 
@@ -613,24 +615,21 @@ namespace QANinjaAdapter
                                 {
                                     long volume = (long)record.Volume;
                                   
-                                    TimeZoneInfo indianZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-                                    DateTime displayTime = TimeZoneInfo.ConvertTime(record.TimeStamp, indianZone);
+                                    TimeZoneInfo indianZone = TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId);
+                                     DateTime displayTime = TimeZoneInfo.ConvertTime(record.TimeStamp, indianZone);
 
-                                    //Check both date and time constraints
-                                    if (displayTime >= barsRequest.Bars.FromDate)
-                                    {
-                                        //Add time of day filter for 9:30 AM to 3:30 PM
-
-                                       TimeSpan timeOfDay = displayTime.TimeOfDay;
-                                       TimeSpan marketOpen = new TimeSpan(9, 15, 0);   // 9:30 AM
-                                        TimeSpan marketClose = new TimeSpan(15, 30, 0); // 3:30 PM
+                                     //Check both date and time constraints
+                                     if (displayTime >= barsRequest.Bars.FromDate)
+                                     {
+                                         //Add time of day filter for market hours
+                                        TimeSpan timeOfDay = displayTime.TimeOfDay;
 
                                         //Only add bars during market hours
-                                        if (timeOfDay >= marketOpen && timeOfDay <= marketClose)
-                                            {
-                                                barsRequest.Bars.Add(open, high, low, close, displayTime, volume, double.MinValue, double.MinValue);
+                                        if (timeOfDay >= Constants.MarketOpenTime && timeOfDay <= Constants.MarketCloseTime)
+                                        {
+                                            barsRequest.Bars.Add(open, high, low, close, displayTime, volume, double.MinValue, double.MinValue);
                                         }
-                                    }
+                                     }
 
                                 }
                             }
@@ -691,6 +690,28 @@ namespace QANinjaAdapter
                    instrument.Exchange == Exchange.Nse || instrument.Exchange == Exchange.Bse;
         }
 
+        /// <summary>
+        /// Checks if a symbol is an index (no volume traded, price updates only).
+        /// Index symbols include GIFT NIFTY, NIFTY 50, SENSEX, NIFTY BANK, etc.
+        /// </summary>
+        private bool IsIndexSymbol(string symbolName)
+        {
+            if (string.IsNullOrEmpty(symbolName))
+                return false;
+
+            // Known index symbols that have no volume (they're calculated indices)
+            string upperSymbol = symbolName.ToUpperInvariant();
+            return upperSymbol == "GIFT_NIFTY" ||
+                   upperSymbol == "GIFT NIFTY" ||
+                   upperSymbol == "NIFTY 50" ||
+                   upperSymbol == "NIFTY" ||  // NT symbol for NIFTY 50 index
+                   upperSymbol == "SENSEX" ||
+                   upperSymbol == "NIFTY BANK" ||
+                   upperSymbol == "BANKNIFTY" ||
+                   upperSymbol == "FINNIFTY" ||
+                   upperSymbol == "MIDCPNIFTY";
+        }
+
         private NinjaTrader.Gui.Chart.Chart FindChartControl(string instrument)
         {
             foreach (Window window in Globals.AllWindows)
@@ -725,32 +746,23 @@ namespace QANinjaAdapter
             }
         }
 
-        public void OnMarketDepthReceived(Quote quote)
-        {
-        }
+        public void OnMarketDepthReceived(Quote quote) { }
 
-        public void RequestHotlistNames(Action<string[], ErrorCode, string> callback)
-        {
-        }
+        public void RequestHotlistNames(Action<string[], ErrorCode, string> callback) { }
 
-        public void SubscribeHotlist(Hotlist hotlist, Action callback)
-        {
-        }
+        public void SubscribeHotlist(Hotlist hotlist, Action callback) { }
 
-        public void UnsubscribeHotlist(Hotlist hotlist)
-        {
-        }
+        public void UnsubscribeHotlist(Hotlist hotlist) { }
 
-        public void SubscribeNews()
-        {
-        }
+        public void SubscribeNews() { }
 
-        public void UnsubscribeNews()
-        {
-        }
+        public void UnsubscribeNews() { }
 
         public void Dispose()
         {
+            this.Disconnect();
+            this._l1Subscriptions.Clear();
+            this._l2Subscriptions.Clear();
         }
 
         private class BarsRequest

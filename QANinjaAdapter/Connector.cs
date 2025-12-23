@@ -36,10 +36,8 @@ namespace QANinjaAdapter
     public class Connector : INotifyPropertyChanged
     {
         private bool _connected;
-        private bool _isClearStocks;
         private static BrokerClient _client;
         private static Connector _instance;
-        private ControlCenter _controlCenter;
 
         private readonly ConfigurationManager _configManager;
         private readonly ZerodhaClient _zerodhaClient;
@@ -148,38 +146,40 @@ namespace QANinjaAdapter
                     "Configuration Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
 
-            // Ensure valid access token (auto-generate if needed)
-            try
+            // Ensure valid access token
+            // In a better architecture, this would be triggered by a specific "Initialize" or "Connect" call
+            // rather than in a constructor to avoid blocking or unobserved task failures.
+            Task.Run(async () =>
             {
-                Logger.Info("Checking access token validity...");
-
-                // Run async token validation on a thread pool thread to avoid deadlock
-                // NinjaTrader's synchronization context can cause deadlock with .Wait()
-                var tokenResult = Task.Run(async () => await _configManager.EnsureValidTokenAsync()).Result;
-
-                if (tokenResult)
+                try
                 {
-                    Logger.Info("Access token is valid.");
-                    NinjaTrader.NinjaScript.NinjaScript.Log(
-                        "[QAAdapter] Zerodha access token is valid.",
-                        NinjaTrader.Cbi.LogLevel.Information);
+                    Logger.Info("Checking access token validity...");
+                    var tokenResult = await _configManager.EnsureValidTokenAsync();
+
+                    if (tokenResult)
+                    {
+                        Logger.Info("Access token is valid.");
+                        NinjaTrader.NinjaScript.NinjaScript.Log(
+                            "[QAAdapter] Zerodha access token is valid.",
+                            NinjaTrader.Cbi.LogLevel.Information);
+                    }
+                    else
+                    {
+                        Logger.Info("Failed to obtain valid access token. Manual login may be required.");
+                        NinjaTrader.NinjaScript.NinjaScript.Log(
+                            "[QAAdapter] WARNING: Failed to obtain valid Zerodha access token. Manual login may be required.",
+                            NinjaTrader.Cbi.LogLevel.Warning);
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    Logger.Info("Failed to obtain valid access token. Manual login may be required.");
+                    var innerMessage = ex.InnerException?.Message ?? ex.Message;
+                    Logger.Error($"Token validation error: {innerMessage}");
                     NinjaTrader.NinjaScript.NinjaScript.Log(
-                        "[QAAdapter] WARNING: Failed to obtain valid Zerodha access token. Manual login may be required.",
-                        NinjaTrader.Cbi.LogLevel.Warning);
+                        $"[QAAdapter] Token validation error: {innerMessage}",
+                        NinjaTrader.Cbi.LogLevel.Error);
                 }
-            }
-            catch (Exception ex)
-            {
-                var innerMessage = ex.InnerException?.Message ?? ex.Message;
-                Logger.Info($"Token validation error: {innerMessage}");
-                NinjaTrader.NinjaScript.NinjaScript.Log(
-                    $"[QAAdapter] Token validation error: {innerMessage}",
-                    NinjaTrader.Cbi.LogLevel.Error);
-            }
+            });
         }
 
         /// <summary>
@@ -217,10 +217,10 @@ namespace QANinjaAdapter
         }
 
         /// <summary>
-        /// Registers Zerodha symbols in NinjaTrader
+        /// Registers instruments in NinjaTrader
         /// </summary>
         /// <returns>A task representing the asynchronous operation</returns>
-        public async Task RegisterBinanceSymbols()
+        public async Task RegisterInstruments()
         {
             await _instrumentManager.RegisterSymbols();
         }
@@ -339,46 +339,8 @@ namespace QANinjaAdapter
                 webSocketConnectionFunc);
         }
 
-        /// <summary>
-        /// Clears wrong stocks
-        /// </summary>
-        public void ClearWrongStocks() => this.FindCCControl();
-
-        /// <summary>
-        /// Finds the control center
-        /// </summary>
-        /// <returns>The chart control</returns>
-        private NinjaTrader.Gui.Chart.Chart FindCCControl()
-        {
-            foreach (Window allWindow in NinjaTrader.Core.Globals.AllWindows)
-            {
-                if (allWindow is ControlCenter controlCenter)
-                {
-                    this._controlCenter = controlCenter;
-                    this._controlCenter.GotFocus += new RoutedEventHandler(this.Cc_GotFocus);
-                }
-            }
-            return (NinjaTrader.Gui.Chart.Chart)null;
-        }
-
-        /// <summary>
-        /// Handles the control center got focus event
-        /// </summary>
-        /// <param name="sender">The sender</param>
-        /// <param name="e">The event args</param>
-        private void Cc_GotFocus(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                if (this._isClearStocks)
-                    return;
-                this.ClearStocks();
-                this._controlCenter.GotFocus -= new RoutedEventHandler(this.Cc_GotFocus);
-            }
-            catch
-            {
-            }
-        }
+        // Removed ClearWrongStocks and FindCCControl as they were based on old logic
+        // and may cause UI thread issues. Cleanup logic moved to specialized tools if needed.
 
         /// <summary>
         /// Clears stocks

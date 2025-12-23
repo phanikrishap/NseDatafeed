@@ -16,6 +16,7 @@ using QANinjaAdapter.Services.Configuration;
 using QANinjaAdapter.Services.Instruments;
 using QANinjaAdapter.Services.WebSocket;
 using QANinjaAdapter;
+using QANinjaAdapter.Classes;
 
 namespace QANinjaAdapter.Services.MarketData
 {
@@ -35,8 +36,6 @@ namespace QANinjaAdapter.Services.MarketData
         private readonly InstrumentManager _instrumentManager;
         private readonly WebSocketManager _webSocketManager;
         private readonly ConfigurationManager _configManager;
-        private readonly ConcurrentDictionary<string, L1Subscription> _l1Subscriptions;
-        private readonly ConcurrentDictionary<string, L2Subscription> _l2Subscriptions;
         private readonly ConcurrentDictionary<string, int> _lastVolumeMap = new ConcurrentDictionary<string, int>(); // Added for volumeDelta
 
         // OPTIMIZATION: Centralized tick processor for high-performance processing
@@ -97,9 +96,10 @@ namespace QANinjaAdapter.Services.MarketData
         /// </summary>
         public void UpdateProcessorSubscriptionCache(ConcurrentDictionary<string, L1Subscription> subscriptions)
         {
-            if (_useOptimizedProcessor && _tickProcessor != null)
+            if (_useOptimizedProcessor)
             {
-                _tickProcessor.UpdateSubscriptionCache(subscriptions);
+                // Use TickProcessor property to ensure it's initialized before updating cache
+                TickProcessor.UpdateSubscriptionCache(subscriptions);
             }
         }
 
@@ -238,7 +238,7 @@ namespace QANinjaAdapter.Services.MarketData
 
                     // Timestamp message receipt immediately to reduce timing errors
                     var receivedTime = DateTime.Now;
-                    DateTime now = GetIndianTime(receivedTime);
+                    DateTime now = TimeZoneInfo.ConvertTime(receivedTime, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
 
                     // Log message receipt with timestamp
                     //NinjaTrader.NinjaScript.NinjaScript.Log(
@@ -258,13 +258,16 @@ namespace QANinjaAdapter.Services.MarketData
                     string segment = _instrumentManager.GetSegmentForToken(tokenInt);
                     bool isMcxSegment = !string.IsNullOrEmpty(segment) && segment.Equals("MCX", StringComparison.OrdinalIgnoreCase);
 
+                    // Check if this is an index symbol (NIFTY 50, SENSEX, GIFT NIFTY, etc.)
+                    bool isIndex = sub.IsIndex;
+
                     // Log before parsing
                     //NinjaTrader.NinjaScript.NinjaScript.Log(
                     //    $"[WS-PARSE] Parsing binary message for {nativeSymbolName}, token: {tokenInt}, segment: {segment}",
                     //    NinjaTrader.Cbi.LogLevel.Information);
 
                     // Parse the binary message into a rich data structure
-                    var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, isMcxSegment);
+                    var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, isMcxSegment, isIndex);
                     DateTime parsedTime = DateTime.Now; // Capture time immediately after parsing
                     
                     // Log parsing result
@@ -539,13 +542,14 @@ namespace QANinjaAdapter.Services.MarketData
             {
                 // Get the instrument token
                 int iToken = WebSocketManager.ReadInt32BE(data, offset);
-                
+
                 // Get segment information for MCX check
                 string segment = _instrumentManager.GetSegmentForToken(iToken);
                 bool isMcxSegment = !string.IsNullOrEmpty(segment) && segment.Equals("MCX", StringComparison.OrdinalIgnoreCase);
-                
+
                 // Parse the binary message into a rich data structure
-                var tickData = _webSocketManager.ParseBinaryMessage(data, iToken, nativeSymbolName, isMcxSegment);
+                // Note: Market depth packets are only for tradeable instruments (not indices), so isIndex is always false here
+                var tickData = _webSocketManager.ParseBinaryMessage(data, iToken, nativeSymbolName, isMcxSegment, isIndex: false);
                 
                 if (tickData == null || !tickData.HasMarketDepth)
                 {
@@ -553,16 +557,7 @@ namespace QANinjaAdapter.Services.MarketData
                 }
 
                 // Get the current time in Indian Standard Time
-                DateTime now = DateTime.Now;
-                try
-                {
-                    var tz = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-                    now = TimeZoneInfo.ConvertTime(now, tz);
-                }
-                catch
-                {
-                    // If timezone conversion fails, use local time
-                }
+                DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
 
                 //NinjaTrader.NinjaScript.NinjaScript.Log(
                 //    $"[DEPTH-TIME] Using time {now:HH:mm:ss.fff} with Kind={now.Kind} for market depth updates",
@@ -672,15 +667,7 @@ namespace QANinjaAdapter.Services.MarketData
         /// <returns>The date time in Indian Standard Time</returns>
         private DateTime GetIndianTime(DateTime dateTime)
         {
-            try
-            {
-                var tz = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-                return TimeZoneInfo.ConvertTime(dateTime, tz);
-            }
-            catch
-            {
-                return dateTime;
-            }
+            return TimeZoneInfo.ConvertTime(dateTime, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
         }
 
         /// <summary>

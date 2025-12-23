@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using QANinjaAdapter.Models.MarketData;
+using QANinjaAdapter.Classes;
 
 namespace QANinjaAdapter.Services.MarketData
 {
@@ -41,6 +42,7 @@ namespace QANinjaAdapter.Services.MarketData
         private readonly ConcurrentDictionary<string, string> _symbolMappingCache = new ConcurrentDictionary<string, string>();
         private readonly ConcurrentDictionary<string, L1Subscription> _subscriptionCache = new ConcurrentDictionary<string, L1Subscription>();
         private readonly ConcurrentDictionary<string, List<SubscriptionCallback>> _callbackCache = new ConcurrentDictionary<string, List<SubscriptionCallback>>();
+        private readonly HashSet<string> _loggedMissedSymbols = new HashSet<string>(); // Track which symbols we've logged misses for
 
         // Object pooling to reduce GC pressure
         private readonly ConcurrentBag<TickProcessingItem> _tickItemPool = new ConcurrentBag<TickProcessingItem>();
@@ -517,6 +519,7 @@ namespace QANinjaAdapter.Services.MarketData
                 }
 
                 Log($"OptimizedTickProcessor: Updated caches - {_subscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
+                Logger.Info($"[OTP] Updated caches - {_subscriptionCache.Count} subscriptions, {_callbackCache.Count} callback entries");
 
                 // Force GC if under pressure and cache is large
                 if (_isUnderMemoryPressure && _subscriptionCache.Count > 100)
@@ -653,6 +656,12 @@ namespace QANinjaAdapter.Services.MarketData
                 // Fast subscription lookup using cache (O(1))
                 if (!_subscriptionCache.TryGetValue(ntSymbolName, out var subscription))
                 {
+                    // Log first miss for each symbol to help debug
+                    if (_subscriptionCache.Count > 0 && !_loggedMissedSymbols.Contains(ntSymbolName))
+                    {
+                        _loggedMissedSymbols.Add(ntSymbolName);
+                        Logger.Info($"[OTP] No subscription for '{ntSymbolName}'. Cache has: {string.Join(", ", _subscriptionCache.Keys.Take(10))}");
+                    }
                     return; // No subscription found
                 }
 
@@ -665,8 +674,14 @@ namespace QANinjaAdapter.Services.MarketData
                 // Calculate volume delta efficiently
                 int volumeDelta = CalculateVolumeDelta(subscription, item.TickData);
 
-                // Process all callbacks for this subscription
-                ProcessCallbacks(callbacks, item.TickData, volumeDelta);
+                // Debug logging for index symbols
+                if (subscription.IsIndex)
+                {
+                    Logger.Info($"[OTP] ProcessSingleTick INDEX: symbol={ntSymbolName}, price={item.TickData.LastTradePrice}, volumeDelta={volumeDelta}, callbacks={callbacks?.Count}");
+                }
+
+                // Process all callbacks for this subscription (pass subscription for IsIndex handling)
+                ProcessCallbacks(callbacks, item.TickData, volumeDelta, subscription);
 
                 // Record successful processing
                 stopwatch.Stop();
@@ -718,7 +733,7 @@ namespace QANinjaAdapter.Services.MarketData
                 // Handle UTC DateTime - convert to IST
                 if (dateTime.Kind == DateTimeKind.Utc)
                 {
-                    TimeZoneInfo istTimeZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
+                    TimeZoneInfo istTimeZone = TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId);
                     var istTime = TimeZoneInfo.ConvertTimeFromUtc(dateTime, istTimeZone);
                     return new DateTime(istTime.Year, istTime.Month, istTime.Day,
                                       istTime.Hour, istTime.Minute, istTime.Second,
@@ -743,8 +758,21 @@ namespace QANinjaAdapter.Services.MarketData
         /// <summary>
         /// Process callbacks for the subscription with performance tracking
         /// </summary>
-        private void ProcessCallbacks(List<SubscriptionCallback> callbacks, ZerodhaTickData tickData, int volumeDelta)
+        private void ProcessCallbacks(List<SubscriptionCallback> callbacks, ZerodhaTickData tickData, int volumeDelta, L1Subscription subscription)
         {
+            // For indices (no volume), check if price changed
+            bool isIndex = subscription?.IsIndex ?? false;
+            double lastPrice = tickData.LastTradePrice;
+            double prevPrice = subscription?.PreviousPrice ?? 0;
+            bool priceChanged = isIndex && Math.Abs(lastPrice - prevPrice) > 0.0001;
+
+            // Debug logging for indices
+            if (isIndex)
+            {
+                Logger.Info($"[OTP] ProcessCallbacks INDEX: lastPrice={lastPrice}, prevPrice={prevPrice}, priceChanged={priceChanged}, volumeDelta={volumeDelta}, callbackCount={callbacks?.Count}");
+                subscription.PreviousPrice = lastPrice;
+            }
+
             foreach (var callbackInfo in callbacks)
             {
                 try
@@ -767,29 +795,30 @@ namespace QANinjaAdapter.Services.MarketData
                     var callback = callbackInfo.Callback;
 
                     // Get current time in IST
-                    DateTime now = DateTime.Now;
-                    try
-                    {
-                        var tz = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-                        now = TimeZoneInfo.ConvertTime(now, tz);
-                    }
-                    catch
-                    {
-                        // Use local time if timezone conversion fails
-                    }
+                    DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
 
                     // Process last trade with timing
-                    if (tickData.LastTradePrice > 0 && volumeDelta > 0)
+                    // For indices: fire callback when price changes (no volume requirement)
+                    // For regular instruments: fire callback when volume changes
+                    bool shouldFireCallback = (volumeDelta > 0) || (isIndex && priceChanged);
+
+                    // Debug logging for indices
+                    if (isIndex)
                     {
-                        double lastPrice = instrument.MasterInstrument.RoundToTickSize(tickData.LastTradePrice);
+                        Logger.Info($"[OTP] INDEX callback check: shouldFire={shouldFireCallback}, lastPrice={tickData.LastTradePrice}, volumeDelta={volumeDelta}, isIndex={isIndex}, priceChanged={priceChanged}");
+                    }
+
+                    if (tickData.LastTradePrice > 0 && shouldFireCallback)
+                    {
+                        double roundedPrice = instrument.MasterInstrument.RoundToTickSize(tickData.LastTradePrice);
 
                         var callbackTimer = Stopwatch.StartNew();
-                        callback(MarketDataType.Last, lastPrice, volumeDelta, now, 0L);
+                        callback(MarketDataType.Last, roundedPrice, Math.Max(1, volumeDelta), now, 0L);
                         callbackTimer.Stop();
 
                         TrackCallbackTiming(callbackTimer.ElapsedMilliseconds);
 
-                        // Process bid/ask only when there's a trade
+                        // Process bid/ask only when there's a trade (or price change for indices)
                         if (tickData.BuyPrice > 0)
                         {
                             double bidPrice = instrument.MasterInstrument.RoundToTickSize(tickData.BuyPrice);

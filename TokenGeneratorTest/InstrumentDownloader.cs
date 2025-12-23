@@ -285,10 +285,10 @@ namespace TokenGeneratorTest
             SaveToSqlite(instruments);
             Console.WriteLine($"Successfully saved {instruments.Count} instruments to SQLite");
 
-            // Save only custom mappings to JSON file (NIFTY_I, etc.)
+            // Save custom mappings to JSON file (indicator symbols + continuous futures)
             var customMappings = new List<MappedInstrument>();
 
-            // Add NIFTY_I mapping if found
+            // Add NIFTY_I mapping if found (continuous futures)
             if (currentMonthNiftyFut != null)
             {
                 var niftyIMapping = new MappedInstrument
@@ -311,6 +311,12 @@ namespace TokenGeneratorTest
                 customMappings.Add(niftyIMapping);
                 Console.WriteLine($"Added NIFTY_I mapping to {currentMonthNiftyFut.zerodhaSymbol} (expiry: {currentMonthNiftyFut.expiry:yyyy-MM-dd})");
             }
+
+            // Add indicator symbols from INDICES segment
+            AddIndicatorMapping(instruments, customMappings, "GIFT_NIFTY", "GIFT NIFTY", "NSEIX", "INDICES");
+            AddIndicatorMapping(instruments, customMappings, "NIFTY", "NIFTY 50", "NSE", "INDICES");
+            AddIndicatorMapping(instruments, customMappings, "SENSEX", "SENSEX", "BSE", "INDICES");
+            AddIndicatorMapping(instruments, customMappings, "BANKNIFTY", "NIFTY BANK", "NSE", "INDICES");
 
             // Save custom mappings to JSON
             Console.WriteLine($"Saving {customMappings.Count} custom mappings to JSON: {_jsonOutputPath}");
@@ -492,6 +498,45 @@ namespace TokenGeneratorTest
             fields.Add(currentField);
 
             return fields.ToArray();
+        }
+
+        /// <summary>
+        /// Adds an indicator symbol mapping to the custom mappings list
+        /// </summary>
+        private void AddIndicatorMapping(List<MappedInstrument> allInstruments, List<MappedInstrument> customMappings,
+            string ntSymbol, string zerodhaSymbol, string exchange, string segment)
+        {
+            var indicator = allInstruments.Find(i =>
+                i.symbol.Equals(zerodhaSymbol, StringComparison.OrdinalIgnoreCase) &&
+                i.exchange.Equals(exchange, StringComparison.OrdinalIgnoreCase) &&
+                i.segment.Equals(segment, StringComparison.OrdinalIgnoreCase));
+
+            if (indicator != null)
+            {
+                var mapping = new MappedInstrument
+                {
+                    symbol = ntSymbol,
+                    zerodhaSymbol = indicator.zerodhaSymbol,
+                    underlying = indicator.underlying,
+                    expiry = null,
+                    strike = null,
+                    option_type = null,
+                    segment = indicator.segment,
+                    instrument_token = indicator.instrument_token,
+                    exchange_token = indicator.exchange_token,
+                    tick_size = indicator.tick_size,
+                    lot_size = indicator.lot_size,
+                    name = indicator.name,
+                    exchange = indicator.exchange,
+                    instrument_type = indicator.instrument_type
+                };
+                customMappings.Add(mapping);
+                Console.WriteLine($"Added {ntSymbol} mapping -> {zerodhaSymbol} (token: {indicator.instrument_token}, exchange: {exchange})");
+            }
+            else
+            {
+                Console.WriteLine($"WARNING: Could not find indicator {zerodhaSymbol} in {exchange}/{segment}");
+            }
         }
 
         private string DetermineUnderlying(string tradingSymbol, string instrumentType, string exchange)
