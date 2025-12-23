@@ -221,6 +221,7 @@
     <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerWindow.cs" />
     <Compile Include="AddOns\MarketAnalyzer\OptionChainWindow.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
+    <Compile Include="Services\WebSocket\SharedWebSocketService.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />
     <Compile Include="SyntheticInstruments\Tick.cs" />
     <Compile Include="SyntheticInstruments\StraddleDefinition.cs" />

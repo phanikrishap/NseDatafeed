@@ -1,21 +1,28 @@
 using System;
-using System.Buffers.Binary;
 
 namespace QABrokerAPI.Zerodha.Utility
 {
     /// <summary>
-    /// Utility for reading Zerodha binary packets using big-endian format
+    /// Utility for reading Zerodha binary packets using big-endian format.
+    /// Uses manual byte manipulation to avoid System.Buffers.Binary dependency
+    /// which causes assembly loading issues in NinjaTrader.
     /// </summary>
     public static class ZerodhaBinaryReader
     {
+        /// <summary>
+        /// Reads a 16-bit integer in big-endian format
+        /// </summary>
         public static short ReadInt16BE(byte[] buffer, int offset)
         {
-            return BinaryPrimitives.ReadInt16BigEndian(buffer.AsSpan(offset));
+            return (short)((buffer[offset] << 8) | buffer[offset + 1]);
         }
 
+        /// <summary>
+        /// Reads a 32-bit integer in big-endian format
+        /// </summary>
         public static int ReadInt32BE(byte[] buffer, int offset)
         {
-            return BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(offset));
+            return (buffer[offset] << 24) | (buffer[offset + 1] << 16) | (buffer[offset + 2] << 8) | buffer[offset + 3];
         }
 
         /// <summary>

@@ -357,6 +357,10 @@ namespace QANinjaAdapter.Services.MarketData
         }
 
 
+        // Track symbols with uninitialized instruments for retry
+        private readonly ConcurrentDictionary<string, DateTime> _uninitializedSymbols = new ConcurrentDictionary<string, DateTime>();
+        private const int MAX_UNINIT_RETRY_SECONDS = 30;
+
         /// <summary>
         /// Updates subscription cache (thread-safe)
         /// </summary>
@@ -373,6 +377,7 @@ namespace QANinjaAdapter.Services.MarketData
                 // Limit cache size under memory pressure
                 int maxCacheSize = _isUnderMemoryPressure ? 500 : 2000;
                 int itemsProcessed = 0;
+                int skippedUninitializedCount = 0;
 
                 foreach (var kvp in subscriptions)
                 {
@@ -385,45 +390,87 @@ namespace QANinjaAdapter.Services.MarketData
                     _subscriptionCache[kvp.Key] = kvp.Value;
 
                     // Pre-build callback list for O(1) retrieval during tick processing
+                    // RACE CONDITION FIX: Only add callbacks for fully initialized instruments
                     var callbacks = new List<SubscriptionCallback>();
                     foreach (var callbackPair in kvp.Value.L1Callbacks)
                     {
+                        var instrument = callbackPair.Key;
+
+                        // Check if NinjaTrader instrument is fully initialized
+                        if (instrument == null || instrument.MasterInstrument == null)
+                        {
+                            skippedUninitializedCount++;
+
+                            // Track for retry later
+                            if (!_uninitializedSymbols.ContainsKey(kvp.Key))
+                            {
+                                _uninitializedSymbols[kvp.Key] = DateTime.UtcNow;
+                                Logger.Warn($"[OTP] Skipping uninitialized instrument for {kvp.Key} - will retry later");
+                            }
+                            continue;
+                        }
+
+                        // Instrument is ready, add to callbacks
                         callbacks.Add(new SubscriptionCallback
                         {
-                            Instrument = callbackPair.Key,
+                            Instrument = instrument,
                             Callback = callbackPair.Value
                         });
+
+                        // Remove from uninitialized tracking if it was there
+                        _uninitializedSymbols.TryRemove(kvp.Key, out _);
                     }
-                    _callbackCache[kvp.Key] = callbacks;
+
+                    if (callbacks.Count > 0)
+                    {
+                        _callbackCache[kvp.Key] = callbacks;
+                    }
                     itemsProcessed++;
-            }
+                }
 
-            Log($"OptimizedTickProcessor: Updated caches - {_subscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
-            Logger.Info($"[OTP] Updated caches - {_subscriptionCache.Count} subscriptions, {_callbackCache.Count} callback entries");
+                // Clean up old uninitialized entries (prevent memory leak)
+                var now = DateTime.UtcNow;
+                var expiredKeys = _uninitializedSymbols
+                    .Where(kvp => (now - kvp.Value).TotalSeconds > MAX_UNINIT_RETRY_SECONDS)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+                foreach (var key in expiredKeys)
+                {
+                    _uninitializedSymbols.TryRemove(key, out _);
+                    Logger.Warn($"[OTP] Gave up waiting for instrument initialization: {key}");
+                }
 
-            // Force GC if under pressure and cache is large
-            if (_isUnderMemoryPressure && _subscriptionCache.Count > 100)
-            {
-                GC.Collect(0, GCCollectionMode.Optimized);
+                if (skippedUninitializedCount > 0)
+                {
+                    Logger.Warn($"[OTP] Skipped {skippedUninitializedCount} uninitialized instrument callbacks");
+                }
+
+                Log($"OptimizedTickProcessor: Updated caches - {_subscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
+                Logger.Info($"[OTP] Updated caches - {_subscriptionCache.Count} subscriptions, {_callbackCache.Count} callback entries, {_uninitializedSymbols.Count} pending init");
+
+                // Force GC if under pressure and cache is large
+                if (_isUnderMemoryPressure && _subscriptionCache.Count > 100)
+                {
+                    GC.Collect(0, GCCollectionMode.Optimized);
+                }
             }
         }
-    }
 
-    /// <summary>
-    /// Updates L2 subscription cache (thread-safe)
-    /// </summary>
-    public void UpdateL2SubscriptionCache(ConcurrentDictionary<string, L2Subscription> subscriptions)
-    {
-        lock (_cacheUpdateLock)
+        /// <summary>
+        /// Updates L2 subscription cache (thread-safe)
+        /// </summary>
+        public void UpdateL2SubscriptionCache(ConcurrentDictionary<string, L2Subscription> subscriptions)
         {
-            _l2SubscriptionCache.Clear();
-            foreach (var kvp in subscriptions)
+            lock (_cacheUpdateLock)
             {
-                _l2SubscriptionCache[kvp.Key] = kvp.Value;
+                _l2SubscriptionCache.Clear();
+                foreach (var kvp in subscriptions)
+                {
+                    _l2SubscriptionCache[kvp.Key] = kvp.Value;
+                }
+                Log($"OptimizedTickProcessor: Updated L2 caches - {_l2SubscriptionCache.Count} subscriptions");
             }
-            Log($"OptimizedTickProcessor: Updated L2 caches - {_l2SubscriptionCache.Count} subscriptions");
         }
-    }
 
         /// <summary>
         /// Detect memory pressure and adjust behavior
@@ -679,11 +726,32 @@ namespace QANinjaAdapter.Services.MarketData
             {
                 try
                 {
-                    // Callback validation
-                    if (callbackInfo?.Callback == null || callbackInfo.Instrument == null ||
-                        callbackInfo.Instrument.MasterInstrument == null)
+                    // RACE CONDITION FIX: Comprehensive null checks for NinjaTrader instrument hierarchy
+                    if (callbackInfo == null)
+                    {
+                        continue;
+                    }
+
+                    if (callbackInfo.Callback == null)
                     {
                         _callbackErrors++;
+                        continue;
+                    }
+
+                    // Check instrument and MasterInstrument separately to avoid null reference
+                    var instrument = callbackInfo.Instrument;
+                    if (instrument == null)
+                    {
+                        _callbackErrors++;
+                        continue;
+                    }
+
+                    // MasterInstrument may not be initialized yet during startup race condition
+                    var masterInstrument = instrument.MasterInstrument;
+                    if (masterInstrument == null)
+                    {
+                        _callbackErrors++;
+                        // Don't log every time - this is expected during startup
                         continue;
                     }
 
@@ -693,7 +761,7 @@ namespace QANinjaAdapter.Services.MarketData
                         continue;
                     }
 
-                    var instrument = callbackInfo.Instrument;
+                    // Use the already validated variables from above
                     var callback = callbackInfo.Callback;
 
                     // Get current time in IST
@@ -712,7 +780,8 @@ namespace QANinjaAdapter.Services.MarketData
 
                     if (tickData.LastTradePrice > 0 && shouldFireCallback)
                     {
-                        double roundedPrice = instrument.MasterInstrument.RoundToTickSize(tickData.LastTradePrice);
+                        // Use cached masterInstrument (already null-checked above)
+                        double roundedPrice = masterInstrument.RoundToTickSize(tickData.LastTradePrice);
 
                         var callbackTimer = Stopwatch.StartNew();
                         callback(MarketDataType.Last, roundedPrice, Math.Max(1, volumeDelta), now, 0L);
@@ -723,14 +792,14 @@ namespace QANinjaAdapter.Services.MarketData
                         // Process bid/ask only when there's a trade (or price change for indices)
                         if (tickData.BuyPrice > 0)
                         {
-                            double bidPrice = instrument.MasterInstrument.RoundToTickSize(tickData.BuyPrice);
+                            double bidPrice = masterInstrument.RoundToTickSize(tickData.BuyPrice);
                             callback(MarketDataType.Bid, bidPrice, tickData.BuyQty, now, 0L);
                         }
 
                         if (tickData.SellPrice > 0)
                         {
-                            double askPrice = instrument.MasterInstrument.RoundToTickSize(tickData.SellPrice);
-                        callback(MarketDataType.Ask, askPrice, tickData.SellQty, now, 0L);
+                            double askPrice = masterInstrument.RoundToTickSize(tickData.SellPrice);
+                            callback(MarketDataType.Ask, askPrice, tickData.SellQty, now, 0L);
                         }
                     }
 

@@ -208,17 +208,33 @@ namespace QANinjaAdapter.Services.MarketData
                     buffer = ArrayPool<byte>.Shared.Rent(16384);
                     Logger.Debug($"[TICK-SUBSCRIBE] Entering receive loop for {nativeSymbolName}...");
 
+                    int tickCount = 0;
                     while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
                     {
                         WebSocketReceiveResult result = await _webSocketManager.ReceiveMessageAsync(ws, buffer, cts.Token);
 
-                        if (result.MessageType == WebSocketMessageType.Close) break;
-                        if (result.MessageType == WebSocketMessageType.Text || result.Count < 2) continue;
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            Logger.Warn($"[TICK-SUBSCRIBE] WebSocket closed by server for {nativeSymbolName}");
+                            break;
+                        }
+                        if (result.MessageType == WebSocketMessageType.Text || result.Count < 2)
+                        {
+                            Logger.Debug($"[TICK-SUBSCRIBE] Skipping message for {nativeSymbolName}: type={result.MessageType}, bytes={result.Count}");
+                            continue;
+                        }
 
                         var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, isMcxSegment, isIndex);
 
                         if (tickData != null)
                         {
+                            tickCount++;
+                            // Log first 5 ticks and then every 100th tick
+                            if (tickCount <= 5 || tickCount % 100 == 0)
+                            {
+                                Logger.Info($"[TICK-SUBSCRIBE] {nativeSymbolName}: Tick #{tickCount} - LTP={tickData.LastTradePrice}, isIndex={isIndex}, useOptimized={_useOptimizedProcessor}");
+                            }
+
                             if (_useOptimizedProcessor)
                             {
                                 TickProcessor.QueueTick(nativeSymbolName, tickData);
@@ -237,24 +253,35 @@ namespace QANinjaAdapter.Services.MarketData
                             if (qaAdapter != null)
                             {
                                 qaAdapter.ProcessSyntheticLegTick(
-                                    nativeSymbolName, 
-                                    tickData.LastTradePrice, 
-                                    tickData.LastTradeQty, 
-                                    tickData.ExchangeTimestamp, 
+                                    nativeSymbolName,
+                                    tickData.LastTradePrice,
+                                    tickData.LastTradeQty,
+                                    tickData.ExchangeTimestamp,
                                     QANinjaAdapter.SyntheticInstruments.TickType.Last,
-                                    tickData.BuyPrice, 
+                                    tickData.BuyPrice,
                                     tickData.SellPrice);
                             }
                         }
+                        else
+                        {
+                            Logger.Debug($"[TICK-SUBSCRIBE] {nativeSymbolName}: ParseBinaryMessage returned null (bytes={result.Count})");
+                        }
                     }
+
+                    Logger.Info($"[TICK-SUBSCRIBE] Exited receive loop for {nativeSymbolName}: wsState={ws.State}, cancelled={cts.Token.IsCancellationRequested}, totalTicks={tickCount}");
 
                     // If we reach here, the connection was closed normally or a break occurred
                     retryCount = 0; // Reset retry count if we had a successful session
                 }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException)
+                {
+                    Logger.Info($"[TICK-SUBSCRIBE] Cancelled for {nativeSymbolName}");
+                    break;
+                }
                 catch (Exception ex)
                 {
                     retryCount++;
+                    Logger.Error($"[TICK-SUBSCRIBE] Exception for {nativeSymbolName}: {ex.Message}", ex);
                     NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-SUBSCRIBE] Error for {nativeSymbolName}: {ex.Message}. Retry {retryCount}/{maxRetries}", NinjaTrader.Cbi.LogLevel.Warning);
                 }
                 finally
@@ -569,5 +596,191 @@ namespace QANinjaAdapter.Services.MarketData
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             return epoch.AddSeconds(unixTimestamp).ToLocalTime();
         }
+
+        #region Shared WebSocket Subscription (NEW - uses single connection)
+
+        // Feature flag to switch between legacy (per-symbol) and shared WebSocket
+        private bool _useSharedWebSocket = true;
+
+        // Shared WebSocket service instance
+        private SharedWebSocketService _sharedWebSocketService;
+        private bool _sharedWebSocketInitialized = false;
+        private readonly object _sharedWsLock = new object();
+
+        /// <summary>
+        /// Subscribes to ticks using the shared WebSocket connection.
+        /// This is more efficient than creating one WebSocket per symbol.
+        /// </summary>
+        public async Task SubscribeToTicksShared(
+            string nativeSymbolName,
+            MarketType marketType,
+            string symbol,
+            ConcurrentDictionary<string, L1Subscription> l1Subscriptions,
+            WebSocketConnectionFunc webSocketConnectionFunc)
+        {
+            Logger.Info($"[TICK-SHARED] SubscribeToTicksShared: symbol={symbol}, nativeSymbol={nativeSymbolName}");
+
+            try
+            {
+                // Initialize shared WebSocket service if needed
+                await EnsureSharedWebSocketInitializedAsync(l1Subscriptions);
+
+                // Get instrument token
+                int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
+                Logger.Info($"[TICK-SHARED] Got token {tokenInt} for symbol='{symbol}'");
+
+                // Determine if this is an index
+                bool isIndex = false;
+                if (l1Subscriptions.TryGetValue(nativeSymbolName, out var sub))
+                    isIndex = sub.IsIndex;
+
+                // Subscribe via shared WebSocket
+                bool subscribed = await _sharedWebSocketService.SubscribeAsync(symbol, tokenInt, isIndex);
+
+                if (subscribed)
+                {
+                    Logger.Info($"[TICK-SHARED] Successfully subscribed to {symbol} (token={tokenInt}, isIndex={isIndex})");
+                }
+                else
+                {
+                    Logger.Error($"[TICK-SHARED] Failed to subscribe to {symbol}");
+                }
+
+                // Start exit monitoring (to cleanup when chart closes)
+                if (webSocketConnectionFunc != null)
+                {
+                    StartExitMonitoringForSharedSubscription(symbol, webSocketConnectionFunc);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[TICK-SHARED] Exception subscribing to {symbol}: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Ensures the shared WebSocket service is initialized and connected
+        /// </summary>
+        private async Task EnsureSharedWebSocketInitializedAsync(ConcurrentDictionary<string, L1Subscription> l1Subscriptions)
+        {
+            if (_sharedWebSocketInitialized && _sharedWebSocketService?.IsConnected == true)
+                return;
+
+            lock (_sharedWsLock)
+            {
+                if (_sharedWebSocketService == null)
+                {
+                    _sharedWebSocketService = SharedWebSocketService.Instance;
+
+                    // Wire up tick handler
+                    _sharedWebSocketService.TickReceived += OnSharedWebSocketTickReceived;
+
+                    Logger.Info("[TICK-SHARED] SharedWebSocketService initialized and tick handler connected");
+                }
+            }
+
+            // Ensure connected
+            bool connected = await _sharedWebSocketService.EnsureConnectedAsync();
+            _sharedWebSocketInitialized = connected;
+
+            if (connected)
+            {
+                Logger.Info("[TICK-SHARED] SharedWebSocketService connected successfully");
+            }
+            else
+            {
+                Logger.Error("[TICK-SHARED] SharedWebSocketService failed to connect");
+            }
+        }
+
+        /// <summary>
+        /// Handles ticks received from the shared WebSocket service
+        /// </summary>
+        private void OnSharedWebSocketTickReceived(string symbol, ZerodhaTickData tickData)
+        {
+            try
+            {
+                if (tickData == null || tickData.LastTradePrice <= 0)
+                    return;
+
+                // Route to OptimizedTickProcessor
+                if (_useOptimizedProcessor)
+                {
+                    TickProcessor.QueueTick(symbol, tickData);
+                }
+                else
+                {
+                    QAAdapter adapter = Connector.Instance.GetAdapter() as QAAdapter;
+                    adapter?.ProcessParsedTick(symbol, tickData);
+                }
+
+                // Route to synthetic straddle service
+                QAAdapter qaAdapter = Connector.Instance.GetAdapter() as QAAdapter;
+                if (qaAdapter != null)
+                {
+                    qaAdapter.ProcessSyntheticLegTick(
+                        symbol,
+                        tickData.LastTradePrice,
+                        tickData.LastTradeQty,
+                        tickData.ExchangeTimestamp,
+                        QANinjaAdapter.SyntheticInstruments.TickType.Last,
+                        tickData.BuyPrice,
+                        tickData.SellPrice);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[TICK-SHARED] OnSharedWebSocketTickReceived error for {symbol}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Monitors for chart close and cleans up subscription
+        /// </summary>
+        private void StartExitMonitoringForSharedSubscription(string symbol, WebSocketConnectionFunc webSocketConnectionFunc)
+        {
+            Task.Run(async () =>
+            {
+                while (true)
+                {
+                    try
+                    {
+                        if (webSocketConnectionFunc.ExitFunction())
+                        {
+                            Logger.Info($"[TICK-SHARED] Exit detected for {symbol}, cleaning up");
+                            // Note: We don't unsubscribe from shared WebSocket as other charts may still need it
+                            break;
+                        }
+                        await Task.Delay(500);
+                    }
+                    catch
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+
+        /// <summary>
+        /// Gets whether shared WebSocket mode is enabled
+        /// </summary>
+        public bool UseSharedWebSocket
+        {
+            get => _useSharedWebSocket;
+            set => _useSharedWebSocket = value;
+        }
+
+        /// <summary>
+        /// Gets the shared WebSocket service status
+        /// </summary>
+        public string GetSharedWebSocketStatus()
+        {
+            if (_sharedWebSocketService == null)
+                return "Not initialized";
+
+            return $"Connected={_sharedWebSocketService.IsConnected}, Subscriptions={_sharedWebSocketService.SubscriptionCount}";
+        }
+
+        #endregion
     }
 }

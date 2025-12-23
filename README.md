@@ -1,108 +1,265 @@
 # QA NinjaAdapter
 
-A custom adapter for connecting NinjaTrader 8 to Indian trading platforms, primarily Zerodha, with additional support for other brokers.
+A high-performance adapter for connecting NinjaTrader 8 to Indian trading platforms, primarily Zerodha, with support for real-time market data, synthetic straddles, and option chain analysis.
 
 ## Overview
 
-QA NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader 8 to seamlessly connect with Zerodha and other Indian brokers. The adapter provides real-time market data integration, historical data access, and a flexible broker configuration system designed for the Indian markets.
+QA NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader 8 to seamlessly connect with Zerodha and other Indian brokers. The adapter provides real-time market data integration, historical data access, synthetic straddle instruments, and a Market Analyzer for option chain visualization.
 
-## Features
+## Key Features
 
-- **Multi-Broker Support**: Connect to multiple Indian brokers including Zerodha, Upstox, and TrueData
-- **Dual Connection Types**: 
-  - WebSocket for real-time market data streaming
-  - REST API for historical data retrieval
-- **External Configuration**: User-editable JSON configuration for API credentials
-- **Standalone UI**: Dedicated configuration interface for credential management
-- **Dynamic Broker Switching**: Switch between different brokers without restarting NinjaTrader
-- **Multiple Symbol Formats**: Support for various symbol formats across different brokers
-
-## Project Structure
-
-The solution consists of multiple projects:
-
-- **QANinjaAdapter**: Core adapter implementation for NinjaTrader integration
-- **QABrokerAPI**: Broker-specific API implementations (Zerodha, Upstox, Binance)
-- **QAAddOnUI**: Standalone UI components for configuration
-- **QA.Tests**: Unit and integration tests
-- **Test Applications**: Development test harnesses
+- **Shared WebSocket Architecture**: Single WebSocket connection for all symbols (up to 1000 per connection)
+- **High-Performance Tick Processing**: Disruptor-style sharded RingBuffer with 4 parallel worker threads
+- **Synthetic Straddle Instruments**: Real-time CE+PE combined pricing for options trading
+- **Market Analyzer Window**: Visual option chain with ATM detection and histogram display
+- **Multi-Broker Support**: Zerodha, Upstox, and Binance connectivity
+- **Automatic Token Generation**: TOTP-based auto-login with token refresh
+- **Memory-Optimized**: ArrayPool integration, GC pressure monitoring, and intelligent backpressure
 
 ## Architecture
 
 ```
-┌──────────────────┐           ┌───────────────────────────┐
-│                  │           │      QANinjaAdapter       │
-│   NinjaTrader    │◄─────────►│                           │
-│                  │           │  ┌─────────┐ ┌─────────┐  │
-└──────────────────┘           │  │Connector│ │ Parsers │  │
-                               │  └─────────┘ └─────────┘  │
-                               │        │          │       │
-                               │        ▼          ▼       │
-                               │  ┌─────────┐ ┌─────────┐  │
-                               │  │Controls │ │ViewModels│  │
-                               │  └─────────┘ └─────────┘  │
-                               └───────┬───────────────────┘
-                                       │
-                                       │
-                                       ▼
-┌───────────────────────────────────────────────────────────────┐
-│                         QABrokerAPI                           │
-│                                                               │
-│  ┌───────────────────────────────────────────────────────┐    │
-│  │                        Common                         │    │
-│  │  ┌────────────┐ ┌────────────┐ ┌────────────────────┐ │    │
-│  │  │   Models   │ │   Enums    │ │     Interfaces     │ │    │
-│  │  └────────────┘ └────────────┘ └────────────────────┘ │    │
-│  └───────────────────────────────────────────────────────┘    │
-│                                                               │
-│  ┌───────────────┐   ┌───────────────┐   ┌───────────────┐    │
-│  │    Zerodha    │   │    Upstox     │   │    Binance    │    │
-│  │ ┌───────────┐ │   │ ┌───────────┐ │   │ ┌───────────┐ │    │
-│  │ │Websockets │ │   │ │REST Client│ │   │ │Websockets │ │    │
-│  │ └───────────┘ │   │ └───────────┘ │   │ └───────────┘ │    │
-│  │ ┌───────────┐ │   │ ┌───────────┐ │   │ ┌───────────┐ │    │
-│  │ │REST Client│ │   │ │  Models   │ │   │ │  Models   │ │    │
-│  │ └───────────┘ │   │ └───────────┘ │   │ └───────────┘ │    │
-│  └───────────────┘   └───────────────┘   └───────────────┘    │
-│                                                               │
-└───────────────────────────────────────────────────────────────┘
-            │                  │                  │
-            ▼                  ▼                  ▼
-   ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-   │  Zerodha API    │ │   Upstox API    │ │   Binance API   │
-   │                 │ │                 │ │                 │
-   └─────────────────┘ └─────────────────┘ └─────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              NinjaTrader 8                                  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────────────┐   │
+│  │   Charts    │  │Market Depth │  │ Control Ctr │  │ Market Analyzer   │   │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  │ (Option Chain)    │   │
+│         │                │                │         └─────────┬─────────┘   │
+└─────────┼────────────────┼────────────────┼───────────────────┼─────────────┘
+          │                │                │                   │
+          ▼                ▼                ▼                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           QANinjaAdapter                                    │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                         QAAdapter (Main Entry)                      │    │
+│  │  • SubscribeMarketData()  • SubscribeMarketDepth()                  │    │
+│  │  • ProcessSyntheticLegTick()  • Historical Data Requests            │    │
+│  └──────────────────────────────────┬──────────────────────────────────┘    │
+│                                     │                                       │
+│  ┌──────────────────────────────────┼──────────────────────────────────┐    │
+│  │                          Connector                                  │    │
+│  │  Orchestrates all services and manages adapter lifecycle            │    │
+│  └──────────────────────────────────┬──────────────────────────────────┘    │
+│                                     │                                       │
+│  ┌──────────────────────────────────┴──────────────────────────────────┐    │
+│  │                                                                     │    │
+│  │  ┌─────────────────────┐    ┌─────────────────────────────────┐     │    │
+│  │  │  MarketDataService  │    │   SharedWebSocketService        │     │    │
+│  │  │  • SubscribeToTicks │◄──►│   • Single WS connection        │     │    │
+│  │  │  • SubscribeToDepth │    │   • Multi-symbol subscription   │     │    │
+│  │  │  • Feature Flags    │    │   • Token-to-symbol routing     │     │    │
+│  │  └─────────┬───────────┘    │   • Auto-reconnect              │     │    │
+│  │            │                └─────────────────────────────────┘     │    │
+│  │            ▼                                                        │    │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
+│  │  │              OptimizedTickProcessor                         │    │    │
+│  │  │  ┌─────────────────────────────────────────────────────┐    │    │    │
+│  │  │  │            Sharded RingBuffer (4 Shards)            │    │    │    │
+│  │  │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐    │    │    │    │
+│  │  │  │  │Shard 0  │ │Shard 1  │ │Shard 2  │ │Shard 3  │    │    │    │    │
+│  │  │  │  │16K items│ │16K items│ │16K items│ │16K items│    │    │    │    │
+│  │  │  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘    │    │    │    │
+│  │  │  │       │           │           │           │         │    │    │    │
+│  │  │  │       ▼           ▼           ▼           ▼         │    │    │    │
+│  │  │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐    │    │    │    │
+│  │  │  │  │Worker 0 │ │Worker 1 │ │Worker 2 │ │Worker 3 │    │    │    │    │
+│  │  │  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘    │    │    │    │
+│  │  │  └─────────────────────────────────────────────────────┘    │    │    │
+│  │  │  • Tiered Backpressure (60%/80%/90% thresholds)             │    │    │
+│  │  │  • Memory Pressure Detection & GC Monitoring                │    │    │
+│  │  │  • O(1) Callback Caching                                    │    │    │
+│  │  │  • Race Condition Protection (instrument init checks)       │    │    │
+│  │  └─────────────────────────────────────────────────────────────┘    │    │
+│  │                                                                     │    │
+│  │  ┌─────────────────────┐    ┌─────────────────────────────────┐     │    │
+│  │  │ SyntheticStraddle   │    │   MarketAnalyzerLogic           │     │    │
+│  │  │ Service             │    │   • GIFT NIFTY projected open   │     │    │
+│  │  │ • CE+PE combining   │    │   • Option chain generation     │     │    │
+│  │  │ • Straddle pricing  │    │   • ATM strike detection        │     │    │
+│  │  └─────────────────────┘    └─────────────────────────────────┘     │    │
+│  │                                                                     │    │
+│  │  ┌─────────────────────┐    ┌─────────────────────────────────┐     │    │
+│  │  │ InstrumentManager   │    │   HistoricalDataService         │     │    │
+│  │  │ • Symbol mapping    │    │   • Zerodha historical API      │     │    │
+│  │  │ • Token lookup      │    │   • 1min/5min/daily bars        │     │    │
+│  │  │ • NT instrument     │    │   • Gap fill support            │     │    │
+│  │  │   creation          │    └─────────────────────────────────┘     │    │
+│  │  └─────────────────────┘                                            │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                        AddOns / UI                                  │    │
+│  │  ┌─────────────────────┐    ┌─────────────────────────────────┐     │    │
+│  │  │ MarketAnalyzerWindow│    │   OptionChainWindow             │     │    │
+│  │  │ • Ticker display    │    │   • Strike-wise CE/PE prices    │     │    │
+│  │  │ • Projected open    │    │   • Straddle column             │     │    │
+│  │  │ • Status indicators │    │   • ATM highlighting            │     │    │
+│  │  └─────────────────────┘    │   • Histogram visualization     │     │    │
+│  │                             │   • NTTabPage instrument linking │     │    │
+│  │                             └─────────────────────────────────┘     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              QABrokerAPI                                    │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                            Common                                   │    │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │    │
+│  │  │   Models   │  │   Enums    │  │ Interfaces │  │ Extensions │     │    │
+│  │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  ┌───────────────────────────┐   ┌───────────────┐   ┌───────────────┐      │
+│  │         Zerodha           │   │    Upstox     │   │    Binance    │      │
+│  │  ┌─────────────────────┐  │   │               │   │               │      │
+│  │  │   WebSocket Binary  │  │   │  REST Client  │   │  WebSocket    │      │
+│  │  │   Parser (Manual    │  │   │               │   │               │      │
+│  │  │   Big-Endian)       │  │   │               │   │               │      │
+│  │  ├─────────────────────┤  │   │               │   │               │      │
+│  │  │   REST Client       │  │   │               │   │               │      │
+│  │  │   (Kite Connect)    │  │   │               │   │               │      │
+│  │  ├─────────────────────┤  │   │               │   │               │      │
+│  │  │   TOTP Generator    │  │   │               │   │               │      │
+│  │  │   (Auto-Login)      │  │   │               │   │               │      │
+│  │  └─────────────────────┘  │   │               │   │               │      │
+│  └───────────────────────────┘   └───────────────┘   └───────────────┘      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                │                        │                     │
+                ▼                        ▼                     ▼
+       ┌─────────────────┐      ┌─────────────────┐    ┌─────────────────┐
+       │  Zerodha Kite   │      │   Upstox API    │    │   Binance API   │
+       │  Connect API    │      │                 │    │                 │
+       │  wss://ws.kite  │      │                 │    │                 │
+       └─────────────────┘      └─────────────────┘    └─────────────────┘
 ```
 
-### High-Performance Architecture (Phase 3)
+## WebSocket Architecture
 
-The adapter has been upgraded to a high-throughput, low-latency architecture designed for high-frequency market data.
+### Shared WebSocket (New - Recommended)
 
-#### 1. Sharded RingBuffer (Disruptor Pattern)
-- **Lock-Free Processing**: Replaced traditional `ConcurrentQueue` and `SemaphoreSlim` with a lock-free Sharded RingBuffer.
-- **Worker Pool**: Uses 4 dedicated worker threads to process ticks in parallel, sharded by symbol to ensure sequential consistency for individual instruments.
-- **Minimal Latency**: Workers use a busy-wait/yield strategy with `AutoResetEvent` signaling for sub-millisecond response times.
+The adapter now uses a **single shared WebSocket connection** for all symbol subscriptions:
 
-#### 2. Resilient Connectivity
-- **Exponential Backoff**: Robust reconnection logic for both Tick and Market Depth WebSocket streams, handling network instability gracefully.
-- **Resuming Subscriptions**: Automatically handles re-subscription and state recovery after connection loss.
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                    SharedWebSocketService                            │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │                 Single WebSocket Connection                    │  │
+│  │                 wss://ws.kite.zerodha.com                      │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │              Subscription Manager                              │  │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │  │
+│  │  │ GIFT_NIFTY  │  │ NIFTY25DEC  │  │ SENSEX25DEC │  ... (100+) │  │
+│  │  │ Token:291849│  │ 24000CE     │  │ 85000PE     │             │  │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘             │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │              Token-to-Symbol Router                            │  │
+│  │  291849 → GIFT_NIFTY   |   12345 → NIFTY25DEC24000CE          │  │
+│  │  Incoming tick → Find symbol → Fire TickReceived event         │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
-#### 3. Memory & Resource Optimization
-- **ArrayPool Integration**: Uses `System.Buffers.ArrayPool<byte>` for network receive buffers, significantly reducing GC pressure and Gen0 collections.
-- **TimeZone Caching**: Pre-cached `TimeZoneInfo` for IST (Indian Standard Time) to eliminate expensive registry lookups on the hot path.
-- **Zero-Allocation Parsing**: Minimized object allocations in the critical path of tick and market depth processing.
+**Benefits:**
+- Uses 1 of Zerodha's 3 allowed connections (instead of 100+)
+- Batch subscription messages reduce API overhead
+- Centralized reconnection and error handling
+- Automatic pending queue for symbols added before connection ready
 
-#### 4. Real-Time Health Monitoring
-- **Automated Diagnostics**: 30-second automated health reports logging:
-  - Throughput (Ticks/sec)
-  - Queue depth and processing efficiency
-  - Memory usage and GC counts
-  - Callback success rates and latency distribution
+### Legacy WebSocket (Deprecated)
+
+The old architecture created one WebSocket per symbol, which:
+- Exceeded Zerodha's 3-connection limit
+- Caused 403 Forbidden errors
+- Wasted resources on connection overhead
+
+Set `MarketDataService.UseSharedWebSocket = false` to revert (not recommended).
+
+## Tick Processing Pipeline
+
+```
+WebSocket Binary Message
+         │
+         ▼
+┌────────────────────────┐
+│   Parse Binary Packet  │  ← Manual big-endian parsing (no System.Buffers.Binary)
+│   Extract: token, LTP, │
+│   OHLC, volume, depth  │
+└───────────┬────────────┘
+            │
+            ▼
+┌────────────────────────┐
+│  Token → Symbol Lookup │
+│  Route to correct      │
+│  subscription handler  │
+└───────────┬────────────┘
+            │
+            ▼
+┌────────────────────────────────────────────────────────────────┐
+│              OptimizedTickProcessor                            │
+│                                                                │
+│  QueueTick(symbol, tickData)                                   │
+│         │                                                      │
+│         ▼                                                      │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  Shard Selection: hash(symbol) % 4                       │  │
+│  │  Ensures same symbol always goes to same shard           │  │
+│  └────────────────────────┬─────────────────────────────────┘  │
+│                           │                                    │
+│         ┌─────────────────┼─────────────────┐                  │
+│         ▼                 ▼                 ▼                  │
+│  ┌───────────┐     ┌───────────┐     ┌───────────┐             │
+│  │ RingBuffer│     │ RingBuffer│     │ RingBuffer│   (x4)      │
+│  │  16K pre- │     │  16K pre- │     │  16K pre- │             │
+│  │ allocated │     │ allocated │     │ allocated │             │
+│  │   items   │     │   items   │     │   items   │             │
+│  └─────┬─────┘     └─────┬─────┘     └─────┬─────┘             │
+│        │                 │                 │                   │
+│        ▼                 ▼                 ▼                   │
+│  ┌───────────┐     ┌───────────┐     ┌───────────┐             │
+│  │  Worker   │     │  Worker   │     │  Worker   │   (x4)      │
+│  │  Thread   │     │  Thread   │     │  Thread   │             │
+│  │ (Dedicated│     │ (Dedicated│     │ (Dedicated│             │
+│  │ LongRun)  │     │ LongRun)  │     │ LongRun)  │             │
+│  └─────┬─────┘     └─────┬─────┘     └─────┬─────┘             │
+│        │                 │                 │                   │
+│        └─────────────────┼─────────────────┘                   │
+│                          │                                     │
+│                          ▼                                     │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  ProcessCallbacks()                                      │  │
+│  │  • Null-safe instrument checks (race condition fix)      │  │
+│  │  • Round to tick size                                    │  │
+│  │  • Fire NinjaTrader callbacks                            │  │
+│  │  • Track callback timing (slow callback detection)       │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                │
+│  Backpressure Management:                                      │
+│  • Warning: 60% queue full → log warning                       │
+│  • Critical: 80% → start dropping old ticks                    │
+│  • Emergency: 90% → only essential symbols (NIFTY, SENSEX)     │
+│  • Maximum: 100% → reject all new ticks                        │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+```
 
 ## Installation
 
-1. Build the solution in Visual Studio
-2. Copy the generated DLL to:
+1. Build the solution in Visual Studio (Debug or Release)
+2. Copy `QANinjaAdapter.dll` to:
    ```
    %UserProfile%\Documents\NinjaTrader 8\bin\Custom
    ```
@@ -110,13 +267,13 @@ The adapter has been upgraded to a high-throughput, low-latency architecture des
    ```
    %UserProfile%\Documents\NinjaTrader 8\QAAdapter
    ```
-4. Copy the sample configuration file to the above folder
+4. Create `config.json` with your Zerodha credentials
 5. Restart NinjaTrader 8
-6. Add the Zerodha data connection in NinjaTrader's Connections menu
+6. Add "Zerodha" connection in Control Center → Connections
 
 ## Configuration
 
-Create a `config.json` file with the following structure:
+### config.json
 
 ```json
 {
@@ -127,100 +284,112 @@ Create a `config.json` file with the following structure:
   "Zerodha": {
     "Api": "your_api_key",
     "Secret": "your_secret_key",
-    "AccessToken": "your_access_token"
+    "AccessToken": "",
+    "AccessTokenExpiry": "",
+    "UserId": "your_user_id",
+    "Password": "your_password",
+    "TotpSecret": "your_totp_secret",
+    "RedirectUrl": "http://127.0.0.1:8001/callback",
+    "AutoLogin": true
   },
-  "Upstox": {
-    "Api": "your_api_key",
-    "Secret": "your_secret_key",
-    "AccessToken": "your_access_token",
-    "TOTP": "your_totp_secret"
+  "GeneralSettings": {
+    "EnableVerboseTickLogging": false,
+    "AutoGenerateToken": true,
+    "TokenRefreshBeforeExpiryMinutes": 30
   }
 }
 ```
 
-## Development & Build Process
+### Instrument Mappings
+
+The adapter uses JSON files for symbol mapping:
+
+- `mapped_instruments.json` - Zerodha symbol to NinjaTrader mapping
+- `index_mappings.json` - Index symbols (GIFT NIFTY, NIFTY 50, SENSEX)
+- `straddles_config.json` - Auto-generated synthetic straddle definitions
+
+## Market Analyzer
+
+The Market Analyzer provides real-time visualization of:
+
+1. **Ticker Panel**: GIFT NIFTY, NIFTY, SENSEX with live prices and % change
+2. **Projected Open**: Calculated from GIFT NIFTY correlation
+3. **Option Chain**:
+   - Strike-wise CE/PE prices
+   - Straddle prices (CE + PE)
+   - ATM strike highlighting
+   - Premium histograms
+
+Access via: NinjaTrader → New → Market Analyzer (QA)
+
+## Synthetic Straddles
+
+The adapter supports synthetic straddle instruments that combine CE and PE legs:
+
+```
+Symbol Format: NIFTY25DEC24000_STRDL
+Components:   NIFTY25DEC24000CE + NIFTY25DEC24000PE
+Price:        Sum of CE and PE last traded prices
+```
+
+These appear as regular instruments in NinjaTrader and receive real-time price updates.
+
+## Logging
+
+Logs are written to:
+```
+%UserProfile%\Documents\NinjaTrader 8\QAAdapter\Logs\QAAdapter_YYYY-MM-DD.log
+```
+
+Key log prefixes:
+- `[SharedWS]` - Shared WebSocket connection events
+- `[TICK-SHARED]` - Subscription via shared WebSocket
+- `[OTP]` - OptimizedTickProcessor events
+- `[MarketAnalyzerLogic]` - Option chain and projected open calculations
+
+## Troubleshooting
+
+### No ticks received
+1. Check if WebSocket is connected: Look for `[SharedWS] Connected successfully`
+2. Verify access token is valid (not expired)
+3. Check symbol mapping exists in `mapped_instruments.json`
+
+### 403 Forbidden errors
+- Usually indicates expired access token
+- Enable `AutoLogin: true` in config.json for automatic token refresh
+
+### "Object reference not set" errors
+- Fixed in latest version with race condition protection
+- Rebuild and redeploy the DLL
+
+### High memory usage
+- The adapter monitors GC pressure automatically
+- Logs will show `MEMORY PRESSURE DETECTED` if issues occur
+- Caches are automatically trimmed under pressure
+
+## Development
 
 ### Prerequisites
-
-- Visual Studio 2019 or later
-- .NET Framework 4.8 (for NinjaTrader compatibility)
+- Visual Studio 2022
+- .NET Framework 4.8
 - NinjaTrader 8 installed
 
-### Build Process
+### Build
+```bash
+MSBuild QANinjaAdapter.csproj /t:Build /p:Configuration=Debug
+```
 
-1. Clone the repository
-2. Open QANinjaAdapter.sln in Visual Studio
-3. Build the solution in Debug or Release mode
-4. The build process will:
-   - Compile all projects in the solution
-   - Copy necessary DLLs to the output directory
-   - Generate XML documentation
-
-
-
-### Development Tips
-
-- Use the FileSystemWatcher to monitor configuration changes without restarting NinjaTrader
-- Create unit tests for broker-specific code in the QA.Tests project
-- Use Test Applications project for standalone testing outside of NinjaTrader environment
-
-## Project Components
-
-### QANinjaAdapter
-- **Classes**: Core implementation classes
-  - **Binance**: Implementation for Binance connectivity
-  - **Klines**: Candlestick data processing
-  - **Symbols**: Symbol mapping and management
-- **Controls**: UI elements for NinjaTrader integration
-- **Parsers**: Data transformation between broker formats and NinjaTrader
-- **QAAdapterAddOn**: NinjaTrader AddOn implementation
-  - **ViewModels**: MVVM pattern implementation 
-- **ViewModels**: Data binding models
-
-### QABrokerAPI
-- **Common**: Shared functionality across brokers
-  - **Caching**: Data caching mechanisms
-  - **Converter**: Data format converters
-  - **Enums**: Enumeration types
-  - **Extensions**: Extension methods
-  - **Interfaces**: API contracts
-  - **Models**: Data models
-- **Zerodha**: Zerodha-specific implementation
-  - **Websockets**: Real-time data streaming
-- **Upstox**: Upstox-specific implementation
-- **Binance**: Binance-specific implementation
-
-### QAAddOnUI
-- Standalone UI for configuration outside NinjaTrader
-
-### QA.Tests
-- Unit and integration tests for all components
-
-## Roadmap
-
-- [ ] Complete Zerodha connection implementation
-  - [ ] WebSocket connectivity for real-time data
-  - [ ] Historical data API integration
-  - [ ] Symbol mapping
-- [ ] Develop standalone configuration UI
-  - [ ] Credential management interface
-  - [ ] Broker selection
-  - [ ] Connection testing
-- [ ] Add support for additional Indian brokers
-  - [ ] Expand Upstox integration
-  - [ ] Add TrueData support
-- [ ] Implement order execution functionality
-- [ ] Add automated testing framework
-  - [ ] Unit tests for all components
-  - [ ] Integration tests with broker APIs
+### Deploy
+```bash
+copy /Y "bin\Debug\QANinjaAdapter.dll" "%UserProfile%\Documents\NinjaTrader 8\bin\Custom\"
+```
 
 ## License
 
-This project is proprietary software.
+Proprietary software. All rights reserved.
 
 ## Acknowledgements
 
 - NinjaTrader developer community
-- Zerodha Kite Connect API documentation
-- Upstox API documentation
-- Open-source libraries used in the project
+- Zerodha Kite Connect API
+- LMAX Disruptor pattern (inspiration for RingBuffer design)
