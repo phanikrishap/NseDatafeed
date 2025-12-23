@@ -26,6 +26,12 @@ namespace QANinjaAdapter.SyntheticInstruments
         private readonly object _lock = new object();
 
         /// <summary>
+        /// Event fired when a straddle price is calculated (for UI updates like Option Chain)
+        /// Parameters: straddleSymbol, price, cePrice, pePrice
+        /// </summary>
+        public event Action<string, double, double, double> StraddlePriceCalculated;
+
+        /// <summary>
         /// Initialises a new instance of the SyntheticStraddleService.
         /// </summary>
         /// <param name="adapter">The parent adapter for publishing ticks.</param>
@@ -45,7 +51,13 @@ namespace QANinjaAdapter.SyntheticInstruments
             
             // Initialize processor with definitions
             _asyncProcessor.LoadStraddleConfigurations(_definitions);
-            
+
+            // Forward straddle price events to subscribers (Option Chain window, etc.)
+            _asyncProcessor.StraddlePriceCalculated += (symbol, price, cePrice, pePrice) =>
+            {
+                StraddlePriceCalculated?.Invoke(symbol, price, cePrice, pePrice);
+            };
+
             Logger.Info($"[SyntheticStraddleService] Initialised with {_definitions.Count} straddle definitions.");
         }
 
@@ -79,6 +91,39 @@ namespace QANinjaAdapter.SyntheticInstruments
             catch (Exception ex)
             {
                 Logger.Error($"[SyntheticStraddleService] Error loading configurations: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Reloads straddle configurations from the JSON file.
+        /// Call this after regenerating straddles_config.json at runtime.
+        /// </summary>
+        public void ReloadConfigurations()
+        {
+            lock (_lock)
+            {
+                if (_isDisposed) return;
+
+                try
+                {
+                    Logger.Info("[SyntheticStraddleService] Reloading straddle configurations...");
+
+                    // Clear existing definitions and mappings
+                    _definitions.Clear();
+                    _legToSyntheticMapping.Clear();
+
+                    // Reload from file
+                    LoadConfigurations();
+
+                    // Reload async processor with new definitions
+                    _asyncProcessor.ReloadConfigurations(_definitions);
+
+                    Logger.Info($"[SyntheticStraddleService] Reloaded with {_definitions.Count} straddle definitions.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[SyntheticStraddleService] Error reloading configurations: {ex.Message}");
+                }
             }
         }
 

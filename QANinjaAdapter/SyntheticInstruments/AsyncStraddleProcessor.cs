@@ -31,6 +31,12 @@ namespace QANinjaAdapter.SyntheticInstruments
         private long _straddlesPublished = 0;
         private long _processingErrors = 0;
         private DateTime _startTime = DateTime.UtcNow;
+
+        /// <summary>
+        /// Event fired when a straddle price is calculated (for UI updates)
+        /// Parameters: straddleSymbol, price, cePrice, pePrice
+        /// </summary>
+        public event Action<string, double, double, double> StraddlePriceCalculated;
         
         // Configuration
         private const int QUEUE_CAPACITY = 10000;
@@ -110,28 +116,48 @@ namespace QANinjaAdapter.SyntheticInstruments
         public void LoadStraddleConfigurations(IEnumerable<StraddleDefinition> definitions)
         {
             if (definitions == null) return;
-            
+
             foreach (var definition in definitions)
             {
                 var state = new StraddleState(definition);
                 _straddleStates.TryAdd(definition.SyntheticSymbolNinjaTrader, state);
-                
+
                 // Map CE symbol to straddles
                 _legToStraddleMapping.AddOrUpdate(
                     definition.CESymbol,
                     new List<string> { definition.SyntheticSymbolNinjaTrader },
                     (key, existing) => { existing.Add(definition.SyntheticSymbolNinjaTrader); return existing; }
                 );
-                
+
                 // Map PE symbol to straddles
                 _legToStraddleMapping.AddOrUpdate(
                     definition.PESymbol,
                     new List<string> { definition.SyntheticSymbolNinjaTrader },
                     (key, existing) => { existing.Add(definition.SyntheticSymbolNinjaTrader); return existing; }
                 );
-                
+
                 Logger.Info($"[AsyncStraddleProcessor] Loaded straddle: {definition.SyntheticSymbolNinjaTrader}");
             }
+        }
+
+        /// <summary>
+        /// Clears existing straddle configurations and reloads with new definitions.
+        /// Used when straddles_config.json is regenerated at runtime.
+        /// </summary>
+        public void ReloadConfigurations(IEnumerable<StraddleDefinition> definitions)
+        {
+            if (definitions == null) return;
+
+            // Clear existing mappings
+            _straddleStates.Clear();
+            _legToStraddleMapping.Clear();
+
+            Logger.Info("[AsyncStraddleProcessor] Cleared existing straddle configurations for reload");
+
+            // Reload with new definitions
+            LoadStraddleConfigurations(definitions);
+
+            Logger.Info($"[AsyncStraddleProcessor] Reloaded with {_straddleStates.Count} straddle definitions");
         }
         
         /// <summary>
@@ -225,6 +251,9 @@ namespace QANinjaAdapter.SyntheticInstruments
                         
                         // Try to queue result
                         _outputQueue.TryAdd(result);
+
+                        // Fire event for UI updates (Option Chain window)
+                        StraddlePriceCalculated?.Invoke(straddleSymbol, straddlePrice, state.LastCEPrice, state.LastPEPrice);
                     }
                 }
             }

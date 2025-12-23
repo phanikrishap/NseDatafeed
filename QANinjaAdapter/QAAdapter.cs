@@ -18,6 +18,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -42,6 +43,11 @@ namespace QANinjaAdapter
         private readonly object _marketDataLock = new object(); // Added for synthetic straddle data synchronization
 
         private SyntheticInstruments.SyntheticStraddleService _syntheticStraddleService;
+
+        /// <summary>
+        /// Gets the SyntheticStraddleService for straddle price events
+        /// </summary>
+        public SyntheticInstruments.SyntheticStraddleService SyntheticStraddleService => _syntheticStraddleService;
 
         // Removed LogMe: Use Logger.Info or NinjaTrader native logging directly.
 
@@ -204,8 +210,15 @@ namespace QANinjaAdapter
                     if (def != null)
                     {
                          Logger.Info($"QAAdapter: Subscribing to synthetic straddle {name} (Legs: {def.CESymbol}, {def.PESymbol})");
+                         Logger.Debug($"QAAdapter: About to call SubscribeToSyntheticLeg for CE: {def.CESymbol}");
                          SubscribeToSyntheticLeg(def.CESymbol);
+                         Logger.Debug($"QAAdapter: About to call SubscribeToSyntheticLeg for PE: {def.PESymbol}");
                          SubscribeToSyntheticLeg(def.PESymbol);
+                         Logger.Debug($"QAAdapter: Completed leg subscriptions for {name}");
+                    }
+                    else
+                    {
+                        Logger.Error($"QAAdapter: Straddle definition is NULL for {name}!");
                     }
                     return; // Don't send synthetic symbol to gateway
                 }
@@ -267,22 +280,46 @@ namespace QANinjaAdapter
                     if (!this._marketLiveDataSymbols.Contains(name))
                     {
                         string originalSymbol = Connector.GetSymbolName(name, out mt);
+
+                        // CRITICAL FIX: Detect MCX symbols by checking for CRUDE, GOLD, SILVER, etc.
+                        // The GetSymbolName method doesn't properly detect MCX from option symbols like CRUDEOIL26JAN5200CE
+                        if (name.StartsWith("CRUDEOIL", StringComparison.OrdinalIgnoreCase) ||
+                            name.StartsWith("GOLD", StringComparison.OrdinalIgnoreCase) ||
+                            name.StartsWith("SILVER", StringComparison.OrdinalIgnoreCase) ||
+                            name.StartsWith("NATURALGAS", StringComparison.OrdinalIgnoreCase) ||
+                            name.StartsWith("COPPER", StringComparison.OrdinalIgnoreCase))
+                        {
+                            mt = MarketType.MCX;
+                            Logger.Info($"[SUBSCRIBE] Detected MCX commodity symbol: {name}, forcing MarketType=MCX");
+                        }
+
+                        Logger.Info($"[SUBSCRIBE] Initiating WebSocket for {name} (originalSymbol={originalSymbol}, marketType={mt})");
                         this._marketLiveDataSymbols.Add(nativeSymbolName);
 
-                        Task.Run(async () => {
+                        // CRITICAL: Capture variables for closure to avoid race conditions
+                        string capturedName = name;
+                        string capturedNativeSymbol = nativeSymbolName;
+                        string capturedOriginalSymbol = originalSymbol;
+                        MarketType capturedMarketType = mt;
+
+                        // Use dedicated Thread to completely bypass thread pool starvation
+                        var thread = new Thread(() => {
                             try
                             {
-                                await Connector.Instance.SubscribeToTicks(
-                                    nativeSymbolName,
-                                    mt,
-                                    originalSymbol,
+                                Logger.Info($"[SUBSCRIBE] Thread STARTED for {capturedName}");
+                                // Run the async method synchronously on this dedicated thread
+                                Connector.Instance.SubscribeToTicks(
+                                    capturedNativeSymbol,
+                                    capturedMarketType,
+                                    capturedOriginalSymbol,
                                     this._l1Subscriptions,
                                     new WebSocketConnectionFunc((Func<bool>)(() =>
                                     {
                                         lock (QAAdapter._lockLiveSymbol)
-                                            return !this._marketLiveDataSymbols.Contains(nativeSymbolName);
+                                            return !this._marketLiveDataSymbols.Contains(capturedNativeSymbol);
                                     }))
-                                );
+                                ).GetAwaiter().GetResult();
+                                Logger.Info($"[SUBSCRIBE] SubscribeToTicks completed for {capturedName}");
                             }
                             catch (Exception ex)
                             {
@@ -290,15 +327,24 @@ namespace QANinjaAdapter
                                 // to allow retry on next subscription request
                                 lock (QAAdapter._lockLiveSymbol)
                                 {
-                                    if (this._marketLiveDataSymbols.Contains(nativeSymbolName))
-                                        this._marketLiveDataSymbols.Remove(nativeSymbolName);
+                                    if (this._marketLiveDataSymbols.Contains(capturedNativeSymbol))
+                                        this._marketLiveDataSymbols.Remove(capturedNativeSymbol);
                                 }
+                                Logger.Error($"[SUBSCRIBE] Error subscribing to {capturedName}: {ex.Message}");
 
                                 if (this._ninjaConnection.Trace.Connect)
                                     this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
                                         $"({this._options.Name}) QAAdapter.SubscribeToTicks Exception={ex}"));
                             }
                         });
+                        thread.IsBackground = true;
+                        thread.Name = $"WS_{capturedName}";
+                        thread.Start();
+                        Logger.Info($"[SUBSCRIBE] Thread launched for {capturedName}, ThreadId={thread.ManagedThreadId}");
+                    }
+                    else
+                    {
+                        Logger.Info($"[SUBSCRIBE] {name} already in _marketLiveDataSymbols, skipping subscription");
                     }
                 }
             }
@@ -802,15 +848,17 @@ namespace QANinjaAdapter
             try
             {
                 // Ensure leg is in subscriptions map so MarketDataService processes it
+                Logger.Info($"[SYNTH-LEG] SubscribeToSyntheticLeg called for {legSymbol}");
                 if (!_l1Subscriptions.ContainsKey(legSymbol))
                 {
-                    var sub = new L1Subscription 
-                    { 
+                    Logger.Info($"[SYNTH-LEG] Adding local subscription entry for {legSymbol}");
+                    var sub = new L1Subscription
+                    {
                         IsIndex = false,
                         L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>()
                     };
                     _l1Subscriptions.TryAdd(legSymbol, sub);
-                    
+
                     // Update Processor Cache for the new leg subscription
                     MarketDataService.Instance.UpdateProcessorSubscriptionCache(this._l1Subscriptions);
                 }
@@ -821,39 +869,69 @@ namespace QANinjaAdapter
                     {
                         MarketType mt;
                         string originalSymbol = Connector.GetSymbolName(legSymbol, out mt);
+
+                        // CRITICAL FIX: Detect MCX symbols by checking for CRUDE, GOLD, SILVER, etc.
+                        // The GetSymbolName method doesn't properly detect MCX from option symbols like CRUDEOIL26JAN5200CE
+                        if (legSymbol.StartsWith("CRUDEOIL", StringComparison.OrdinalIgnoreCase) ||
+                            legSymbol.StartsWith("GOLD", StringComparison.OrdinalIgnoreCase) ||
+                            legSymbol.StartsWith("SILVER", StringComparison.OrdinalIgnoreCase) ||
+                            legSymbol.StartsWith("NATURALGAS", StringComparison.OrdinalIgnoreCase) ||
+                            legSymbol.StartsWith("COPPER", StringComparison.OrdinalIgnoreCase))
+                        {
+                            mt = MarketType.MCX;
+                            Logger.Info($"[SYNTH-LEG] Detected MCX commodity symbol: {legSymbol}, forcing MarketType=MCX");
+                        }
+
+                        Logger.Info($"[SYNTH-LEG] Initiating live connection for {legSymbol} (originalSymbol={originalSymbol}, marketType={mt})");
                         this._marketLiveDataSymbols.Add(legSymbol);
 
-                        Task.Run(async () => {
+                        // CRITICAL: Capture variables for closure to avoid race conditions
+                        string capturedLegSymbol = legSymbol;
+                        string capturedOriginalSymbol = originalSymbol;
+                        MarketType capturedMarketType = mt;
+
+                        // Use dedicated Thread to completely bypass thread pool starvation
+                        var thread = new Thread(() => {
                             try
                             {
-                                await Connector.Instance.SubscribeToTicks(
-                                    legSymbol,
-                                    mt,
-                                    originalSymbol,
+                                Logger.Info($"[SYNTH-LEG] Thread STARTED for {capturedLegSymbol}");
+                                Connector.Instance.SubscribeToTicks(
+                                    capturedLegSymbol,
+                                    capturedMarketType,
+                                    capturedOriginalSymbol,
                                     this._l1Subscriptions,
                                     new WebSocketConnectionFunc((Func<bool>)(() =>
                                     {
                                         lock (QAAdapter._lockLiveSymbol)
-                                            return !this._marketLiveDataSymbols.Contains(legSymbol);
+                                            return !this._marketLiveDataSymbols.Contains(capturedLegSymbol);
                                     }))
-                                );
+                                ).GetAwaiter().GetResult();
+                                Logger.Info($"[SYNTH-LEG] SubscribeToTicks completed for {capturedLegSymbol}");
                             }
                             catch (Exception ex)
                             {
                                 lock (QAAdapter._lockLiveSymbol)
                                 {
-                                    if (this._marketLiveDataSymbols.Contains(legSymbol))
-                                        this._marketLiveDataSymbols.Remove(legSymbol);
+                                    if (this._marketLiveDataSymbols.Contains(capturedLegSymbol))
+                                        this._marketLiveDataSymbols.Remove(capturedLegSymbol);
                                 }
-                                Logger.Error($"QAAdapter: Error subscribing to leg {legSymbol}: {ex.Message}");
+                                Logger.Error($"[SYNTH-LEG] Error subscribing to leg {capturedLegSymbol}: {ex.Message}");
                             }
                         });
+                        thread.IsBackground = true;
+                        thread.Name = $"WS_LEG_{capturedLegSymbol}";
+                        thread.Start();
+                        Logger.Info($"[SYNTH-LEG] Thread launched for {capturedLegSymbol}");
+                    }
+                    else
+                    {
+                        Logger.Info($"[SYNTH-LEG] {legSymbol} already in _marketLiveDataSymbols, skipping subscription");
                     }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Error($"QAAdapter: Error in SubscribeToSyntheticLeg for {legSymbol}: {ex.Message}");
+                Logger.Error($"[SYNTH-LEG] Error in SubscribeToSyntheticLeg for {legSymbol}: {ex.Message}");
             }
         }
 

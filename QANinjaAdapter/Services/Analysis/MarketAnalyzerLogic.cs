@@ -1,10 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using QABrokerAPI.Common.Enums;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Instruments;
 
@@ -134,6 +138,10 @@ namespace QANinjaAdapter.Services.Analysis
         public double GiftNiftyPrice { get; private set; }
         public double NiftySpotPrice { get; private set; }
         public double SensexSpotPrice { get; private set; }
+
+        // Current dynamic instrument list for straddles
+        private InstrumentList _currentInstrumentList;
+        public InstrumentList CurrentStraddleList => _currentInstrumentList;
         public double GiftNiftyPriorClose { get; private set; }
 
         // Ticker data for UI binding
@@ -440,6 +448,9 @@ namespace QANinjaAdapter.Services.Analysis
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Generated {generated.Count} option symbols");
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Strike range = {atmStrike - (30 * stepSize)} to {atmStrike + (30 * stepSize)}");
 
+                // Generate straddles_config.json from the generated options
+                GenerateStraddlesConfig(generated, selectedUnderlying, selectedExpiry);
+
                 // Fire event to notify subscribers
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Invoking OptionsGenerated event...");
                 OptionsGenerated?.Invoke(generated);
@@ -490,6 +501,225 @@ namespace QANinjaAdapter.Services.Analysis
         private bool IsSameDay(DateTime d1, DateTime d2)
         {
             return d1.Date == d2.Date;
+        }
+
+        /// <summary>
+        /// Generates straddles_config.json from the generated options
+        /// Creates straddle definitions for each strike (CE + PE pair)
+        /// </summary>
+        private void GenerateStraddlesConfig(List<MappedInstrument> options, string underlying, DateTime expiry)
+        {
+            try
+            {
+                Logger.Info($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Creating straddles for {underlying} expiry {expiry:yyyy-MM-dd}");
+
+                // Group options by strike
+                var strikeGroups = options
+                    .Where(o => o.strike.HasValue)
+                    .GroupBy(o => o.strike.Value)
+                    .OrderBy(g => g.Key);
+
+                var straddles = new List<object>();
+
+                foreach (var group in strikeGroups)
+                {
+                    var ce = group.FirstOrDefault(o => o.option_type == "CE");
+                    var pe = group.FirstOrDefault(o => o.option_type == "PE");
+
+                    if (ce != null && pe != null)
+                    {
+                        // Create synthetic straddle symbol: NIFTY25DEC23400_STRDL
+                        string monthAbbr = expiry.ToString("MMM").ToUpper();
+                        string syntheticSymbol = $"{underlying}{expiry:yy}{monthAbbr}{group.Key:F0}_STRDL";
+
+                        straddles.Add(new
+                        {
+                            SyntheticSymbolNinjaTrader = syntheticSymbol,
+                            CESymbol = ce.symbol,
+                            PESymbol = pe.symbol
+                        });
+                    }
+                }
+
+                // Write to straddles_config.json
+                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "QAAdapter", "straddles_config.json");
+
+                // Ensure directory exists
+                string dir = Path.GetDirectoryName(configPath);
+                if (!Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                var config = new { Straddles = straddles };
+                string json = JsonConvert.SerializeObject(config, Formatting.Indented);
+                File.WriteAllText(configPath, json);
+
+                Logger.Info($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Written {straddles.Count} straddles to {configPath}");
+
+                // Reload straddle configurations in the service
+                try
+                {
+                    var adapter = Connector.Instance.GetAdapter() as QAAdapter;
+                    adapter?.SyntheticStraddleService?.ReloadConfigurations();
+                    Logger.Info("[MarketAnalyzerLogic] GenerateStraddlesConfig(): Triggered straddle config reload");
+                }
+                catch (Exception reloadEx)
+                {
+                    Logger.Warn($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Could not reload straddle config - {reloadEx.Message}");
+                }
+
+                // Create NinjaTrader instruments for synthetic straddles
+                CreateSyntheticStraddleInstruments(strikeGroups, underlying, expiry);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Exception - {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Creates NinjaTrader instruments for synthetic straddle symbols
+        /// </summary>
+        private void CreateSyntheticStraddleInstruments(IOrderedEnumerable<IGrouping<double, MappedInstrument>> strikeGroups, string underlying, DateTime expiry)
+        {
+            try
+            {
+                Logger.Info($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Creating NT instruments for {underlying} straddles");
+                int created = 0;
+
+                foreach (var group in strikeGroups)
+                {
+                    var ce = group.FirstOrDefault(o => o.option_type == "CE");
+                    var pe = group.FirstOrDefault(o => o.option_type == "PE");
+
+                    if (ce != null && pe != null)
+                    {
+                        string monthAbbr = expiry.ToString("MMM").ToUpper();
+                        string straddleSymbol = $"{underlying}{expiry:yy}{monthAbbr}{group.Key:F0}_STRDL";
+
+                        // Create instrument definition for the synthetic straddle
+                        var instrumentDef = new InstrumentDefinition
+                        {
+                            Symbol = straddleSymbol,
+                            BrokerSymbol = straddleSymbol,
+                            Segment = underlying == "SENSEX" ? "BSE" : "NSE",
+                            MarketType = MarketType.UsdM // Synthetic options use UsdM
+                        };
+
+                        // Create instrument on UI thread
+                        NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                        {
+                            try
+                            {
+                                bool success = InstrumentManager.Instance.CreateInstrument(instrumentDef, out string ntName);
+                                if (success)
+                                {
+                                    Logger.Debug($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Created NT instrument {ntName}");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Error creating {straddleSymbol} - {ex.Message}");
+                            }
+                        });
+
+                        created++;
+                    }
+                }
+
+                Logger.Info($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Queued {created} synthetic straddle instruments for creation");
+
+                // Create dynamic instrument list after a delay to allow instruments to be created
+                Task.Delay(2000).ContinueWith(_ =>
+                {
+                    NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                    {
+                        CreateDynamicInstrumentList(strikeGroups, underlying, expiry);
+                    });
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Exception - {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Creates a dynamic NinjaTrader InstrumentList containing all generated straddle instruments.
+        /// List naming: SX_DDMMMYY for SENSEX, NF_DDMMMYY for NIFTY
+        /// </summary>
+        private void CreateDynamicInstrumentList(IOrderedEnumerable<IGrouping<double, MappedInstrument>> strikeGroups, string underlying, DateTime expiry)
+        {
+            try
+            {
+                // Create list name: SX_24DEC24 for SENSEX, NF_24DEC24 for NIFTY
+                string prefix = underlying == "SENSEX" ? "SX" : "NF";
+                string listName = $"{prefix}_{expiry:ddMMMyy}".ToUpper();
+
+                Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Creating instrument list '{listName}'");
+
+                // Check if list already exists and remove it
+                var existingList = InstrumentList.All.FirstOrDefault(l => l.Name == listName);
+                if (existingList != null)
+                {
+                    existingList.Instruments.Clear();
+                    Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Cleared existing list '{listName}'");
+                }
+                else
+                {
+                    // Create new list
+                    existingList = new InstrumentList { Name = listName };
+                    Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Created new list '{listName}'");
+                }
+
+                int addedCount = 0;
+
+                // Add straddle instruments to the list
+                foreach (var group in strikeGroups)
+                {
+                    var ce = group.FirstOrDefault(o => o.option_type == "CE");
+                    var pe = group.FirstOrDefault(o => o.option_type == "PE");
+
+                    if (ce != null && pe != null)
+                    {
+                        string monthAbbr = expiry.ToString("MMM").ToUpper();
+                        string straddleSymbol = $"{underlying}{expiry:yy}{monthAbbr}{group.Key:F0}_STRDL";
+
+                        // Find the instrument in NinjaTrader's instrument database
+                        var instrument = Instrument.All.FirstOrDefault(i =>
+                            i.FullName.Equals(straddleSymbol, StringComparison.OrdinalIgnoreCase) ||
+                            i.MasterInstrument.Name.Equals(straddleSymbol, StringComparison.OrdinalIgnoreCase));
+
+                        if (instrument != null)
+                        {
+                            if (!existingList.Instruments.Contains(instrument))
+                            {
+                                existingList.Instruments.Add(instrument);
+                                addedCount++;
+                                Logger.Debug($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Added {straddleSymbol} to list");
+                            }
+                        }
+                        else
+                        {
+                            Logger.Debug($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Instrument '{straddleSymbol}' not found in database");
+                        }
+                    }
+                }
+
+                Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Added {addedCount} instruments to list '{listName}'");
+
+                // Store reference for use by Market Analyzer / other components
+                // Note: Programmatically created InstrumentLists may not appear in Control Center GUI
+                // but can be accessed via InstrumentList.All for use in scripts
+                _currentInstrumentList = existingList;
+                Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): List '{listName}' ready for use");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Exception - {ex.Message}", ex);
+            }
         }
     }
 }

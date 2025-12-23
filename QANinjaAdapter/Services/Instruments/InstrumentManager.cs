@@ -33,6 +33,7 @@ namespace QANinjaAdapter.Services.Instruments
         
         private string _sqliteDbFullPath;
         private bool _isInitialized = false;
+        private static readonly object _fileLock = new object();
 
         /// <summary>
         /// Gets the singleton instance of the InstrumentManager
@@ -161,7 +162,10 @@ namespace QANinjaAdapter.Services.Instruments
                 string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.FOMappingsFileName);
 
                 // Create empty array - will be populated as options are generated
-                File.WriteAllText(jsonFilePath, "[]");
+                lock (_fileLock)
+                {
+                    File.WriteAllText(jsonFilePath, "[]");
+                }
                 Logger.Info("InstrumentManager: Cleared F&O mappings file for fresh session.");
             }
             catch (Exception ex)
@@ -245,18 +249,21 @@ namespace QANinjaAdapter.Services.Instruments
                 string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
                 string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.FOMappingsFileName);
 
-                List<MappedInstrument> currentList = new List<MappedInstrument>();
-                if (File.Exists(jsonFilePath))
+                lock (_fileLock)
                 {
-                    string content = File.ReadAllText(jsonFilePath);
-                    currentList = JsonConvert.DeserializeObject<List<MappedInstrument>>(content) ?? new List<MappedInstrument>();
+                    List<MappedInstrument> currentList = new List<MappedInstrument>();
+                    if (File.Exists(jsonFilePath))
+                    {
+                        string content = File.ReadAllText(jsonFilePath);
+                        currentList = JsonConvert.DeserializeObject<List<MappedInstrument>>(content) ?? new List<MappedInstrument>();
+                    }
+
+                    // Remove existing if any
+                    currentList.RemoveAll(x => x.symbol == instrument.symbol);
+                    currentList.Add(instrument);
+
+                    File.WriteAllText(jsonFilePath, JsonConvert.SerializeObject(currentList, Formatting.Indented));
                 }
-
-                // Remove existing if any
-                currentList.RemoveAll(x => x.symbol == instrument.symbol);
-                currentList.Add(instrument);
-
-                File.WriteAllText(jsonFilePath, JsonConvert.SerializeObject(currentList, Formatting.Indented));
 
             }
             catch (Exception ex)
@@ -1212,11 +1219,11 @@ namespace QANinjaAdapter.Services.Instruments
             switch (marketType)
             {
                 case MarketType.Spot:
-                    return "_NSE";
+                    return ""; // Was "_NSE"
                 case MarketType.UsdM:
-                    return "_NFO";
+                    return ""; // Was "_NFO"
                 case MarketType.CoinM:
-                    return "_MCX";
+                    return ""; // Was "_MCX"
                 default:
                     return string.Empty;
             }

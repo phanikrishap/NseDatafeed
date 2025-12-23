@@ -14,6 +14,7 @@ using NinjaTrader.Gui.Tools;
 using QANinjaAdapter;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Analysis;
+using QANinjaAdapter.SyntheticInstruments;
 
 namespace QANinjaAdapter.AddOns.MarketAnalyzer
 {
@@ -69,12 +70,22 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         public double PEPrice { get; set; }
         public string PESymbol { get; set; }
 
-        // Straddle = CE + PE
-        public string StraddlePrice => (CEPrice > 0 && PEPrice > 0)
-            ? (CEPrice + PEPrice).ToString("F2")
-            : "---";
+        // Synthetic Straddle price from SyntheticStraddleService (live calculated)
+        public double SyntheticStraddlePrice { get; set; }
 
-        public double StraddleValue => (CEPrice > 0 && PEPrice > 0) ? CEPrice + PEPrice : double.MaxValue;
+        // Straddle = Synthetic straddle price (if available) or CE + PE fallback
+        public string StraddlePrice => SyntheticStraddlePrice > 0
+            ? SyntheticStraddlePrice.ToString("F2")
+            : (CEPrice > 0 && PEPrice > 0)
+                ? (CEPrice + PEPrice).ToString("F2")
+                : "---";
+
+        public double StraddleValue => SyntheticStraddlePrice > 0
+            ? SyntheticStraddlePrice
+            : (CEPrice > 0 && PEPrice > 0) ? CEPrice + PEPrice : double.MaxValue;
+
+        // Straddle symbol for the synthetic instrument (e.g., NIFTY25DEC24000_STRDL)
+        public string StraddleSymbol { get; set; }
 
         public bool IsATM { get; set; }
 
@@ -151,6 +162,9 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
         // Mapping from generated symbol to zerodha symbol (resolved from DB)
         private Dictionary<string, string> _generatedToZerodhaMap = new Dictionary<string, string>();
+
+        // Mapping from straddle symbol to row for synthetic straddle price updates
+        private Dictionary<string, OptionChainRow> _straddleSymbolToRowMap = new Dictionary<string, OptionChainRow>();
 
         // NinjaTrader-style colors
         private static readonly SolidColorBrush _bgColor = new SolidColorBrush(Color.FromRgb(27, 27, 28));
@@ -519,6 +533,18 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             SubscriptionManager.Instance.SymbolResolved += OnSymbolResolved;
             MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
 
+            // Subscribe to synthetic straddle price events
+            var adapter = Connector.Instance.GetAdapter() as QAAdapter;
+            if (adapter?.SyntheticStraddleService != null)
+            {
+                adapter.SyntheticStraddleService.StraddlePriceCalculated += OnStraddlePriceCalculated;
+                Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribed to SyntheticStraddleService.StraddlePriceCalculated");
+            }
+            else
+            {
+                Logger.Warn("[OptionChainTabPage] OnTabPageLoaded: SyntheticStraddleService not available");
+            }
+
             _lblStatus.Text = "Waiting for option chain data...";
         }
 
@@ -530,6 +556,13 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;
             SubscriptionManager.Instance.SymbolResolved -= OnSymbolResolved;
             MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
+
+            // Unsubscribe from synthetic straddle price events
+            var adapter = Connector.Instance.GetAdapter() as QAAdapter;
+            if (adapter?.SyntheticStraddleService != null)
+            {
+                adapter.SyntheticStraddleService.StraddlePriceCalculated -= OnStraddlePriceCalculated;
+            }
         }
 
         private void OnOptionsGenerated(List<MappedInstrument> options)
@@ -543,6 +576,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                     _rows.Clear();
                     _symbolToRowMap.Clear();
                     _generatedToZerodhaMap.Clear();
+                    _straddleSymbolToRowMap.Clear();
 
                     if (options.Count == 0) return;
 
@@ -583,13 +617,23 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                             Logger.Debug($"[OptionChainTabPage] Mapped PE: {pe.symbol} -> Strike {row.Strike}");
                         }
 
+                        // Create straddle symbol mapping (e.g., NIFTY25DEC24000_STRDL)
+                        if (_expiry.HasValue && ce != null && pe != null)
+                        {
+                            string monthAbbr = _expiry.Value.ToString("MMM").ToUpper();
+                            string straddleSymbol = $"{_underlying}{_expiry.Value:yy}{monthAbbr}{group.Key:F0}_STRDL";
+                            row.StraddleSymbol = straddleSymbol;
+                            _straddleSymbolToRowMap[straddleSymbol] = row;
+                            Logger.Debug($"[OptionChainTabPage] Mapped Straddle: {straddleSymbol} -> Strike {row.Strike}");
+                        }
+
                         _rows.Add(row);
                     }
 
                     _lblStatus.Text = $"Loaded {_rows.Count} strikes for {_underlying}";
                     _listView.Items.Refresh();
 
-                    Logger.Info($"[OptionChainTabPage] OnOptionsGenerated: Created {_rows.Count} strike rows, mapped {_symbolToRowMap.Count} symbols");
+                    Logger.Info($"[OptionChainTabPage] OnOptionsGenerated: Created {_rows.Count} strike rows, mapped {_symbolToRowMap.Count} symbols, {_straddleSymbolToRowMap.Count} straddles");
                 }
                 catch (Exception ex)
                 {
@@ -689,6 +733,36 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 catch (Exception ex)
                 {
                     Logger.Error($"[OptionChainTabPage] OnOptionStatusUpdated: Exception - {ex.Message}", ex);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Handles synthetic straddle price updates from SyntheticStraddleService
+        /// </summary>
+        private void OnStraddlePriceCalculated(string straddleSymbol, double price, double cePrice, double pePrice)
+        {
+            Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    if (_straddleSymbolToRowMap.TryGetValue(straddleSymbol, out var row))
+                    {
+                        row.SyntheticStraddlePrice = price;
+                        Logger.Debug($"[OptionChainTabPage] OnStraddlePriceCalculated: {straddleSymbol} -> Strike {row.Strike} = {price:F2} (CE={cePrice:F2}, PE={pePrice:F2})");
+
+                        UpdateATMStrike();
+                        _listView.Items.Refresh();
+                    }
+                    else
+                    {
+                        // Try to find by parsing the strike from the symbol (e.g., NIFTY25DEC24000_STRDL -> 24000)
+                        Logger.Debug($"[OptionChainTabPage] OnStraddlePriceCalculated: No direct mapping for '{straddleSymbol}', attempting strike extraction");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[OptionChainTabPage] OnStraddlePriceCalculated: Exception - {ex.Message}", ex);
                 }
             });
         }
@@ -859,6 +933,13 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;
             SubscriptionManager.Instance.SymbolResolved -= OnSymbolResolved;
             MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
+
+            // Unsubscribe from synthetic straddle price events
+            var adapter = Connector.Instance.GetAdapter() as QAAdapter;
+            if (adapter?.SyntheticStraddleService != null)
+            {
+                adapter.SyntheticStraddleService.StraddlePriceCalculated -= OnStraddlePriceCalculated;
+            }
 
             base.Cleanup();
         }
