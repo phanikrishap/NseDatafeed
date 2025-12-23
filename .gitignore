@@ -76,3 +76,8 @@ secrets.json
 auth.json
 token.json
 credentials.json
+
+# Windows reserved names (accidentally created)
+nul
+(c)
+Microsoft

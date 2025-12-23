@@ -70,19 +70,38 @@ namespace QANinjaAdapter.Services.Instruments
         }
 
         /// <summary>
-        /// Gets the most appropriate trading hours template name for a segment.
+        /// Gets the most appropriate trading hours template name for a segment and symbol.
         /// </summary>
-        public static string GetTradingHoursTemplate(string segment)
+        public static string GetTradingHoursTemplate(string segment, string symbol = null)
         {
-            if (string.IsNullOrEmpty(segment)) return "Default 24 x 7";
+            // Special handling for specific symbols
+            if (!string.IsNullOrEmpty(symbol))
+            {
+                string upperSymbol = symbol.ToUpperInvariant();
+
+                // GIFT NIFTY trades 24/7 (NSE IFSC)
+                if (upperSymbol.Contains("GIFT") || upperSymbol.Contains("NSE_IFSC"))
+                    return "Default 24 x 7";
+
+                // Indian indices (NIFTY, SENSEX, BANKNIFTY, etc.) use NSE hours
+                if (upperSymbol == "NIFTY" || upperSymbol == "NIFTY 50" ||
+                    upperSymbol == "SENSEX" || upperSymbol == "BANKNIFTY" ||
+                    upperSymbol == "FINNIFTY" || upperSymbol == "MIDCPNIFTY")
+                    return "Nse";
+            }
+
+            // Segment-based logic
+            if (string.IsNullOrEmpty(segment)) return "Nse"; // Default to Nse for Indian market
 
             segment = segment.ToUpperInvariant();
             if (segment.Contains("NSE") || segment.Contains("NFO") || segment.Contains("BSE") || segment.Contains("BFO"))
                 return "Nse";
             if (segment.Contains("MCX"))
                 return "MCX";
+            if (segment.Contains("IFSC"))
+                return "Default 24 x 7";
 
-            return "Default 24 x 7";
+            return "Nse"; // Default to Nse for Indian market
         }
     }
 }

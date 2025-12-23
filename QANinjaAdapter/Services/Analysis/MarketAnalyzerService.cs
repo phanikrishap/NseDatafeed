@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using NinjaTrader.Cbi;
@@ -249,6 +250,36 @@ namespace QANinjaAdapter.Services.Analysis
                     {
                         Logger.Info($"[MarketAnalyzerService] RequestHistoricalData({instrumentName}): Success - received {records.Count} bars");
                         _logic.NotifyHistoricalDataStatus(instrumentName, $"Done ({records.Count})");
+
+                        // Extract last price (most recent bar's close) and prior close for change calculation
+                        var sortedRecords = records.OrderBy(r => r.TimeStamp).ToList();
+                        var lastRecord = sortedRecords.Last();
+                        double lastPrice = lastRecord.Close;
+
+                        // Find prior close - the close of the previous trading day
+                        double priorClose = 0;
+                        DateTime lastTradingDay = lastRecord.TimeStamp.Date;
+
+                        // Find the last record from a previous day
+                        var priorDayRecord = sortedRecords
+                            .Where(r => r.TimeStamp.Date < lastTradingDay)
+                            .OrderByDescending(r => r.TimeStamp)
+                            .FirstOrDefault();
+
+                        if (priorDayRecord != null)
+                        {
+                            priorClose = priorDayRecord.Close;
+                            Logger.Info($"[MarketAnalyzerService] RequestHistoricalData({instrumentName}): PriorClose={priorClose} from {priorDayRecord.TimeStamp:yyyy-MM-dd HH:mm}");
+                        }
+                        else
+                        {
+                            Logger.Warn($"[MarketAnalyzerService] RequestHistoricalData({instrumentName}): Could not find prior day close");
+                        }
+
+                        Logger.Info($"[MarketAnalyzerService] RequestHistoricalData({instrumentName}): LastPrice={lastPrice} from {lastRecord.TimeStamp:yyyy-MM-dd HH:mm}, PriorClose={priorClose}");
+
+                        // Update the logic with historical data prices
+                        _logic.UpdatePrice(instrumentName, lastPrice, priorClose);
                     }
                     else
                     {

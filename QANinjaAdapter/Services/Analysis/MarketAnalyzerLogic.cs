@@ -300,7 +300,7 @@ namespace QANinjaAdapter.Services.Analysis
 
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): DTE calculations - NIFTY DTE={niftyDTE}, SENSEX DTE={sensexDTE}");
 
-                // Priority Rules:
+                // Priority Rules based on DTE:
                 // 1. NIFTY DTE = 0 (0DTE)
                 // 2. SENSEX DTE = 0
                 // 3. NIFTY DTE = 1 (1DTE)
@@ -311,7 +311,6 @@ namespace QANinjaAdapter.Services.Analysis
                 {
                     selectedUnderlying = "NIFTY";
                     selectedExpiry = niftyNear;
-                    projectedPrice = niftyProjected;
                     stepSize = 50;
                     Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Selected NIFTY 0DTE (Priority 1)");
                 }
@@ -319,7 +318,6 @@ namespace QANinjaAdapter.Services.Analysis
                 {
                     selectedUnderlying = "SENSEX";
                     selectedExpiry = sensexNear;
-                    projectedPrice = sensexProjected;
                     stepSize = 100;
                     Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Selected SENSEX 0DTE (Priority 2)");
                 }
@@ -327,7 +325,6 @@ namespace QANinjaAdapter.Services.Analysis
                 {
                     selectedUnderlying = "NIFTY";
                     selectedExpiry = niftyNear;
-                    projectedPrice = niftyProjected;
                     stepSize = 50;
                     Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Selected NIFTY 1DTE (Priority 3)");
                 }
@@ -335,7 +332,6 @@ namespace QANinjaAdapter.Services.Analysis
                 {
                     selectedUnderlying = "SENSEX";
                     selectedExpiry = sensexNear;
-                    projectedPrice = sensexProjected;
                     stepSize = 100;
                     Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Selected SENSEX 1DTE (Priority 4)");
                 }
@@ -343,9 +339,55 @@ namespace QANinjaAdapter.Services.Analysis
                 {
                     selectedUnderlying = "NIFTY";
                     selectedExpiry = niftyNear;
-                    projectedPrice = niftyProjected;
                     stepSize = 50;
                     Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Default to NIFTY (DTE={niftyDTE})");
+                }
+
+                // Now wait for the selected underlying's projected price (max 30 seconds)
+                projectedPrice = selectedUnderlying == "NIFTY" ? niftyProjected : sensexProjected;
+                double minValidPrice = selectedUnderlying == "NIFTY" ? 1000 : 10000;
+
+                if (projectedPrice < minValidPrice)
+                {
+                    Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Waiting for {selectedUnderlying} projected price (current={projectedPrice:F0}, min={minValidPrice})...");
+                    StatusUpdated?.Invoke($"Waiting for {selectedUnderlying} price data...");
+
+                    int waitedMs = 0;
+                    const int maxWaitMs = 30000; // 30 seconds max wait
+                    const int pollIntervalMs = 500;
+
+                    while (waitedMs < maxWaitMs)
+                    {
+                        await Task.Delay(pollIntervalMs);
+                        waitedMs += pollIntervalMs;
+
+                        // Re-check the projected price - recalculate from spot price and GIFT NIFTY change
+                        double spotPrice = selectedUnderlying == "NIFTY" ? NiftySpotPrice : SensexSpotPrice;
+                        if (spotPrice > 0 && GiftNiftyPriorClose > 0 && GiftNiftyPrice > 0)
+                        {
+                            double changePercent = (GiftNiftyPrice - GiftNiftyPriorClose) / GiftNiftyPriorClose;
+                            projectedPrice = spotPrice * (1 + changePercent);
+                        }
+
+                        if (projectedPrice >= minValidPrice)
+                        {
+                            Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Got {selectedUnderlying} price={projectedPrice:F0} after {waitedMs}ms");
+                            break;
+                        }
+
+                        if (waitedMs % 5000 == 0) // Log every 5 seconds
+                        {
+                            Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Still waiting for {selectedUnderlying} price... ({waitedMs / 1000}s)");
+                        }
+                    }
+
+                    if (projectedPrice < minValidPrice)
+                    {
+                        Logger.Error($"[MarketAnalyzerLogic] GenerateOptions(): Timeout waiting for {selectedUnderlying} price after {maxWaitMs / 1000}s - aborting");
+                        _optionsAlreadyGenerated = false;
+                        StatusUpdated?.Invoke($"Timeout: No {selectedUnderlying} price received");
+                        return;
+                    }
                 }
 
                 // Round projected price to step size for ATM strike

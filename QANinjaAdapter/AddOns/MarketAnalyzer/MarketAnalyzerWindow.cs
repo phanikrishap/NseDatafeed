@@ -66,10 +66,17 @@ namespace NinjaTrader.NinjaScript.AddOns
                 {
                     try
                     {
+                        // Open Market Analyzer window
                         Logger.Debug("[MarketAnalyzerAddOn] OnWindowCreated(): Creating MarketAnalyzerWindow instance");
                         var win = new MarketAnalyzerWindow();
                         win.Show();
                         Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): MarketAnalyzerWindow shown successfully");
+
+                        // Also open Option Chain window automatically
+                        Logger.Debug("[MarketAnalyzerAddOn] OnWindowCreated(): Creating OptionChainWindow instance");
+                        var chainWin = new OptionChainWindow();
+                        chainWin.Show();
+                        Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): OptionChainWindow shown successfully");
                     }
                     catch (Exception ex)
                     {
@@ -145,6 +152,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
     public class AnalyzerRow
     {
         public string Symbol { get; set; }
+        public string InternalSymbol { get; set; } // The actual trading symbol (e.g., NIFTY25DEC2325300CE)
         public string Last { get; set; }
         public string Change { get; set; }
         public string ProjOpen { get; set; }
@@ -176,9 +184,6 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         private static readonly SolidColorBrush _rowAltBg = new SolidColorBrush(Color.FromRgb(30, 30, 31));
         private static readonly SolidColorBrush _selectionBg = new SolidColorBrush(Color.FromRgb(51, 51, 52));
         private static readonly FontFamily _ntFont = new FontFamily("Segoe UI");
-
-        // Store option data for display
-        private List<MappedInstrument> _generatedOptions = new List<MappedInstrument>();
 
         public MarketAnalyzerWindow()
         {
@@ -220,7 +225,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 Loaded += OnWindowLoaded;
                 Unloaded += OnWindowUnloaded;
 
-                // Subscribe to Service Events
+                // Subscribe to Service Events (indices only - options handled by OptionChainWindow)
                 Logger.Debug("[MarketAnalyzerWindow] Constructor: Subscribing to MarketAnalyzerLogic events");
                 MarketAnalyzerLogic.Instance.StatusUpdated += OnStatusUpdated;
                 MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
@@ -269,7 +274,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
             var title = new TextBlock
             {
-                Text = "Index & Options Monitor",
+                Text = "Index Monitor",
                 FontFamily = _ntFont,
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
@@ -535,45 +540,15 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
         private void OnOptionsGenerated(List<MappedInstrument> options)
         {
-            Logger.Info($"[MarketAnalyzerWindow] OnOptionsGenerated: Received {options.Count} options");
+            // Options are handled by OptionChainWindow - just update status here
+            Logger.Info($"[MarketAnalyzerWindow] OnOptionsGenerated: {options.Count} options generated (displayed in Option Chain window)");
 
             Dispatcher.InvokeAsync(() =>
             {
-                try
+                if (options.Count > 0)
                 {
-                    _generatedOptions = options;
-
-                    // Add options to the grid
-                    foreach (var opt in options)
-                    {
-                        string symbolDisplay = $"{opt.underlying} {opt.strike} {opt.option_type}";
-                        string expiryDisplay = opt.expiry.HasValue ? opt.expiry.Value.ToString("dd-MMM") : "---";
-
-                        // Check if already exists
-                        var existing = _rows.FirstOrDefault(r => r.Symbol == symbolDisplay);
-                        if (existing == null)
-                        {
-                            _rows.Add(new AnalyzerRow
-                            {
-                                Symbol = symbolDisplay,
-                                Last = "---",
-                                Change = "---",
-                                ProjOpen = "---",
-                                Expiry = expiryDisplay,
-                                Status = "Subscribed",
-                                IsPositive = true,
-                                IsOption = true
-                            });
-                        }
-                    }
-
-                    _listView.Items.Refresh();
-                    _lblStatus.Text = $"Generated {options.Count} option symbols";
-                    Logger.Info("[MarketAnalyzerWindow] OnOptionsGenerated: Options added to grid");
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[MarketAnalyzerWindow] OnOptionsGenerated: Exception - {ex.Message}", ex);
+                    var first = options.First();
+                    _lblStatus.Text = $"Generated {options.Count} {first.underlying} options for {first.expiry:dd-MMM}";
                 }
             });
         }

@@ -15,7 +15,9 @@ namespace QANinjaAdapter.Classes
         // File and Directory Paths
         public const string BaseDataFolder = "NinjaTrader 8\\QAAdapter\\";
         public const string ConfigFileName = "config.json";
-        public const string MappedInstrumentsFileName = "mapped_instruments.json";
+        public const string IndexMappingsFileName = "index_mappings.json";      // Static indices - never changes
+        public const string FOMappingsFileName = "fo_mappings.json";             // F&O - recreated on startup
+        public const string MappedInstrumentsFileName = "mapped_instruments.json"; // Legacy - to be removed
         public const string InstrumentDbFileName = "InstrumentMasters.db";
     }
 }

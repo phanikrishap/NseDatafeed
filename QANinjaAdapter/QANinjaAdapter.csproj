@@ -219,6 +219,7 @@
     <Compile Include="Services\Analysis\MarketAnalyzerService.cs" />
     <Compile Include="Services\Analysis\SubscriptionManager.cs" />
     <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerWindow.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\OptionChainWindow.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />
   </ItemGroup>

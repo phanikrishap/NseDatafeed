@@ -67,17 +67,20 @@ namespace QANinjaAdapter.Services.Instruments
             try
             {
                 Logger.Info("InstrumentManager: Starting unified initialization...");
-                
-                // 1. Load local mappings (JSON) - Fast and prioritized
-                LoadMappingsFromJson();
 
-                // 2. Ensure SQLite database is ready
+                // 1. Load static index mappings (never changes)
+                LoadIndexMappings();
+
+                // 2. Clear and prepare F&O mappings file (recreated on each startup)
+                ClearFOMappings();
+
+                // 3. Ensure SQLite database is ready
                 await EnsureDatabaseExists();
 
-                // 3. Load tokens into memory from SQLite (improves startup)
+                // 4. Load tokens into memory from SQLite (improves startup)
                 LoadTokensFromSqlite();
 
-                // 4. Optionally refresh tokens from API if memory cache is empty
+                // 5. Optionally refresh tokens from API if memory cache is empty
                 if (_symbolToTokenMap.Count < 10) // Threshold for "critically empty"
                 {
                     await LoadInstrumentTokensFromApi();
@@ -92,42 +95,78 @@ namespace QANinjaAdapter.Services.Instruments
             }
         }
 
-        private void LoadMappingsFromJson()
+        /// <summary>
+        /// Loads static index mappings (GIFT_NIFTY, NIFTY, SENSEX, BANKNIFTY) - these tokens never change
+        /// </summary>
+        private void LoadIndexMappings()
         {
             string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.MappedInstrumentsFileName);
+            string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.IndexMappingsFileName);
 
             if (!File.Exists(jsonFilePath))
             {
-                Logger.Info($"InstrumentManager: No mapping file found at {jsonFilePath}");
+                Logger.Info($"InstrumentManager: No index mapping file found at {jsonFilePath}");
                 return;
             }
 
             try
             {
                 string jsonContent = File.ReadAllText(jsonFilePath);
-                var instruments = JsonConvert.DeserializeObject<List<InstrumentDefinition>>(jsonContent);
+                var instruments = JsonConvert.DeserializeObject<List<MappedInstrument>>(jsonContent);
                 if (instruments != null)
                 {
                     foreach (var instrument in instruments)
                     {
-                        if (string.IsNullOrEmpty(instrument.Symbol) || instrument.InstrumentToken <= 0) continue;
-                        
-                        _symbolToTokenMap[instrument.Symbol] = instrument.InstrumentToken;
-                        _tokenToInstrumentDataMap[instrument.InstrumentToken] = instrument;
-                        
-                        if (!string.IsNullOrEmpty(instrument.BrokerSymbol) && 
-                            !instrument.BrokerSymbol.Equals(instrument.Symbol, StringComparison.OrdinalIgnoreCase))
+                        if (string.IsNullOrEmpty(instrument.symbol) || instrument.instrument_token <= 0) continue;
+
+                        _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
+
+                        var data = new InstrumentDefinition
                         {
-                            _symbolToTokenMap[instrument.BrokerSymbol] = instrument.InstrumentToken;
+                            Symbol = instrument.symbol,
+                            BrokerSymbol = instrument.zerodhaSymbol,
+                            Underlying = instrument.underlying,
+                            Segment = instrument.segment,
+                            InstrumentToken = instrument.instrument_token,
+                            ExchangeToken = instrument.exchange_token ?? 0,
+                            TickSize = instrument.tick_size,
+                            LotSize = instrument.lot_size
+                        };
+                        _tokenToInstrumentDataMap[instrument.instrument_token] = data;
+
+                        // Also map by zerodha symbol if different
+                        if (!string.IsNullOrEmpty(instrument.zerodhaSymbol) &&
+                            !instrument.zerodhaSymbol.Equals(instrument.symbol, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _symbolToTokenMap[instrument.zerodhaSymbol] = instrument.instrument_token;
                         }
                     }
-                    Logger.Info($"InstrumentManager: Loaded {instruments.Count} mappings from JSON.");
+                    Logger.Info($"InstrumentManager: Loaded {instruments.Count} index mappings.");
                 }
             }
             catch (Exception ex)
             {
-                Logger.Error($"InstrumentManager: Error loading JSON mappings: {ex.Message}");
+                Logger.Error($"InstrumentManager: Error loading index mappings: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Clears the F&O mappings file on startup - it will be populated dynamically
+        /// </summary>
+        private void ClearFOMappings()
+        {
+            try
+            {
+                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.FOMappingsFileName);
+
+                // Create empty array - will be populated as options are generated
+                File.WriteAllText(jsonFilePath, "[]");
+                Logger.Info("InstrumentManager: Cleared F&O mappings file for fresh session.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"InstrumentManager: Error clearing F&O mappings: {ex.Message}");
             }
         }
 
@@ -168,52 +207,57 @@ namespace QANinjaAdapter.Services.Instruments
         }
 
         /// <summary>
-        /// Adds a mapped instrument dynamically to memory and JSON file
+        /// Adds a mapped instrument dynamically to memory and F&O mappings file
         /// </summary>
         public void AddMappedInstrument(MappedInstrument instrument)
         {
-            try 
+            try
             {
                 if (instrument == null || string.IsNullOrEmpty(instrument.symbol)) return;
 
-                // Update memory maps
+                // Update memory maps - cache both the NT symbol and the zerodha symbol
                 _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
-                
+
+                // Also cache zerodhaSymbol if different from symbol (for API lookups)
+                if (!string.IsNullOrEmpty(instrument.zerodhaSymbol) &&
+                    !instrument.zerodhaSymbol.Equals(instrument.symbol, StringComparison.OrdinalIgnoreCase))
+                {
+                    _symbolToTokenMap[instrument.zerodhaSymbol] = instrument.instrument_token;
+                }
+
                 var data = new InstrumentDefinition {
                     Symbol = instrument.symbol,
                     BrokerSymbol = instrument.zerodhaSymbol,
                     Underlying = instrument.underlying,
                     Expiry = instrument.expiry,
                     Strike = instrument.strike,
-                    // Map option_type or segment to MarketType if needed
-                    MarketType = MarketType.Spot, 
+                    MarketType = MarketType.Spot,
                     Segment = instrument.segment,
                     InstrumentToken = instrument.instrument_token,
                     ExchangeToken = (long)(instrument.exchange_token ?? 0),
                     TickSize = instrument.tick_size,
                     LotSize = instrument.lot_size
                 };
-                
+
                 _tokenToInstrumentDataMap[instrument.instrument_token] = data;
-                
-                // Append to JSON file (Thread safe ideally, but for MVP straight write)
-                // Note: Reading whole file and writing back is inefficient but safe for consistency
+
+                // Write to F&O mappings file (futures and options)
                 string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.MappedInstrumentsFileName);
-                
-                List<InstrumentDefinition> currentList = new List<InstrumentDefinition>();
+                string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.FOMappingsFileName);
+
+                List<MappedInstrument> currentList = new List<MappedInstrument>();
                 if (File.Exists(jsonFilePath))
                 {
                     string content = File.ReadAllText(jsonFilePath);
-                    currentList = JsonConvert.DeserializeObject<List<InstrumentDefinition>>(content) ?? new List<InstrumentDefinition>();
+                    currentList = JsonConvert.DeserializeObject<List<MappedInstrument>>(content) ?? new List<MappedInstrument>();
                 }
-                
+
                 // Remove existing if any
-                currentList.RemoveAll(x => x.Symbol == instrument.symbol);
-                currentList.Add(data);
-                
+                currentList.RemoveAll(x => x.symbol == instrument.symbol);
+                currentList.Add(instrument);
+
                 File.WriteAllText(jsonFilePath, JsonConvert.SerializeObject(currentList, Formatting.Indented));
-                
+
             }
             catch (Exception ex)
             {
@@ -226,15 +270,26 @@ namespace QANinjaAdapter.Services.Instruments
         /// </summary>
         public async Task<List<DateTime>> GetExpiriesForUnderlying(string underlying)
         {
-            // Ensure database exists first
-            await EnsureDatabaseExists();
+            Logger.Info($"InstrumentManager: GetExpiriesForUnderlying({underlying}) called");
+
+            // Ensure database path is set and database exists
+            string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            _sqliteDbFullPath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.InstrumentDbFileName);
+
+            if (!File.Exists(_sqliteDbFullPath))
+            {
+                Logger.Info($"InstrumentManager: Database not found at {_sqliteDbFullPath}, downloading...");
+                await DownloadAndCreateInstrumentDatabase();
+            }
 
             var expiries = new List<DateTime>();
             if (string.IsNullOrEmpty(_sqliteDbFullPath) || !File.Exists(_sqliteDbFullPath))
             {
-                Logger.Warn($"InstrumentManager: Database not available for expiry lookup of {underlying}");
+                Logger.Warn($"InstrumentManager: Database still not available after download attempt for expiry lookup of {underlying}");
                 return expiries;
             }
+
+            Logger.Info($"InstrumentManager: Querying database at {_sqliteDbFullPath} for {underlying} expiries");
 
             try
             {
@@ -245,6 +300,7 @@ namespace QANinjaAdapter.Services.Instruments
                     using (var cmd = new SQLiteCommand(query, connection))
                     {
                         cmd.Parameters.AddWithValue("@underlying", underlying);
+                        Logger.Debug($"InstrumentManager: Executing query for underlying={underlying}");
                         using (var reader = cmd.ExecuteReader())
                         {
                             while (reader.Read())
@@ -363,7 +419,7 @@ namespace QANinjaAdapter.Services.Instruments
         }
 
         /// <summary>
-        /// Looks up instrument token from SQLite database
+        /// Looks up instrument token from SQLite database by symbol name
         /// </summary>
         private long LookupTokenInSqlite(string symbol)
         {
@@ -378,8 +434,8 @@ namespace QANinjaAdapter.Services.Instruments
                 {
                     connection.Open();
 
-                    // Try exact match on zerodha_symbol first (this is the Zerodha trading symbol)
-                    string query = "SELECT instrument_token FROM instruments WHERE zerodha_symbol = @symbol LIMIT 1";
+                    // Try exact match on tradingsymbol first (this is the Zerodha trading symbol)
+                    string query = "SELECT instrument_token FROM instruments WHERE tradingsymbol = @symbol LIMIT 1";
                     using (var cmd = new SQLiteCommand(query, connection))
                     {
                         cmd.Parameters.AddWithValue("@symbol", symbol);
@@ -390,8 +446,8 @@ namespace QANinjaAdapter.Services.Instruments
                         }
                     }
 
-                    // Try exact match on symbol column (our internal symbol)
-                    query = "SELECT instrument_token FROM instruments WHERE symbol = @symbol LIMIT 1";
+                    // Try case-insensitive match on tradingsymbol
+                    query = "SELECT instrument_token FROM instruments WHERE tradingsymbol = @symbol COLLATE NOCASE LIMIT 1";
                     using (var cmd = new SQLiteCommand(query, connection))
                     {
                         cmd.Parameters.AddWithValue("@symbol", symbol);
@@ -402,8 +458,8 @@ namespace QANinjaAdapter.Services.Instruments
                         }
                     }
 
-                    // Try case-insensitive match on zerodha_symbol
-                    query = "SELECT instrument_token FROM instruments WHERE zerodha_symbol = @symbol COLLATE NOCASE LIMIT 1";
+                    // Try match on underlying name (for indices like NIFTY, SENSEX)
+                    query = "SELECT instrument_token FROM instruments WHERE name = @symbol COLLATE NOCASE AND segment IN ('NSE', 'BSE', 'INDICES') LIMIT 1";
                     using (var cmd = new SQLiteCommand(query, connection))
                     {
                         cmd.Parameters.AddWithValue("@symbol", symbol);
@@ -421,6 +477,130 @@ namespace QANinjaAdapter.Services.Instruments
             }
 
             return 0;
+        }
+
+        /// <summary>
+        /// Looks up option instrument token from SQLite database by segment, underlying, expiry, strike, and option type
+        /// </summary>
+        /// <param name="segment">NFO-OPT for NIFTY options, BFO-OPT for SENSEX options</param>
+        /// <param name="underlying">Underlying symbol (NIFTY, SENSEX)</param>
+        /// <param name="expiry">Expiry date</param>
+        /// <param name="strike">Strike price</param>
+        /// <param name="optionType">CE or PE</param>
+        /// <returns>Instrument token, or 0 if not found</returns>
+        public long LookupOptionTokenInSqlite(string segment, string underlying, DateTime expiry, double strike, string optionType)
+        {
+            if (string.IsNullOrEmpty(_sqliteDbFullPath) || !File.Exists(_sqliteDbFullPath))
+            {
+                Logger.Warn($"InstrumentManager: SQLite DB not found for option lookup: {_sqliteDbFullPath}");
+                return 0;
+            }
+
+            try
+            {
+                using (var connection = new SQLiteConnection($"Data Source={_sqliteDbFullPath};Version=3;Read Only=True;"))
+                {
+                    connection.Open();
+
+                    // Query by segment, underlying, expiry date, strike, and instrument_type (CE/PE)
+                    // expiry in DB is stored as YYYY-MM-DD format
+                    string expiryStr = expiry.ToString("yyyy-MM-dd");
+
+                    string query = @"SELECT instrument_token, tradingsymbol FROM instruments
+                                     WHERE segment = @segment
+                                     AND underlying = @underlying
+                                     AND expiry = @expiry
+                                     AND strike = @strike
+                                     AND instrument_type = @optionType
+                                     LIMIT 1";
+
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@segment", segment);
+                        cmd.Parameters.AddWithValue("@underlying", underlying);
+                        cmd.Parameters.AddWithValue("@expiry", expiryStr);
+                        cmd.Parameters.AddWithValue("@strike", strike);
+                        cmd.Parameters.AddWithValue("@optionType", optionType);
+
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                long token = reader.GetInt64(0);
+                                string tradingSymbol = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                                Logger.Info($"InstrumentManager: Found option token {token} (tradingsymbol={tradingSymbol}) for {underlying} {expiryStr} {strike} {optionType}");
+                                return token;
+                            }
+                        }
+                    }
+
+                    Logger.Warn($"InstrumentManager: No option found in SQLite for {segment} {underlying} {expiryStr} {strike} {optionType}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: SQLite option lookup failed for {underlying} {expiry:yyyy-MM-dd} {strike} {optionType}. Error: {ex.Message}", ex);
+            }
+
+            return 0;
+        }
+
+        /// <summary>
+        /// Looks up option instrument details from SQLite database by segment, underlying, expiry, strike, and option type
+        /// Returns the tradingsymbol along with the token
+        /// </summary>
+        public (long token, string tradingSymbol) LookupOptionDetailsInSqlite(string segment, string underlying, DateTime expiry, double strike, string optionType)
+        {
+            if (string.IsNullOrEmpty(_sqliteDbFullPath) || !File.Exists(_sqliteDbFullPath))
+            {
+                return (0, null);
+            }
+
+            try
+            {
+                using (var connection = new SQLiteConnection($"Data Source={_sqliteDbFullPath};Version=3;Read Only=True;"))
+                {
+                    connection.Open();
+
+                    string expiryStr = expiry.ToString("yyyy-MM-dd");
+
+                    string query = @"SELECT instrument_token, tradingsymbol FROM instruments
+                                     WHERE segment = @segment
+                                     AND underlying = @underlying
+                                     AND expiry = @expiry
+                                     AND strike = @strike
+                                     AND instrument_type = @optionType
+                                     LIMIT 1";
+
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@segment", segment);
+                        cmd.Parameters.AddWithValue("@underlying", underlying);
+                        cmd.Parameters.AddWithValue("@expiry", expiryStr);
+                        cmd.Parameters.AddWithValue("@strike", strike);
+                        cmd.Parameters.AddWithValue("@optionType", optionType);
+
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                long token = reader.GetInt64(0);
+                                string tradingSymbol = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                                Logger.Info($"InstrumentManager: Found option {tradingSymbol} (token={token}) for {underlying} {expiryStr} {strike} {optionType}");
+                                return (token, tradingSymbol);
+                            }
+                        }
+                    }
+
+                    Logger.Warn($"InstrumentManager: No option found in SQLite for {segment} {underlying} {expiryStr} {strike} {optionType}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: SQLite option detail lookup failed. Error: {ex.Message}", ex);
+            }
+
+            return (0, null);
         }
 
         /// <summary>
@@ -833,7 +1013,7 @@ namespace QANinjaAdapter.Services.Instruments
         }
 
         /// <summary>
-        /// Gets exchange information for all available instruments
+        /// Gets exchange information for all available instruments from both index and F&O mappings
         /// </summary>
         /// <returns>A collection of instrument definitions</returns>
         public async Task<ObservableCollection<InstrumentDefinition>> GetBrokerInformation()
@@ -845,96 +1025,91 @@ namespace QANinjaAdapter.Services.Instruments
                 try
                 {
                     string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                    string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.MappedInstrumentsFileName);
-
-                    Logger.Info($"Reading symbols from JSON file: {jsonFilePath}");
-
-                    if (!File.Exists(jsonFilePath))
-                    {
-                        Logger.Error($"Error: JSON file does not exist at {jsonFilePath}");
-                        MessageBox.Show($"Symbol JSON file not found at: {jsonFilePath}",
-                                "File Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                        return BrokerInformation;
-                    }
-
-                    // Read the JSON file
-                    string jsonContent = File.ReadAllText(jsonFilePath);
-
-                    // Deserialize JSON to list of mapped instruments
-                    var mappedInstruments = JsonConvert.DeserializeObject<List<MappedInstrument>>(jsonContent);
-
-                    Logger.Info($"Successfully read JSON file");
-
                     int count = 0;
 
-                    foreach (var instrument in mappedInstruments)
+                    // Load from both index and F&O mappings files
+                    string[] jsonFiles = {
+                        Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.IndexMappingsFileName),
+                        Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.FOMappingsFileName)
+                    };
+
+                    foreach (string jsonFilePath in jsonFiles)
                     {
-                        try
+                        if (!File.Exists(jsonFilePath))
                         {
-                            // Skip empty symbols
-                            if (string.IsNullOrEmpty(instrument.symbol))
-                                continue;
-
-                            // Extract segment from the segment field (e.g., "NFO-FUT" -> "NFO")
-                            string segment = instrument.segment.Split('-')[0];
-
-                            // Create the InstrumentDefinition
-                            InstrumentDefinition instrumentDef = new InstrumentDefinition
-                            {
-                                Symbol = instrument.symbol,
-                                BrokerSymbol = instrument.zerodhaSymbol ?? instrument.symbol,
-                                Segment = segment,
-                                TickSize = instrument.tick_size,
-                                LotSize = instrument.lot_size,
-                                Expiry = instrument.expiry,
-                                Strike = instrument.strike,
-                                Underlying = instrument.underlying,
-                                InstrumentToken = instrument.instrument_token,
-                                ExchangeToken = instrument.exchange_token
-                            };
-
-                            // Set market type based on segment
-                            switch (segment.ToUpper())
-                            {
-                                case "NSE":
-                                case "BSE":
-                                    instrumentDef.MarketType = MarketType.Spot;
-                                    break;
-                                case "NFO":
-                                case "BFO":
-                                    instrumentDef.MarketType = MarketType.UsdM;
-                                    break;
-                                case "MCX":
-                                    instrumentDef.MarketType = MarketType.Futures;
-                                    break;
-                                case "CDS":
-                                    instrumentDef.MarketType = MarketType.CoinM;
-                                    break;
-                                default:
-                                    instrumentDef.MarketType = MarketType.Spot;
-                                    break;
-                            }
-
-                            _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
-
-                            // Add to the collection
-                            BrokerInformation.Add(instrumentDef);
-                            count++;
-
-                            // Log progress for every 1000 symbols
-                            if (count % 1000 == 0)
-                            {
-                                Logger.Info($"Loaded {count} symbols from JSON file so far");
-                            }
+                            Logger.Info($"Mapping file not found: {jsonFilePath}");
+                            continue;
                         }
-                        catch (Exception ex)
+
+                        Logger.Info($"Reading symbols from JSON file: {jsonFilePath}");
+
+                        string jsonContent = File.ReadAllText(jsonFilePath);
+                        var mappedInstruments = JsonConvert.DeserializeObject<List<MappedInstrument>>(jsonContent);
+
+                        if (mappedInstruments == null) continue;
+
+                        Logger.Info($"Successfully read JSON file with {mappedInstruments.Count} instruments");
+
+                        foreach (var instrument in mappedInstruments)
                         {
-                            Logger.Error($"Error parsing symbol from JSON: {ex.Message}");
-                            // Continue with next symbol
+                            try
+                            {
+                                if (string.IsNullOrEmpty(instrument.symbol))
+                                    continue;
+
+                                // Extract segment from the segment field (e.g., "NFO-FUT" -> "NFO")
+                                string segment = instrument.segment?.Split('-')[0] ?? "NSE";
+
+                                InstrumentDefinition instrumentDef = new InstrumentDefinition
+                                {
+                                    Symbol = instrument.symbol,
+                                    BrokerSymbol = instrument.zerodhaSymbol ?? instrument.symbol,
+                                    Segment = segment,
+                                    TickSize = instrument.tick_size,
+                                    LotSize = instrument.lot_size,
+                                    Expiry = instrument.expiry,
+                                    Strike = instrument.strike,
+                                    Underlying = instrument.underlying,
+                                    InstrumentToken = instrument.instrument_token,
+                                    ExchangeToken = instrument.exchange_token
+                                };
+
+                                // Set market type based on segment
+                                switch (segment.ToUpper())
+                                {
+                                    case "NSE":
+                                    case "BSE":
+                                    case "INDICES":
+                                        instrumentDef.MarketType = MarketType.Spot;
+                                        break;
+                                    case "NFO":
+                                    case "BFO":
+                                        instrumentDef.MarketType = MarketType.UsdM;
+                                        break;
+                                    case "MCX":
+                                        instrumentDef.MarketType = MarketType.Futures;
+                                        break;
+                                    case "CDS":
+                                        instrumentDef.MarketType = MarketType.CoinM;
+                                        break;
+                                    default:
+                                        instrumentDef.MarketType = MarketType.Spot;
+                                        break;
+                                }
+
+                                _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
+
+                                BrokerInformation.Add(instrumentDef);
+                                count++;
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"Error parsing symbol from JSON: {ex.Message}");
+                            }
                         }
                     }
 
-                    Logger.Info($"Successfully loaded {count} symbols from JSON file");
+                    Logger.Info($"Successfully loaded {count} symbols from JSON files");
                 }
                 catch (Exception ex)
                 {
@@ -1053,8 +1228,8 @@ namespace QANinjaAdapter.Services.Instruments
             InstrumentType instrumentType = InstrumentType.Stock;
             string validName = instrument.Symbol;
 
-            // Use the helper to determine and set trading hours
-            string templateName = NinjaTraderHelper.GetTradingHoursTemplate(instrument.Segment);
+            // Use the helper to determine and set trading hours (pass symbol for special handling)
+            string templateName = NinjaTraderHelper.GetTradingHoursTemplate(instrument.Segment, validName);
             Logger.Info($"Setting up instrument '{validName}' with trading hours '{templateName}'");
 
             MasterInstrument masterInstrument1 = MasterInstrument.DbGet(validName, instrumentType);

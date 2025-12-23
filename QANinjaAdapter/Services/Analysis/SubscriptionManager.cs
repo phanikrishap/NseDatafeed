@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using NinjaTrader.Cbi;
@@ -23,9 +24,25 @@ namespace QANinjaAdapter.Services.Analysis
         public static SubscriptionManager Instance => _instance ?? (_instance = new SubscriptionManager());
 
         private readonly ConcurrentQueue<MappedInstrument> _subscriptionQueue = new ConcurrentQueue<MappedInstrument>();
+        private readonly ConcurrentQueue<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)> _historicalDataQueue = new ConcurrentQueue<(MappedInstrument, string, Instrument)>();
         private bool _isProcessing = false;
+        private bool _isProcessingHistorical = false;
         private int _processedCount = 0;
         private int _totalQueued = 0;
+
+        // Batching configuration for historical data requests
+        // Zerodha allows ~3 requests/second for historical API, so 10 parallel with 4s delay = safe throughput
+        private const int HISTORICAL_BATCH_SIZE = 10;
+        private const int HISTORICAL_BATCH_DELAY_MS = 4000; // 4 seconds between batches
+
+        // Event for UI updates
+        public event Action<string, double> OptionPriceUpdated;
+
+        // Event to notify when zerodhaSymbol is resolved from DB (generatedSymbol, zerodhaSymbol)
+        public event Action<string, string> SymbolResolved;
+
+        // Event to notify UI of historical data status (symbol, status like "Done (123)" or "No Data")
+        public event Action<string, string> OptionStatusUpdated;
 
         private SubscriptionManager()
         {
@@ -79,8 +96,8 @@ namespace QANinjaAdapter.Services.Analysis
                     await SubscribeToInstrument(instrument);
                     Logger.Info($"[SubscriptionManager] ProcessQueue(): Completed {instrument.symbol}");
 
-                    // Small delay to prevent flooding the system
-                    await Task.Delay(50);
+                    // Minimal delay - subscriptions are lightweight
+                    await Task.Delay(10);
                 }
                 catch (Exception ex)
                 {
@@ -99,6 +116,39 @@ namespace QANinjaAdapter.Services.Analysis
         {
             Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Starting subscription workflow");
 
+            // Step 0: Look up instrument token from SQLite database by segment/underlying/expiry/strike/option_type
+            if (instrument.instrument_token == 0 && instrument.expiry.HasValue && instrument.strike.HasValue && !string.IsNullOrEmpty(instrument.option_type))
+            {
+                Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Looking up option token in SQLite...");
+                Logger.Debug($"[SubscriptionManager] Lookup params: segment={instrument.segment}, underlying={instrument.underlying}, expiry={instrument.expiry:yyyy-MM-dd}, strike={instrument.strike}, optionType={instrument.option_type}");
+
+                var (token, tradingSymbol) = InstrumentManager.Instance.LookupOptionDetailsInSqlite(
+                    instrument.segment,
+                    instrument.underlying,
+                    instrument.expiry.Value,
+                    instrument.strike.Value,
+                    instrument.option_type);
+
+                if (token > 0)
+                {
+                    instrument.instrument_token = token;
+                    if (!string.IsNullOrEmpty(tradingSymbol))
+                    {
+                        string generatedSymbol = instrument.symbol;
+                        instrument.zerodhaSymbol = tradingSymbol;
+                        Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Found token={token}, zerodhaSymbol={tradingSymbol}");
+
+                        // Notify UI of symbol resolution so it can update its internal mapping
+                        SymbolResolved?.Invoke(generatedSymbol, tradingSymbol);
+                    }
+                }
+                else
+                {
+                    Logger.Warn($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Option token not found in SQLite - cannot subscribe");
+                    return;
+                }
+            }
+
             // Step 1: Register in Instrument Manager (Memory + JSON)
             Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Step 1 - Adding to InstrumentManager");
             InstrumentManager.Instance.AddMappedInstrument(instrument);
@@ -108,7 +158,7 @@ namespace QANinjaAdapter.Services.Analysis
             Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Step 2 - Creating InstrumentDefinition");
             var instrumentDef = new InstrumentDefinition
             {
-                Symbol = instrument.symbol,
+                Symbol = instrument.zerodhaSymbol ?? instrument.symbol, // Use zerodhaSymbol (correct format) as NT symbol
                 BrokerSymbol = instrument.zerodhaSymbol ?? instrument.symbol,
                 Segment = instrument.segment?.Contains("BFO") == true ? "BSE" : "NSE",
                 MarketType = MarketType.UsdM // Options are UsdM (F&O segment)
@@ -166,13 +216,15 @@ namespace QANinjaAdapter.Services.Analysis
                     if (adapter != null)
                     {
                         Logger.Info($"[SubscriptionManager] SubscribeToInstrument({ntName}): Adapter found, calling SubscribeMarketData");
+                        string symbolForClosure = ntName;
 
                         adapter.SubscribeMarketData(ntInstrument, (type, price, size, time, unknown) =>
                         {
-                            // Autonomous data flow - just log periodically
-                            if (type == MarketDataType.Last)
+                            // Update UI with live prices
+                            if (type == MarketDataType.Last && price > 0)
                             {
-                                Logger.Debug($"[SubscriptionManager] LiveData({ntName}): Last={price}");
+                                Logger.Debug($"[SubscriptionManager] LiveData({symbolForClosure}): Last={price}");
+                                OptionPriceUpdated?.Invoke(symbolForClosure, price);
                             }
                         });
 
@@ -183,12 +235,16 @@ namespace QANinjaAdapter.Services.Analysis
                         Logger.Warn($"[SubscriptionManager] SubscribeToInstrument({ntName}): Adapter is NULL - cannot subscribe to live data");
                     }
 
-                    // Step 6: Trigger Backfill (3 Days, 1-Min and Tick)
-                    Logger.Info($"[SubscriptionManager] SubscribeToInstrument({ntName}): Step 6 - Triggering background backfill");
-                    _ = Task.Run(async () =>
+                    // Step 6: Queue for batched historical data fetch (don't trigger immediately)
+                    Logger.Info($"[SubscriptionManager] SubscribeToInstrument({ntName}): Queueing for batched historical data fetch");
+                    _historicalDataQueue.Enqueue((instrument, ntName, ntInstrument));
+
+                    // Start historical data processor if not already running
+                    if (!_isProcessingHistorical)
                     {
-                        await TriggerBackfill(ntName, ntInstrument);
-                    });
+                        Logger.Info("[SubscriptionManager] Starting historical data batch processor...");
+                        _ = Task.Run(ProcessHistoricalDataQueue);
+                    }
                 }
                 else
                 {
@@ -202,54 +258,114 @@ namespace QANinjaAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Triggers historical data backfill for an instrument
+        /// Processes the historical data queue in batches to avoid overloading Zerodha API
         /// </summary>
-        private async Task TriggerBackfill(string symbol, Instrument instrument)
+        private async Task ProcessHistoricalDataQueue()
         {
-            Logger.Info($"[SubscriptionManager] TriggerBackfill({symbol}): Starting 3-day backfill");
+            Logger.Info("[SubscriptionManager] ProcessHistoricalDataQueue(): Started batch processor");
+            _isProcessingHistorical = true;
+
+            int batchNumber = 0;
+            int totalProcessed = 0;
+
+            while (!_historicalDataQueue.IsEmpty || _isProcessing)
+            {
+                // Wait for subscription processing to complete first before starting historical fetch
+                if (_isProcessing)
+                {
+                    Logger.Debug("[SubscriptionManager] ProcessHistoricalDataQueue(): Waiting for subscription processing to complete...");
+                    await Task.Delay(1000);
+                    continue;
+                }
+
+                // Collect a batch of instruments
+                var batch = new List<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)>();
+                while (batch.Count < HISTORICAL_BATCH_SIZE && _historicalDataQueue.TryDequeue(out var item))
+                {
+                    batch.Add(item);
+                }
+
+                if (batch.Count == 0)
+                {
+                    // No more items, exit
+                    break;
+                }
+
+                batchNumber++;
+                Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Processing batch {batchNumber} with {batch.Count} instruments");
+
+                // Process the batch in parallel
+                var tasks = batch.Select(item => TriggerBackfillAndUpdatePrice(item.mappedInst, item.ntSymbol, item.ntInstrument)).ToArray();
+                await Task.WhenAll(tasks);
+
+                totalProcessed += batch.Count;
+                Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Batch {batchNumber} complete. Total processed: {totalProcessed}");
+
+                // Wait between batches to avoid rate limiting
+                if (!_historicalDataQueue.IsEmpty)
+                {
+                    Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Waiting {HISTORICAL_BATCH_DELAY_MS / 1000}s before next batch...");
+                    await Task.Delay(HISTORICAL_BATCH_DELAY_MS);
+                }
+            }
+
+            _isProcessingHistorical = false;
+            Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Completed all batches. Total instruments processed: {totalProcessed}");
+        }
+
+        /// <summary>
+        /// Triggers historical data backfill for an instrument and updates the price in UI
+        /// </summary>
+        private async Task TriggerBackfillAndUpdatePrice(MappedInstrument mappedInst, string ntSymbol, Instrument instrument)
+        {
+            // Use zerodhaSymbol for API calls (the correct format from DB), ntSymbol for UI updates
+            string apiSymbol = mappedInst.zerodhaSymbol ?? ntSymbol;
+            Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Starting 3-day backfill (apiSymbol={apiSymbol})");
 
             try
             {
                 DateTime end = DateTime.Now;
                 DateTime start = end.AddDays(-3);
 
-                Logger.Info($"[SubscriptionManager] TriggerBackfill({symbol}): Date range {start:yyyy-MM-dd HH:mm} to {end:yyyy-MM-dd HH:mm}");
+                Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Date range {start:yyyy-MM-dd HH:mm} to {end:yyyy-MM-dd HH:mm}");
 
-                // Request 1-Minute Data
-                Logger.Info($"[SubscriptionManager] TriggerBackfill({symbol}): Requesting 1-Minute historical data...");
+                // Request 1-Minute Data via HistoricalDataService using the zerodha symbol
+                Logger.Debug($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Requesting 1-Minute historical data for {apiSymbol}...");
 
-                await Connector.Instance.GetHistoricalTrades(
+                var historicalDataService = HistoricalDataService.Instance;
+                var records = await historicalDataService.GetHistoricalTrades(
                     BarsPeriodType.Minute,
-                    symbol,
-                    start,
-                    end,
-                    MarketType.UsdM,
-                    null // No UI progress bar for background task
-                );
-
-                Logger.Info($"[SubscriptionManager] TriggerBackfill({symbol}): 1-Minute data request completed");
-
-                // Stagger between requests
-                await Task.Delay(1000);
-
-                // Request Tick Data (Note: Zerodha may not support tick data)
-                Logger.Info($"[SubscriptionManager] TriggerBackfill({symbol}): Requesting Tick historical data...");
-
-                await Connector.Instance.GetHistoricalTrades(
-                    BarsPeriodType.Tick,
-                    symbol,
+                    apiSymbol,  // Use the zerodha symbol for API lookup
                     start,
                     end,
                     MarketType.UsdM,
                     null
                 );
 
-                Logger.Info($"[SubscriptionManager] TriggerBackfill({symbol}): Tick data request completed");
-                Logger.Info($"[SubscriptionManager] TriggerBackfill({symbol}): Backfill completed successfully");
+                if (records != null && records.Count > 0)
+                {
+                    Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Received {records.Count} bars");
+
+                    // Notify UI of status with bar count (like indices show "Done (2713)")
+                    OptionStatusUpdated?.Invoke(ntSymbol, $"Done ({records.Count})");
+
+                    // Extract last price and update UI
+                    var lastRecord = records.OrderByDescending(r => r.TimeStamp).FirstOrDefault();
+                    if (lastRecord != null && lastRecord.Close > 0)
+                    {
+                        Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): LastPrice={lastRecord.Close} from {lastRecord.TimeStamp:yyyy-MM-dd HH:mm}");
+                        OptionPriceUpdated?.Invoke(ntSymbol, lastRecord.Close);
+                    }
+                }
+                else
+                {
+                    Logger.Warn($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): No historical data received for {apiSymbol}");
+                    OptionStatusUpdated?.Invoke(ntSymbol, "No Data");
+                }
             }
             catch (Exception ex)
             {
-                Logger.Error($"[SubscriptionManager] TriggerBackfill({symbol}): Exception occurred - {ex.Message}", ex);
+                Logger.Error($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Exception occurred - {ex.Message}", ex);
             }
         }
     }
