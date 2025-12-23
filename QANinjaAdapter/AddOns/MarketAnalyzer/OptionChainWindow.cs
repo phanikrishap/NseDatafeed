@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Xml.Linq;
+using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Tools;
 using QANinjaAdapter;
 using QANinjaAdapter.Models;
@@ -14,6 +17,38 @@ using QANinjaAdapter.Services.Analysis;
 
 namespace QANinjaAdapter.AddOns.MarketAnalyzer
 {
+    /// <summary>
+    /// Converts a percentage (0-100) to a pixel width based on max width parameter
+    /// </summary>
+    public class PercentageToWidthConverter : IMultiValueConverter
+    {
+        public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (values == null || values.Length < 1 || values[0] == DependencyProperty.UnsetValue)
+                return 0.0;
+
+            double percentage = 0;
+            if (values[0] is double d)
+                percentage = d;
+
+            double maxWidth = 96; // Default
+            if (parameter is double mw)
+                maxWidth = mw;
+            else if (parameter is string s && double.TryParse(s, out double parsed))
+                maxWidth = parsed;
+
+            // Clamp percentage to 0-100
+            percentage = Math.Max(0, Math.Min(100, percentage));
+
+            return (percentage / 100.0) * maxWidth;
+        }
+
+        public object[] ConvertBack(object value, Type[] targetTypes, object parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
     /// <summary>
     /// Row item for the Option Chain - represents a single strike with CE and PE data
     /// </summary>
@@ -42,12 +77,61 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         public double StraddleValue => (CEPrice > 0 && PEPrice > 0) ? CEPrice + PEPrice : double.MaxValue;
 
         public bool IsATM { get; set; }
+
+        // Histogram width percentage (0-100) for visual representation
+        // CE histogram grows from right-to-left (aligned right in cell)
+        // PE histogram grows from left-to-right (aligned left in cell)
+        public double CEHistogramWidth { get; set; }
+        public double PEHistogramWidth { get; set; }
     }
 
     /// <summary>
-    /// Option Chain window displaying CE/PE prices with Strike in the middle
+    /// Option Chain Window - hosts the OptionChainTabPage
+    /// This is the main NTWindow that contains a TabControl with our NTTabPage
     /// </summary>
     public class OptionChainWindow : NTWindow, IWorkspacePersistence
+    {
+        public OptionChainWindow()
+        {
+            Logger.Info("[OptionChainWindow] Constructor: Creating window");
+
+            Caption = "Option Chain";
+            Width = 700;
+            Height = 600;
+
+            // Create the tab control (required by NTWindow for proper instrument linking)
+            TabControl tabControl = new TabControl();
+            tabControl.Style = Application.Current.TryFindResource("TabControlStyle") as Style;
+
+            // Create and add our tab page
+            OptionChainTabPage tabPage = new OptionChainTabPage();
+            tabControl.Items.Add(tabPage);
+
+            // Set the content
+            Content = tabControl;
+
+            Logger.Info("[OptionChainWindow] Constructor: Window created with TabControl and OptionChainTabPage");
+        }
+
+        // IWorkspacePersistence - delegate to tab page
+        public void Restore(XDocument document, XElement element)
+        {
+            Logger.Debug("[OptionChainWindow] Restore: Called");
+        }
+
+        public void Save(XDocument document, XElement element)
+        {
+            Logger.Debug("[OptionChainWindow] Save: Called");
+        }
+
+        public WorkspaceOptions WorkspaceOptions { get; set; }
+    }
+
+    /// <summary>
+    /// Option Chain Tab Page - implements IInstrumentProvider for instrument linking
+    /// When using NTTabPage with IInstrumentProvider, NinjaTrader automatically adds the link button
+    /// </summary>
+    public class OptionChainTabPage : NTTabPage, IInstrumentProvider
     {
         private ListView _listView;
         private GridView _gridView;
@@ -55,7 +139,11 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         private TextBlock _lblExpiry;
         private TextBlock _lblATMStrike;
         private TextBlock _lblStatus;
+        private TextBlock _lblSelectedInstrument;
         private ObservableCollection<OptionChainRow> _rows;
+
+        // Instrument linking - this is the key field for IInstrumentProvider
+        private Instrument _instrument;
 
         // Symbol to row mapping for quick updates (supports both generated and zerodha symbols)
         private Dictionary<string, (OptionChainRow row, string optionType)> _symbolToRowMap =
@@ -73,16 +161,22 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         private static readonly SolidColorBrush _strikeBg = new SolidColorBrush(Color.FromRgb(45, 45, 46));
         private static readonly FontFamily _ntFont = new FontFamily("Segoe UI");
 
+        // Histogram colors - CE (Calls) in green tones, PE (Puts) in red tones
+        private static readonly SolidColorBrush _ceHistogramBrush = new SolidColorBrush(Color.FromArgb(180, 38, 166, 91));  // Green with transparency
+        private static readonly SolidColorBrush _peHistogramBrush = new SolidColorBrush(Color.FromArgb(180, 207, 70, 71));  // Red with transparency
+
+        // Track max price for histogram scaling
+        private double _maxOptionPrice = 0;
+
         private string _underlying = "NIFTY";
         private DateTime? _expiry;
 
-        public OptionChainWindow()
+        public OptionChainTabPage()
         {
-            Logger.Info("[OptionChainWindow] Constructor: Creating window");
+            Logger.Info("[OptionChainTabPage] Constructor: Creating tab page");
 
-            Caption = "Option Chain";
-            Width = 700;
-            Height = 600;
+            // Set the background for NTTabPage
+            Background = Application.Current.TryFindResource("BackgroundMainWindow") as Brush ?? _bgColor;
 
             try
             {
@@ -106,14 +200,14 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 dockPanel.Children.Add(_listView);
 
                 // Hook Events
-                Loaded += OnWindowLoaded;
-                Unloaded += OnWindowUnloaded;
+                Loaded += OnTabPageLoaded;
+                Unloaded += OnTabPageUnloaded;
 
-                Logger.Info("[OptionChainWindow] Constructor: Window created successfully");
+                Logger.Info("[OptionChainTabPage] Constructor: Tab page created successfully");
             }
             catch (Exception ex)
             {
-                Logger.Error($"[OptionChainWindow] Constructor: Exception - {ex.Message}", ex);
+                Logger.Error($"[OptionChainTabPage] Constructor: Exception - {ex.Message}", ex);
                 throw;
             }
         }
@@ -128,6 +222,9 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 Padding = new Thickness(10, 8, 10, 8)
             };
 
+            var mainStack = new StackPanel();
+
+            // Row 1: Underlying, Expiry, ATM
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -202,7 +299,39 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             Grid.SetColumn(atmPanel, 2);
             grid.Children.Add(atmPanel);
 
-            border.Child = grid;
+            mainStack.Children.Add(grid);
+
+            // Row 2: Selected instrument display (shows clicked option)
+            var linkPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 6, 0, 0)
+            };
+
+            linkPanel.Children.Add(new TextBlock
+            {
+                Text = "Selected: ",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                Foreground = _fgColor,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 5, 0)
+            });
+
+            _lblSelectedInstrument = new TextBlock
+            {
+                Text = "(Click CE/PE row to select and link to chart)",
+                FontFamily = _ntFont,
+                FontSize = 10,
+                FontStyle = FontStyles.Italic,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            linkPanel.Children.Add(_lblSelectedInstrument);
+
+            mainStack.Children.Add(linkPanel);
+
+            border.Child = mainStack;
             return border;
         }
 
@@ -244,7 +373,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
             // CE Side columns (Left)
             _gridView.Columns.Add(CreateColumn("CE Status", "CEStatus", 80, HorizontalAlignment.Center));
-            _gridView.Columns.Add(CreateColumn("CE Last", "CELast", 80, HorizontalAlignment.Right));
+            _gridView.Columns.Add(CreateHistogramColumn("CE Last", "CELast", "CEHistogramWidth", 100, true));
 
             // Strike column (Center) - highlighted
             var strikeColumn = new GridViewColumn
@@ -267,7 +396,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             _gridView.Columns.Add(strikeColumn);
 
             // PE Side columns (Right)
-            _gridView.Columns.Add(CreateColumn("PE Last", "PELast", 80, HorizontalAlignment.Right));
+            _gridView.Columns.Add(CreateHistogramColumn("PE Last", "PELast", "PEHistogramWidth", 100, false));
             _gridView.Columns.Add(CreateColumn("PE Status", "PEStatus", 80, HorizontalAlignment.Center));
 
             // Straddle column
@@ -305,6 +434,9 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
             listView.ItemContainerStyle = style;
 
+            // Wire up click handler for instrument linking
+            listView.MouseLeftButtonUp += OnListViewMouseLeftButtonUp;
+
             return listView;
         }
 
@@ -325,9 +457,61 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             return column;
         }
 
-        private void OnWindowLoaded(object sender, RoutedEventArgs e)
+        /// <summary>
+        /// Creates a column with a histogram bar behind the price text
+        /// </summary>
+        private GridViewColumn CreateHistogramColumn(string header, string priceBinding, string widthBinding, double columnWidth, bool isCall)
         {
-            Logger.Info("[OptionChainWindow] OnWindowLoaded: Subscribing to events");
+            var column = new GridViewColumn
+            {
+                Header = header,
+                Width = columnWidth
+            };
+
+            var template = new DataTemplate();
+
+            // Outer Grid to hold the histogram bar and text
+            var gridFactory = new FrameworkElementFactory(typeof(Grid));
+            gridFactory.SetValue(Grid.HeightProperty, 20.0);
+
+            // Histogram bar (colored rectangle)
+            var barFactory = new FrameworkElementFactory(typeof(Border));
+            barFactory.SetValue(Border.BackgroundProperty, isCall ? _ceHistogramBrush : _peHistogramBrush);
+            barFactory.SetValue(Border.HorizontalAlignmentProperty, isCall ? HorizontalAlignment.Right : HorizontalAlignment.Left);
+            barFactory.SetValue(Border.VerticalAlignmentProperty, VerticalAlignment.Stretch);
+            barFactory.SetValue(Border.CornerRadiusProperty, new CornerRadius(2));
+            barFactory.SetValue(Border.MarginProperty, new Thickness(1));
+
+            // Bind the width to percentage of column width
+            var widthMultiBinding = new MultiBinding
+            {
+                Converter = new PercentageToWidthConverter(),
+                ConverterParameter = columnWidth - 4 // Account for margins
+            };
+            widthMultiBinding.Bindings.Add(new Binding(widthBinding));
+            barFactory.SetBinding(Border.WidthProperty, widthMultiBinding);
+
+            gridFactory.AppendChild(barFactory);
+
+            // Price text overlay
+            var textFactory = new FrameworkElementFactory(typeof(TextBlock));
+            textFactory.SetBinding(TextBlock.TextProperty, new Binding(priceBinding));
+            textFactory.SetValue(TextBlock.HorizontalAlignmentProperty, isCall ? HorizontalAlignment.Right : HorizontalAlignment.Left);
+            textFactory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            textFactory.SetValue(TextBlock.PaddingProperty, new Thickness(5, 0, 5, 0));
+            textFactory.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Colors.White));
+            textFactory.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
+
+            gridFactory.AppendChild(textFactory);
+
+            template.VisualTree = gridFactory;
+            column.CellTemplate = template;
+            return column;
+        }
+
+        private void OnTabPageLoaded(object sender, RoutedEventArgs e)
+        {
+            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribing to events");
 
             // Subscribe to option events
             SubscriptionManager.Instance.OptionPriceUpdated += OnOptionPriceUpdated;
@@ -338,9 +522,9 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             _lblStatus.Text = "Waiting for option chain data...";
         }
 
-        private void OnWindowUnloaded(object sender, RoutedEventArgs e)
+        private void OnTabPageUnloaded(object sender, RoutedEventArgs e)
         {
-            Logger.Info("[OptionChainWindow] OnWindowUnloaded: Unsubscribing from events");
+            Logger.Info("[OptionChainTabPage] OnTabPageUnloaded: Unsubscribing from events");
 
             SubscriptionManager.Instance.OptionPriceUpdated -= OnOptionPriceUpdated;
             SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;
@@ -350,7 +534,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
         private void OnOptionsGenerated(List<MappedInstrument> options)
         {
-            Logger.Info($"[OptionChainWindow] OnOptionsGenerated: Received {options.Count} options");
+            Logger.Info($"[OptionChainTabPage] OnOptionsGenerated: Received {options.Count} options");
 
             Dispatcher.InvokeAsync(() =>
             {
@@ -385,20 +569,18 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
                         if (ce != null)
                         {
-                            // Use generated symbol initially - will be updated via SymbolResolved
                             row.CESymbol = ce.symbol;
                             row.CEStatus = "Pending";
                             _symbolToRowMap[ce.symbol] = (row, "CE");
-                            Logger.Debug($"[OptionChainWindow] Mapped CE: {ce.symbol} -> Strike {row.Strike}");
+                            Logger.Debug($"[OptionChainTabPage] Mapped CE: {ce.symbol} -> Strike {row.Strike}");
                         }
 
                         if (pe != null)
                         {
-                            // Use generated symbol initially - will be updated via SymbolResolved
                             row.PESymbol = pe.symbol;
                             row.PEStatus = "Pending";
                             _symbolToRowMap[pe.symbol] = (row, "PE");
-                            Logger.Debug($"[OptionChainWindow] Mapped PE: {pe.symbol} -> Strike {row.Strike}");
+                            Logger.Debug($"[OptionChainTabPage] Mapped PE: {pe.symbol} -> Strike {row.Strike}");
                         }
 
                         _rows.Add(row);
@@ -407,36 +589,34 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                     _lblStatus.Text = $"Loaded {_rows.Count} strikes for {_underlying}";
                     _listView.Items.Refresh();
 
-                    Logger.Info($"[OptionChainWindow] OnOptionsGenerated: Created {_rows.Count} strike rows, mapped {_symbolToRowMap.Count} symbols");
+                    Logger.Info($"[OptionChainTabPage] OnOptionsGenerated: Created {_rows.Count} strike rows, mapped {_symbolToRowMap.Count} symbols");
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error($"[OptionChainWindow] OnOptionsGenerated: Exception - {ex.Message}", ex);
+                    Logger.Error($"[OptionChainTabPage] OnOptionsGenerated: Exception - {ex.Message}", ex);
                 }
             });
         }
 
         private void OnSymbolResolved(string generatedSymbol, string zerodhaSymbol)
         {
-            Logger.Info($"[OptionChainWindow] OnSymbolResolved: {generatedSymbol} -> {zerodhaSymbol}");
+            Logger.Info($"[OptionChainTabPage] OnSymbolResolved: {generatedSymbol} -> {zerodhaSymbol}");
 
             Dispatcher.InvokeAsync(() =>
             {
                 try
                 {
-                    // Store the mapping
                     _generatedToZerodhaMap[generatedSymbol] = zerodhaSymbol;
 
-                    // If we have a row mapped to the generated symbol, also map the zerodha symbol to it
                     if (_symbolToRowMap.TryGetValue(generatedSymbol, out var mapping))
                     {
                         _symbolToRowMap[zerodhaSymbol] = mapping;
-                        Logger.Debug($"[OptionChainWindow] OnSymbolResolved: Added zerodha mapping {zerodhaSymbol} -> Strike {mapping.row.Strike} {mapping.optionType}");
+                        Logger.Debug($"[OptionChainTabPage] OnSymbolResolved: Added zerodha mapping {zerodhaSymbol} -> Strike {mapping.row.Strike} {mapping.optionType}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error($"[OptionChainWindow] OnSymbolResolved: Exception - {ex.Message}", ex);
+                    Logger.Error($"[OptionChainTabPage] OnSymbolResolved: Exception - {ex.Message}", ex);
                 }
             });
         }
@@ -462,20 +642,19 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                             row.PEPrice = price;
                         }
 
-                        Logger.Debug($"[OptionChainWindow] OnOptionPriceUpdated: {symbol} -> Strike {row.Strike} {optionType} = {price:F2}");
+                        Logger.Debug($"[OptionChainTabPage] OnOptionPriceUpdated: {symbol} -> Strike {row.Strike} {optionType} = {price:F2}");
 
-                        // Recalculate ATM after price update
                         UpdateATMStrike();
                         _listView.Items.Refresh();
                     }
                     else
                     {
-                        Logger.Warn($"[OptionChainWindow] OnOptionPriceUpdated: No mapping found for symbol '{symbol}'");
+                        Logger.Warn($"[OptionChainTabPage] OnOptionPriceUpdated: No mapping found for symbol '{symbol}'");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error($"[OptionChainWindow] OnOptionPriceUpdated: Exception - {ex.Message}", ex);
+                    Logger.Error($"[OptionChainTabPage] OnOptionPriceUpdated: Exception - {ex.Message}", ex);
                 }
             });
         }
@@ -499,30 +678,37 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                             row.PEStatus = status;
                         }
 
-                        Logger.Debug($"[OptionChainWindow] OnOptionStatusUpdated: {symbol} -> Strike {row.Strike} {optionType} = {status}");
+                        Logger.Debug($"[OptionChainTabPage] OnOptionStatusUpdated: {symbol} -> Strike {row.Strike} {optionType} = {status}");
                         _listView.Items.Refresh();
                     }
                     else
                     {
-                        Logger.Warn($"[OptionChainWindow] OnOptionStatusUpdated: No mapping found for symbol '{symbol}'");
+                        Logger.Warn($"[OptionChainTabPage] OnOptionStatusUpdated: No mapping found for symbol '{symbol}'");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error($"[OptionChainWindow] OnOptionStatusUpdated: Exception - {ex.Message}", ex);
+                    Logger.Error($"[OptionChainTabPage] OnOptionStatusUpdated: Exception - {ex.Message}", ex);
                 }
             });
         }
 
         private void UpdateATMStrike()
         {
-            // Find the strike with cheapest straddle where both CE and PE have non-zero prices
             OptionChainRow atmRow = null;
             double minStraddle = double.MaxValue;
 
+            double maxCE = 0;
+            double maxPE = 0;
+
             foreach (var row in _rows)
             {
-                row.IsATM = false; // Reset
+                row.IsATM = false;
+
+                if (row.CEPrice > 0)
+                    maxCE = Math.Max(maxCE, row.CEPrice);
+                if (row.PEPrice > 0)
+                    maxPE = Math.Max(maxPE, row.PEPrice);
 
                 if (row.CEPrice > 0 && row.PEPrice > 0)
                 {
@@ -535,25 +721,229 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 }
             }
 
+            _maxOptionPrice = Math.Max(maxCE, maxPE);
+            if (_maxOptionPrice > 0)
+            {
+                foreach (var row in _rows)
+                {
+                    row.CEHistogramWidth = row.CEPrice > 0 ? (row.CEPrice / _maxOptionPrice) * 100.0 : 0;
+                    row.PEHistogramWidth = row.PEPrice > 0 ? (row.PEPrice / _maxOptionPrice) * 100.0 : 0;
+                }
+            }
+
             if (atmRow != null)
             {
                 atmRow.IsATM = true;
                 _lblATMStrike.Text = $"{atmRow.Strike:F0} ({minStraddle:F2})";
-                Logger.Debug($"[OptionChainWindow] UpdateATMStrike: ATM={atmRow.Strike}, Straddle={minStraddle:F2}");
+                Logger.Debug($"[OptionChainTabPage] UpdateATMStrike: ATM={atmRow.Strike}, Straddle={minStraddle:F2}");
             }
         }
 
-        // IWorkspacePersistence Implementation
-        public void Restore(XDocument document, XElement element)
+        #region IInstrumentProvider Implementation
+
+        /// <summary>
+        /// IInstrumentProvider.Instrument - Required for instrument linking with colored link buttons
+        /// When set, this propagates the instrument to other windows linked with the same color
+        /// NinjaTrader automatically handles the link button UI when NTTabPage implements IInstrumentProvider
+        /// </summary>
+        public Instrument Instrument
         {
-            Logger.Debug("[OptionChainWindow] Restore: Called");
+            get { return _instrument; }
+            set
+            {
+                if (_instrument != null)
+                {
+                    Logger.Debug($"[OptionChainTabPage] Instrument setter: Unsubscribing from {_instrument.FullName}");
+                }
+
+                if (value != null)
+                {
+                    Logger.Info($"[OptionChainTabPage] Instrument setter: Setting instrument to {value.FullName}");
+
+                    Dispatcher.InvokeAsync(() =>
+                    {
+                        _lblSelectedInstrument.Text = value.FullName;
+                        _lblSelectedInstrument.FontStyle = FontStyles.Normal;
+                        _lblSelectedInstrument.Foreground = new SolidColorBrush(Color.FromRgb(100, 200, 255));
+                    });
+                }
+
+                _instrument = value;
+
+                // Update the tab header name
+                UpdateHeader();
+            }
         }
 
-        public void Save(XDocument document, XElement element)
+        #endregion
+
+        #region Row Click Handling for Instrument Linking
+
+        /// <summary>
+        /// Handles mouse click on ListView to detect which cell (CE or PE) was clicked
+        /// </summary>
+        private void OnListViewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-            Logger.Debug("[OptionChainWindow] Save: Called");
+            try
+            {
+                var item = _listView.SelectedItem as OptionChainRow;
+                if (item == null) return;
+
+                var mousePos = e.GetPosition(_listView);
+                var listViewItem = _listView.ItemContainerGenerator.ContainerFromItem(item) as ListViewItem;
+                if (listViewItem == null) return;
+
+                var itemPos = e.GetPosition(listViewItem);
+
+                // Calculate column boundaries
+                // CE Status (80) + CE Last (100) = 180 for CE side
+                // Strike (80) = 260
+                // PE Last (100) + PE Status (80) = 440 for PE side
+                double ceEndX = 180;
+                double strikeEndX = 260;
+
+                string symbolToLink = null;
+                string optionType = null;
+
+                if (itemPos.X < ceEndX && !string.IsNullOrEmpty(item.CESymbol))
+                {
+                    symbolToLink = item.CESymbol;
+                    optionType = "CE";
+                }
+                else if (itemPos.X > strikeEndX && !string.IsNullOrEmpty(item.PESymbol))
+                {
+                    symbolToLink = item.PESymbol;
+                    optionType = "PE";
+                }
+
+                if (!string.IsNullOrEmpty(symbolToLink))
+                {
+                    Logger.Info($"[OptionChainTabPage] OnListViewMouseLeftButtonUp: Clicked {optionType} for strike {item.Strike}, symbol={symbolToLink}");
+
+                    var ntInstrument = Instrument.GetInstrument(symbolToLink);
+                    if (ntInstrument != null)
+                    {
+                        // Set the Instrument property - NinjaTrader's linking mechanism handles propagation
+                        Instrument = ntInstrument;
+                        Logger.Info($"[OptionChainTabPage] OnListViewMouseLeftButtonUp: Instrument set to {ntInstrument.FullName}");
+                    }
+                    else
+                    {
+                        Logger.Warn($"[OptionChainTabPage] OnListViewMouseLeftButtonUp: Could not get NinjaTrader instrument for {symbolToLink}");
+
+                        _lblSelectedInstrument.Text = $"{symbolToLink} (not in NT)";
+                        _lblSelectedInstrument.FontStyle = FontStyles.Italic;
+                        _lblSelectedInstrument.Foreground = new SolidColorBrush(Color.FromRgb(255, 200, 100));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[OptionChainTabPage] OnListViewMouseLeftButtonUp: Exception - {ex.Message}", ex);
+            }
         }
 
-        public WorkspaceOptions WorkspaceOptions { get; set; }
+        #endregion
+
+        #region NTTabPage Required Overrides
+
+        /// <summary>
+        /// Called by TabControl when tab is being removed or window is closed
+        /// </summary>
+        public override void Cleanup()
+        {
+            Logger.Info("[OptionChainTabPage] Cleanup: Cleaning up resources");
+
+            // Unsubscribe from events
+            SubscriptionManager.Instance.OptionPriceUpdated -= OnOptionPriceUpdated;
+            SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;
+            SubscriptionManager.Instance.SymbolResolved -= OnSymbolResolved;
+            MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
+
+            base.Cleanup();
+        }
+
+        /// <summary>
+        /// NTTabPage member - determines the tab header name
+        /// </summary>
+        protected override string GetHeaderPart(string variable)
+        {
+            if (_instrument != null)
+                return _instrument.FullName;
+
+            if (!string.IsNullOrEmpty(_underlying))
+                return $"{_underlying} Options";
+
+            return "Option Chain";
+        }
+
+        /// <summary>
+        /// NTTabPage member - restores elements from workspaces
+        /// </summary>
+        protected override void Restore(XElement element)
+        {
+            if (element == null)
+                return;
+
+            Logger.Debug("[OptionChainTabPage] Restore: Called");
+
+            try
+            {
+                var instrumentAttr = element.Attribute("LastInstrument");
+                if (instrumentAttr != null && !string.IsNullOrEmpty(instrumentAttr.Value))
+                {
+                    var instrument = Instrument.GetInstrument(instrumentAttr.Value);
+                    if (instrument != null)
+                    {
+                        Instrument = instrument;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[OptionChainTabPage] Restore: Exception - {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// NTTabPage member - saves elements to workspaces
+        /// </summary>
+        protected override void Save(XElement element)
+        {
+            if (element == null)
+                return;
+
+            Logger.Debug("[OptionChainTabPage] Save: Called");
+
+            try
+            {
+                if (_instrument != null)
+                {
+                    element.SetAttributeValue("LastInstrument", _instrument.FullName);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[OptionChainTabPage] Save: Exception - {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Updates the tab header name by calling RefreshHeader() from base class
+        /// </summary>
+        private void UpdateHeader()
+        {
+            Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    // Call the base NTTabPage.RefreshHeader() method to update the tab header
+                    base.RefreshHeader();
+                }
+                catch { }
+            });
+        }
+
+        #endregion
     }
 }

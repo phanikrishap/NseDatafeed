@@ -145,8 +145,11 @@ namespace QANinjaAdapter.Services.MarketData
             ConcurrentDictionary<string, L1Subscription> l1Subscriptions,
             WebSocketConnectionFunc webSocketConnectionFunc)
         {
+            Logger.Info($"[TICK-SUBSCRIBE] SubscribeToTicks called: nativeSymbol='{nativeSymbolName}', symbol='{symbol}', marketType={marketType}");
+
             if (string.IsNullOrEmpty(symbol) || webSocketConnectionFunc == null)
             {
+                Logger.Error($"[TICK-SUBSCRIBE] Invalid parameters for {symbol} - symbol empty or webSocketFunc null");
                 NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-SUBSCRIBE] Invalid parameters for {symbol}", NinjaTrader.Cbi.LogLevel.Error);
                 return;
             }
@@ -154,9 +157,10 @@ namespace QANinjaAdapter.Services.MarketData
             int retryCount = 0;
             const int maxRetries = 10;
             var cts = new CancellationTokenSource();
-            
+
             // Start monitoring chart-close in separate task
             StartExitMonitoringTask(webSocketConnectionFunc, cts);
+            Logger.Debug($"[TICK-SUBSCRIBE] Exit monitoring task started for {nativeSymbolName}");
 
             while (!cts.Token.IsCancellationRequested && retryCount < maxRetries)
             {
@@ -170,25 +174,38 @@ namespace QANinjaAdapter.Services.MarketData
                     {
                         int delay = Math.Min(10000, (int)Math.Pow(2, retryCount) * 500);
                         await Task.Delay(delay, cts.Token);
+                        Logger.Info($"[TICK-RECONNECT] Reconnecting {nativeSymbolName} (Attempt {retryCount}/{maxRetries}) after {delay}ms");
                         NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-RECONNECT] Reconnecting {nativeSymbolName} (Attempt {retryCount}/{maxRetries}) after {delay}ms", NinjaTrader.Cbi.LogLevel.Information);
                     }
 
+                    Logger.Debug($"[TICK-SUBSCRIBE] Creating WebSocket client for {nativeSymbolName}...");
                     ws = _webSocketManager.CreateWebSocketClient();
-                    await _webSocketManager.ConnectAsync(ws);
 
+                    Logger.Debug($"[TICK-SUBSCRIBE] Connecting WebSocket for {nativeSymbolName}...");
+                    await _webSocketManager.ConnectAsync(ws);
+                    Logger.Info($"[TICK-SUBSCRIBE] WebSocket connected for {nativeSymbolName}, state={ws.State}");
+
+                    Logger.Debug($"[TICK-SUBSCRIBE] Getting instrument token for symbol='{symbol}'...");
                     int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
+                    Logger.Info($"[TICK-SUBSCRIBE] Got token {tokenInt} for symbol='{symbol}'");
+
+                    Logger.Debug($"[TICK-SUBSCRIBE] Subscribing to token {tokenInt} in 'full' mode...");
                     await _webSocketManager.SubscribeAsync(ws, tokenInt, "full");
+                    Logger.Info($"[TICK-SUBSCRIBE] Subscribed to token {tokenInt} for {nativeSymbolName}");
 
                     // Get segment and index info
                     string segment = _instrumentManager.GetSegmentForToken(tokenInt);
                     bool isMcxSegment = !string.IsNullOrEmpty(segment) && segment.Equals("MCX", StringComparison.OrdinalIgnoreCase);
-                    
+
                     bool isIndex = false;
                     if (l1Subscriptions.TryGetValue(nativeSymbolName, out var sub))
                         isIndex = sub.IsIndex;
 
+                    Logger.Info($"[TICK-SUBSCRIBE] {nativeSymbolName}: segment={segment}, isMcx={isMcxSegment}, isIndex={isIndex}, l1Subscriptions.Count={l1Subscriptions.Count}");
+
                     // Use ArrayPool for network buffer
                     buffer = ArrayPool<byte>.Shared.Rent(16384);
+                    Logger.Debug($"[TICK-SUBSCRIBE] Entering receive loop for {nativeSymbolName}...");
 
                     while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
                     {

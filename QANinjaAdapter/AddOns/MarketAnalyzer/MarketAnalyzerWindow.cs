@@ -157,6 +157,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         public string Change { get; set; }
         public string ProjOpen { get; set; }
         public string Expiry { get; set; }
+        public string LastUpdate { get; set; } // HH:mm:ss format
         public string Status { get; set; }
         public bool IsPositive { get; set; }
         public bool IsOption { get; set; }
@@ -376,6 +377,15 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             };
             _gridView.Columns.Add(expiryColumn);
 
+            // Last Update column - shows HH:mm:ss of last price update
+            var lastUpdateColumn = new GridViewColumn
+            {
+                Header = "Updated",
+                Width = 70,
+                DisplayMemberBinding = new Binding("LastUpdate")
+            };
+            _gridView.Columns.Add(lastUpdateColumn);
+
             // Status column
             var statusColumn = new GridViewColumn
             {
@@ -450,6 +460,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                         {
                             row.Last = ticker.LastPriceDisplay;
                             row.Change = ticker.NetChangePercentDisplay;
+                            row.LastUpdate = ticker.LastUpdateTimeDisplay;
                             row.IsPositive = ticker.IsPositive;
                         }
                     }
@@ -461,6 +472,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                             row.Last = ticker.LastPriceDisplay;
                             row.Change = ticker.NetChangePercentDisplay;
                             row.ProjOpen = logic.NiftyTicker.ProjectedOpenDisplay;
+                            row.LastUpdate = ticker.LastUpdateTimeDisplay;
                             row.IsPositive = ticker.IsPositive;
                         }
                     }
@@ -472,6 +484,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                             row.Last = ticker.LastPriceDisplay;
                             row.Change = ticker.NetChangePercentDisplay;
                             row.ProjOpen = logic.SensexTicker.ProjectedOpenDisplay;
+                            row.LastUpdate = ticker.LastUpdateTimeDisplay;
                             row.IsPositive = ticker.IsPositive;
                         }
                     }

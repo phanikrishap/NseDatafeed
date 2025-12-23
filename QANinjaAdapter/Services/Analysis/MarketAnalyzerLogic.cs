@@ -26,6 +26,8 @@ namespace QANinjaAdapter.Services.Analysis
         private double _low;
         private double _close;
         private double _projectedOpen;
+        private DateTime _lastUpdateTime;
+        private string _expiry = "---";
 
         public string Symbol
         {
@@ -88,6 +90,20 @@ namespace QANinjaAdapter.Services.Analysis
         }
 
         public string ProjectedOpenDisplay => ProjectedOpen > 0 ? ProjectedOpen.ToString("F0") : "---";
+
+        public DateTime LastUpdateTime
+        {
+            get => _lastUpdateTime;
+            set { _lastUpdateTime = value; OnPropertyChanged(); OnPropertyChanged(nameof(LastUpdateTimeDisplay)); }
+        }
+
+        public string LastUpdateTimeDisplay => _lastUpdateTime != DateTime.MinValue ? _lastUpdateTime.ToString("HH:mm:ss") : "---";
+
+        public string Expiry
+        {
+            get => _expiry;
+            set { _expiry = value; OnPropertyChanged(); }
+        }
 
         public bool IsPositive => NetChange >= 0;
 
@@ -154,7 +170,11 @@ namespace QANinjaAdapter.Services.Analysis
 
             TickerData ticker = null;
 
-            if (symbol.Equals(SYMBOL_GIFT_NIFTY, StringComparison.OrdinalIgnoreCase))
+            // Normalize symbol - handle "GIFT NIFTY" (with space) and "GIFT_NIFTY" (with underscore)
+            string normalizedSymbol = symbol?.Replace(" ", "_").ToUpperInvariant() ?? "";
+
+            if (normalizedSymbol.Equals(SYMBOL_GIFT_NIFTY, StringComparison.OrdinalIgnoreCase) ||
+                symbol.Equals("GIFT NIFTY", StringComparison.OrdinalIgnoreCase))
             {
                 GiftNiftyPrice = price;
                 if (priorClose > 0) GiftNiftyPriorClose = priorClose;
@@ -172,7 +192,9 @@ namespace QANinjaAdapter.Services.Analysis
                     ticker.NetChangePercent = (ticker.NetChange / ticker.Close) * 100;
                 }
             }
-            else if (symbol.Equals(SYMBOL_NIFTY_SPOT, StringComparison.OrdinalIgnoreCase))
+            else if (normalizedSymbol.Equals(SYMBOL_NIFTY_SPOT, StringComparison.OrdinalIgnoreCase) ||
+                     symbol.Equals("NIFTY 50", StringComparison.OrdinalIgnoreCase) ||
+                     symbol.Equals("NIFTY", StringComparison.OrdinalIgnoreCase))
             {
                 NiftySpotPrice = price;
                 Logger.Info($"[MarketAnalyzerLogic] UpdatePrice(): NIFTY_SPOT updated - Price={NiftySpotPrice}");
@@ -189,7 +211,8 @@ namespace QANinjaAdapter.Services.Analysis
                     ticker.NetChangePercent = (ticker.NetChange / ticker.Close) * 100;
                 }
             }
-            else if (symbol.Equals(SYMBOL_SENSEX_SPOT, StringComparison.OrdinalIgnoreCase))
+            else if (normalizedSymbol.Equals(SYMBOL_SENSEX_SPOT, StringComparison.OrdinalIgnoreCase) ||
+                     symbol.Equals("SENSEX", StringComparison.OrdinalIgnoreCase))
             {
                 SensexSpotPrice = price;
                 Logger.Info($"[MarketAnalyzerLogic] UpdatePrice(): SENSEX_SPOT updated - Price={SensexSpotPrice}");
@@ -215,6 +238,7 @@ namespace QANinjaAdapter.Services.Analysis
             // Fire ticker update event
             if (ticker != null)
             {
+                ticker.LastUpdateTime = DateTime.Now;
                 TickerUpdated?.Invoke(ticker);
             }
 
