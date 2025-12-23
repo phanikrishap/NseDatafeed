@@ -1,4 +1,4 @@
-﻿using QABrokerAPI.Common.Utility;
+using QABrokerAPI.Common.Utility;
 using System;
 
 #nullable disable

@@ -1,4 +1,4 @@
-﻿using QABrokerAPI.Common.Enums;
+using QABrokerAPI.Common.Enums;
 using QABrokerAPI.Common.Extensions;
 using log4net;
 using System;

@@ -1,4 +1,4 @@
-﻿using QANinjaAdapter.Classes.Binance.Symbols;
+using QANinjaAdapter.Models;
 using NinjaTrader.Cbi;
 using NinjaTrader.Core;
 using System.Collections.Generic;
@@ -31,11 +31,11 @@ public class DataContext : INotifyPropertyChanged
 
   public Dictionary<string, string> SymbolNames { set; get; }
 
-  public ObservableCollection<SymbolObject> Instruments { set; get; }
+  public ObservableCollection<InstrumentDefinition> Instruments { set; get; }
 
   public DataContext()
   {
-    this.Instruments = new ObservableCollection<SymbolObject>();
+    this.Instruments = new ObservableCollection<InstrumentDefinition>();
     this.SymbolNames = new Dictionary<string, string>();
   }
 

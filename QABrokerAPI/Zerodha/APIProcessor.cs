@@ -1,4 +1,4 @@
-﻿using log4net;
+using log4net;
 using Newtonsoft.Json;
 using QABrokerAPI.Common.Caching.Interfaces;
 using QABrokerAPI.Common.Enums;
@@ -59,7 +59,7 @@ namespace QABrokerAPI.Zerodha
                 {
                     string message1 = $"Unable to deserialize message from: {requestMessage}. Exception: {ex.Message}";
                     this._logger.Error((object)message1);
-                    throw new BinanceException(message1, new BinanceError()
+                    throw new BrokerException(message1, new BrokerError()
                     {
                         RequestMessage = requestMessage,
                         Message = ex.Message
@@ -75,25 +75,25 @@ namespace QABrokerAPI.Zerodha
             }
 
             string str1 = await message.Content.ReadAsStringAsync();
-            BinanceError errorObject = JsonConvert.DeserializeObject<BinanceError>(str1);
+            BrokerError errorObject = JsonConvert.DeserializeObject<BrokerError>(str1);
             if (errorObject == null)
-                throw new BinanceException("Unexpected Error whilst handling the response", (BinanceError)null);
+                throw new BrokerException("Unexpected Error whilst handling the response", (BrokerError)null);
             errorObject.RequestMessage = requestMessage;
-            BinanceException binanceException = this.CreateBinanceException(message.StatusCode, errorObject);
-            this._logger.Error((object)("Error Message Received:" + str1), (Exception)binanceException);
-            throw binanceException;
+            BrokerException BrokerException = this.CreateBrokerException(message.StatusCode, errorObject);
+            this._logger.Error((object)("Error Message Received:" + str1), (Exception)BrokerException);
+            throw BrokerException;
         }
 
-        private BinanceException CreateBinanceException(
+        private BrokerException CreateBrokerException(
           HttpStatusCode statusCode,
-          BinanceError errorObject)
+          BrokerError errorObject)
         {
             if (statusCode == HttpStatusCode.GatewayTimeout)
-                return (BinanceException)new BinanceTimeoutException(errorObject);
+                return (BrokerException)new BrokerTimeoutException(errorObject);
             int num = (int)statusCode;
             if (num >= 400 && num <= 500)
-                return (BinanceException)new BinanceBadRequestException(errorObject);
-            return num < 500 ? new BinanceException("Zerodha API Error", errorObject) : (BinanceException)new BinanceServerException(errorObject);
+                return (BrokerException)new BrokerBadRequestException(errorObject);
+            return num < 500 ? new BrokerException("Zerodha API Error", errorObject) : (BrokerException)new BrokerServerException(errorObject);
         }
 
         private bool CheckAndRetrieveCachedItem<T>(string fullKey, out T item) where T : class

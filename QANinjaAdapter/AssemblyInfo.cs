@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 [assembly: AssemblyTitle("QANinjaAdapter")]
@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyProduct("QANinjaAdapter")]
-[assembly: AssemblyCopyright("Copyright ©  2025")]
+[assembly: AssemblyCopyright("Copyright �  2025")]
 [assembly: AssemblyTrademark("")]
 [assembly: ComVisible(false)]
 //[assembly: Guid("d9912fe4-62ac-486e-9a09-2750432010c5")]

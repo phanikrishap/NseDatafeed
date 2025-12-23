@@ -1,4 +1,4 @@
-﻿#nullable disable
+#nullable disable
 namespace QABrokerAPI.Common.Enums;
 
 public enum EndpointSecurityType

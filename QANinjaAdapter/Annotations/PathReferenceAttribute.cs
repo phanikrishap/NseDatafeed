@@ -1,4 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
+// Decompiled with JetBrains decompiler
 // Type: QANinjaAdapter.Annotations.PathReferenceAttribute
 // Assembly: QANinjaAdapter, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
 // MVID: C3950ED3-7884-49E5-9F57-41CBA3235764

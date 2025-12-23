@@ -1,4 +1,4 @@
-﻿using QABrokerAPI.Common.Caching.Interfaces;
+using QABrokerAPI.Common.Caching.Interfaces;
 using QABrokerAPI.Common.Utility;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;

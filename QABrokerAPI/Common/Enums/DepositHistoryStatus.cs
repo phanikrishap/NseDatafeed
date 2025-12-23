@@ -1,4 +1,4 @@
-﻿namespace QABrokerAPI.Common.Enums;
+namespace QABrokerAPI.Common.Enums;
 
 public enum DepositHistoryStatus
 {

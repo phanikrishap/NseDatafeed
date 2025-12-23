@@ -5,7 +5,6 @@ using System.Windows.Threading;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using QABrokerAPI.Common.Enums;
-using QANinjaAdapter.Classes.Binance.Symbols;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Instruments;
 using QANinjaAdapter.Services.MarketData;
@@ -153,16 +152,16 @@ namespace QANinjaAdapter.Services.Analysis
 
                 Logger.Info($"[MarketAnalyzerService] CreateInstrumentFromMapping({symbol}): Found mapping - token={mapping.instrument_token}, zerodha={mapping.zerodhaSymbol}");
 
-                // Create a SymbolObject for InstrumentManager
-                var symbolObj = new SymbolObject
+                // Create an InstrumentDefinition for InstrumentManager
+                var instrumentDef = new InstrumentDefinition
                 {
                     Symbol = symbol,
-                    QuoteAsset = "NSE",
-                    Filters = new Filter[] { new Filter { FilterType = "PRICE_FILTER", TickSize = mapping.tick_size > 0 ? mapping.tick_size : 0.05 } }
+                    Segment = "NSE",
+                    TickSize = mapping.tick_size > 0 ? mapping.tick_size : 0.05
                 };
 
                 string ntName;
-                bool created = InstrumentManager.Instance.CreateInstrument(symbolObj, out ntName);
+                bool created = InstrumentManager.Instance.CreateInstrument(instrumentDef, out ntName);
 
                 if (created)
                 {

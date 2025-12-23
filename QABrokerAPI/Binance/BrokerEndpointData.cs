@@ -1,4 +1,4 @@
-﻿using QABrokerAPI.Common.Enums;
+using QABrokerAPI.Common.Enums;
 using System;
 using System.Collections.Generic;
 using System.Linq;

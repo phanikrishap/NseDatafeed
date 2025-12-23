@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 #nullable disable
 namespace QABrokerAPI.Binance.Websockets;

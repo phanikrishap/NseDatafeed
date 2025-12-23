@@ -1,4 +1,4 @@
-﻿namespace QABrokerAPI.Common.Caching.Interfaces;
+namespace QABrokerAPI.Common.Caching.Interfaces;
 
 public static class SingletonCacheManager
 {

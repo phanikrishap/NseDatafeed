@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Linq;
 using Newtonsoft.Json.Serialization;
 using Newtonsoft.Json;
 using QABrokerAPI.Common.Enums;
@@ -85,11 +85,11 @@ namespace QABrokerAPI.Binance
                 }
             }
 
-            public static BrokerEndpointData ExchangeInfo
+            public static BrokerEndpointData Broker
             {
                 get
                 {
-                    return new BrokerEndpointData(new Uri($"{Endpoints.APIPrefix}/{Endpoints.General.ApiVersion}/exchangeInfo"), EndpointSecurityType.None);
+                    return new BrokerEndpointData(new Uri($"{Endpoints.APIPrefix}/{Endpoints.General.ApiVersion}/Broker"), EndpointSecurityType.None);
                 }
             }
         }

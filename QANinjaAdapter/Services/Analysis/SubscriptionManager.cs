@@ -7,7 +7,6 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.Gui;
 using QABrokerAPI.Common.Enums;
-using QANinjaAdapter.Classes.Binance.Symbols;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Instruments;
 using QANinjaAdapter.Services.MarketData;
@@ -106,12 +105,12 @@ namespace QANinjaAdapter.Services.Analysis
             Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Registered in InstrumentManager");
 
             // Step 2: Create NT MasterInstrument
-            Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Step 2 - Creating SymbolObject");
-            var symbolObj = new SymbolObject
+            Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Step 2 - Creating InstrumentDefinition");
+            var instrumentDef = new InstrumentDefinition
             {
                 Symbol = instrument.symbol,
-                BaseAsset = instrument.zerodhaSymbol ?? instrument.symbol,
-                QuoteAsset = instrument.segment?.Contains("BFO") == true ? "BSE" : "NSE",
+                BrokerSymbol = instrument.zerodhaSymbol ?? instrument.symbol,
+                Segment = instrument.segment?.Contains("BFO") == true ? "BSE" : "NSE",
                 MarketType = MarketType.UsdM // Options are UsdM (F&O segment)
             };
 
@@ -125,7 +124,7 @@ namespace QANinjaAdapter.Services.Analysis
                 await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
                 {
                     Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Inside dispatcher - calling CreateInstrument");
-                    created = InstrumentManager.Instance.CreateInstrument(symbolObj, out ntName);
+                    created = InstrumentManager.Instance.CreateInstrument(instrumentDef, out ntName);
                     Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): CreateInstrument returned created={created}, ntName='{ntName}'");
                 });
             }

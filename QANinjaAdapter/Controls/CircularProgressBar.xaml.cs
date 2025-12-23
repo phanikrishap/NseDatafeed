@@ -1,4 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
+// Decompiled with JetBrains decompiler
 // Type: QANinjaAdapter.Controls.CircularProgressBar
 // Assembly: QANinjaAdapter, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
 // MVID: C3950ED3-7884-49E5-9F57-41CBA3235764
@@ -19,21 +19,20 @@ using System.Windows.Threading;
 namespace QANinjaAdapter.Controls
 {
     public partial class CircularProgressBar : UserControl
-{
-    public static readonly DependencyProperty MinimumProperty =
-             DependencyProperty.Register(nameof(Minimum), typeof(int), typeof(CircularProgressBar),
-                 new UIPropertyMetadata(1));
+    {
+        public static readonly DependencyProperty MinimumProperty =
+                 DependencyProperty.Register(nameof(Minimum), typeof(int), typeof(CircularProgressBar),
+                     new UIPropertyMetadata(1));
 
-    public static readonly DependencyProperty MaximumProperty =
-        DependencyProperty.Register(nameof(Maximum), typeof(int), typeof(CircularProgressBar),
-            new UIPropertyMetadata(1));
+        public static readonly DependencyProperty MaximumProperty =
+            DependencyProperty.Register(nameof(Maximum), typeof(int), typeof(CircularProgressBar),
+                new UIPropertyMetadata(1));
 
-    public static readonly DependencyProperty ValueProperty =
-        DependencyProperty.Register(nameof(Value), typeof(int), typeof(CircularProgressBar),
-            new UIPropertyMetadata(100));
+        public static readonly DependencyProperty ValueProperty =
+            DependencyProperty.Register(nameof(Value), typeof(int), typeof(CircularProgressBar),
+                new UIPropertyMetadata(100));
 
-    private readonly DispatcherTimer _animationTimer;
-
+        private readonly DispatcherTimer _animationTimer;
 
         public CircularProgressBar()
         {
@@ -46,71 +45,76 @@ namespace QANinjaAdapter.Controls
         }
 
         public int Minimum
-  {
-    get => (int) this.GetValue(CircularProgressBar.MinimumProperty);
-    set => this.SetValue(CircularProgressBar.MinimumProperty, (object) value);
-  }
+        {
+            get => (int)this.GetValue(CircularProgressBar.MinimumProperty);
+            set => this.SetValue(CircularProgressBar.MinimumProperty, (object)value);
+        }
 
-  public int Maximum
-  {
-    get => (int) this.GetValue(CircularProgressBar.MaximumProperty);
-    set => this.SetValue(CircularProgressBar.MaximumProperty, (object) value);
-  }
+        public int Maximum
+        {
+            get => (int)this.GetValue(CircularProgressBar.MaximumProperty);
+            set => this.SetValue(CircularProgressBar.MaximumProperty, (object)value);
+        }
 
-  public int Value
-  {
-    get => (int) this.GetValue(CircularProgressBar.ValueProperty);
-    set => this.SetValue(CircularProgressBar.ValueProperty, (object) value);
-  }
+        public int Value
+        {
+            get => (int)this.GetValue(CircularProgressBar.ValueProperty);
+            set => this.SetValue(CircularProgressBar.ValueProperty, (object)value);
+        }
 
-  private static void SetPosition(
-    DependencyObject ellipse,
-    double offset,
-    double posOffSet,
-    double step)
-  {
-    ellipse.SetValue(Canvas.LeftProperty, (object) (50.0 + Math.Sin(offset + posOffSet * step) * 50.0));
-    ellipse.SetValue(Canvas.TopProperty, (object) (50.0 + Math.Cos(offset + posOffSet * step) * 50.0));
-  }
+        private static void SetPosition(
+          DependencyObject ellipse,
+          double offset,
+          double posOffSet,
+          double step)
+        {
+            if (ellipse == null) return;
+            ellipse.SetValue(Canvas.LeftProperty, (object)(50.0 + Math.Sin(offset + posOffSet * step) * 50.0));
+            ellipse.SetValue(Canvas.TopProperty, (object)(50.0 + Math.Cos(offset + posOffSet * step) * 50.0));
+        }
 
-  private void Start()
-  {
-    this._animationTimer.Tick += new EventHandler(this.OnAnimationTick);
-    this._animationTimer.Start();
-  }
+        private void Start()
+        {
+            this._animationTimer.Tick += new EventHandler(this.OnAnimationTick);
+            this._animationTimer.Start();
+        }
 
-  private void Stop()
-  {
-    this._animationTimer.Stop();
-    this._animationTimer.Tick -= new EventHandler(this.OnAnimationTick);
-  }
+        private void Stop()
+        {
+            this._animationTimer.Stop();
+            this._animationTimer.Tick -= new EventHandler(this.OnAnimationTick);
+        }
 
-    private void OnAnimationTick(object sender, EventArgs e)
-    {
-        _spinnerRotate.Angle = (_spinnerRotate.Angle + 36.0) % 360.0;
+        private void OnAnimationTick(object sender, EventArgs e)
+        {
+            var rotateAction = this.FindName("_spinnerRotate") as RotateTransform;
+            if (rotateAction != null)
+            {
+                rotateAction.Angle = (rotateAction.Angle + 36.0) % 360.0;
+            }
+        }
+
+        private void OnCanvasLoaded(object sender, RoutedEventArgs e)
+        {
+            CircularProgressBar.SetPosition(this.FindName("_circle0") as DependencyObject, Math.PI, 0.0, Math.PI / 5.0);
+            CircularProgressBar.SetPosition(this.FindName("_circle1") as DependencyObject, Math.PI, 1.0, Math.PI / 5.0);
+            CircularProgressBar.SetPosition(this.FindName("_circle2") as DependencyObject, Math.PI, 2.0, Math.PI / 5.0);
+            CircularProgressBar.SetPosition(this.FindName("_circle3") as DependencyObject, Math.PI, 3.0, Math.PI / 5.0);
+            CircularProgressBar.SetPosition(this.FindName("_circle4") as DependencyObject, Math.PI, 4.0, Math.PI / 5.0);
+            CircularProgressBar.SetPosition(this.FindName("_circle5") as DependencyObject, Math.PI, 5.0, Math.PI / 5.0);
+            CircularProgressBar.SetPosition(this.FindName("_circle6") as DependencyObject, Math.PI, 6.0, Math.PI / 5.0);
+            CircularProgressBar.SetPosition(this.FindName("_circle7") as DependencyObject, Math.PI, 7.0, Math.PI / 5.0);
+            CircularProgressBar.SetPosition(this.FindName("_circle8") as DependencyObject, Math.PI, 8.0, Math.PI / 5.0);
+        }
+
+        private void OnCanvasUnloaded(object sender, RoutedEventArgs e) => this.Stop();
+
+        private void OnVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            if ((bool)e.NewValue)
+                this.Start();
+            else
+                this.Stop();
+        }
     }
-
-    private void OnCanvasLoaded(object sender, RoutedEventArgs e)
-    {
-        CircularProgressBar.SetPosition((DependencyObject)_circle0, Math.PI, 0.0, Math.PI / 5.0);
-        CircularProgressBar.SetPosition((DependencyObject)this._circle1, Math.PI, 1.0, Math.PI / 5.0);
-        CircularProgressBar.SetPosition((DependencyObject)this._circle2, Math.PI, 2.0, Math.PI / 5.0);
-        CircularProgressBar.SetPosition((DependencyObject)this._circle3, Math.PI, 3.0, Math.PI / 5.0);
-        CircularProgressBar.SetPosition((DependencyObject)this._circle4, Math.PI, 4.0, Math.PI / 5.0);
-        CircularProgressBar.SetPosition((DependencyObject)this._circle5, Math.PI, 5.0, Math.PI / 5.0);
-        CircularProgressBar.SetPosition((DependencyObject)this._circle6, Math.PI, 6.0, Math.PI / 5.0);
-        CircularProgressBar.SetPosition((DependencyObject)this._circle7, Math.PI, 7.0, Math.PI / 5.0);
-        CircularProgressBar.SetPosition((DependencyObject)this._circle8, Math.PI, 8.0, Math.PI / 5.0);
-    }
-
-    private void OnCanvasUnloaded(object sender, RoutedEventArgs e) => this.Stop();
-
-  private void OnVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
-  {
-    if ((bool) e.NewValue)
-      this.Start();
-    else
-      this.Stop();
-  }
-}
 }

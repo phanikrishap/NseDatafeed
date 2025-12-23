@@ -1,4 +1,4 @@
-﻿
+
 using QANinjaAdapter.ViewModels;
 
 #nullable disable

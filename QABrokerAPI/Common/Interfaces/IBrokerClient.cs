@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -68,7 +68,7 @@ namespace QABrokerAPI.Common.Interfaces
 
         Task<DepositListResponse> GetDepositHistory(FundHistoryRequest request, int receiveWindow = 5000);
 
-        Task<ExchangeInfoResponse> GetExchangeInfo();
+        Task<BrokerResponse> GetBroker();
     }
 
 }

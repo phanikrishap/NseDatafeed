@@ -1,4 +1,4 @@
-﻿using QANinjaAdapter;
+using QANinjaAdapter;
 using System;
 using System.Windows;
 using System.Windows.Media;

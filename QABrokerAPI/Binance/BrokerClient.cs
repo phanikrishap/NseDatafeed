@@ -1,4 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
+// Decompiled with JetBrains decompiler
 // Type: BinanceExchange.API.Client.BinanceClient
 // Assembly: BinanceAPI, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
 // MVID: D349CB21-077C-4B48-99EA-7AB6C64F9B14
@@ -89,9 +89,9 @@ public class BrokerClient : IBrokerClient
         return await this._apiProcessor.ProcessGetRequest<ServerTimeResponse>(Endpoints.General.ServerTime);
     }
 
-    public async Task<ExchangeInfoResponse> GetExchangeInfo()
+    public async Task<BrokerResponse> GetBroker()
     {
-        return await this._apiProcessor.ProcessGetRequest<ExchangeInfoResponse>(Endpoints.General.ExchangeInfo);
+        return await this._apiProcessor.ProcessGetRequest<BrokerResponse>(Endpoints.General.Broker);
     }
 
     public async Task<OrderBookResponse> GetOrderBook(string symbol, bool useCache = false, int limit = 100)

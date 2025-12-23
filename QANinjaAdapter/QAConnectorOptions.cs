@@ -1,4 +1,4 @@
-﻿using NinjaTrader.Cbi;
+using NinjaTrader.Cbi;
 using NinjaTrader.Gui;
 using System;
 using System.ComponentModel;

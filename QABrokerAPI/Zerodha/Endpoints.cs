@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Linq;
 using Newtonsoft.Json.Serialization;
 using Newtonsoft.Json;
 using QABrokerAPI.Common.Enums;
@@ -76,11 +76,11 @@ namespace QABrokerAPI.Zerodha
                 }
             }
 
-            public static BrokerEndpointData ExchangeInfo
+            public static BrokerEndpointData Broker
             {
                 get
                 {
-                    return new BrokerEndpointData(new Uri($"{ZerodhaEndpoints.APIPrefix}/{ZerodhaEndpoints.General.ApiVersion}/exchangeinfo"), EndpointSecurityType.None);
+                    return new BrokerEndpointData(new Uri($"{ZerodhaEndpoints.APIPrefix}/{ZerodhaEndpoints.General.ApiVersion}/Broker"), EndpointSecurityType.None);
                 }
             }
         }

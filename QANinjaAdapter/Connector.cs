@@ -4,7 +4,7 @@ using QABrokerAPI.Zerodha;
 using QABrokerAPI.Zerodha.Websockets;
 using QANinjaAdapter.Annotations;
 using QANinjaAdapter.Classes;
-using QANinjaAdapter.Classes.Binance.Symbols;
+using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Configuration;
 using QANinjaAdapter.Services.Instruments;
 using QANinjaAdapter.Services.MarketData;
@@ -228,19 +228,19 @@ namespace QANinjaAdapter
         /// <summary>
         /// Gets exchange information for all available instruments
         /// </summary>
-        /// <returns>A collection of symbol objects</returns>
-        public async Task<ObservableCollection<SymbolObject>> GetExchangeInformation()
+        /// <returns>A collection of instrument definitions</returns>
+        public async Task<ObservableCollection<InstrumentDefinition>> GetBrokerInformation()
         {
-            return await _instrumentManager.GetExchangeInformation();
+            return await _instrumentManager.GetBrokerInformation();
         }
 
         /// <summary>
         /// Creates an instrument in NinjaTrader
         /// </summary>
-        /// <param name="instrument">The instrument to create</param>
+        /// <param name="instrument">The instrument definition to create</param>
         /// <param name="ntSymbolName">The NinjaTrader symbol name</param>
         /// <returns>True if the instrument was created successfully, false otherwise</returns>
-        public bool CreateInstrument(SymbolObject instrument, out string ntSymbolName)
+        public bool CreateInstrument(InstrumentDefinition instrument, out string ntSymbolName)
         {
             return _instrumentManager.CreateInstrument(instrument, out ntSymbolName);
         }
@@ -248,9 +248,9 @@ namespace QANinjaAdapter
         /// <summary>
         /// Removes an instrument from NinjaTrader
         /// </summary>
-        /// <param name="instrument">The instrument to remove</param>
+        /// <param name="instrument">The instrument definition to remove</param>
         /// <returns>True if the instrument was removed successfully, false otherwise</returns>
-        public bool RemoveInstrument(SymbolObject instrument)
+        public bool RemoveInstrument(InstrumentDefinition instrument)
         {
             return _instrumentManager.RemoveInstrument(instrument);
         }
@@ -258,8 +258,8 @@ namespace QANinjaAdapter
         /// <summary>
         /// Gets all NinjaTrader symbols
         /// </summary>
-        /// <returns>A collection of symbol objects</returns>
-        public async Task<ObservableCollection<SymbolObject>> GetNTSymbols()
+        /// <returns>A collection of instrument definitions</returns>
+        public async Task<ObservableCollection<InstrumentDefinition>> GetNTSymbols()
         {
             return await _instrumentManager.GetNTSymbols();
         }

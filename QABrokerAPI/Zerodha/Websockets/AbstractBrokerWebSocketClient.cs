@@ -1,4 +1,4 @@
-﻿// Adapted for Zerodha .NET 4.8
+// Adapted for Zerodha .NET 4.8
 using QABrokerAPI.Zerodha;
 using QABrokerAPI.Zerodha.Utility;
 using QABrokerAPI.Common.Interfaces;
@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using WebSocketSharp;
 using System.Net.Http;
 using System.Text;
+using System.Buffers;
 
 #nullable disable
 namespace QABrokerAPI.Zerodha.Websockets
@@ -372,54 +373,44 @@ namespace QABrokerAPI.Zerodha.Websockets
 
         private T ProcessZerodhaMessage<T>(string message, string symbol, KlineInterval? interval) where T : IWebSocketResponse
         {
+            byte[] rentedArray = null;
             try
             {
-                // For Zerodha, message is actually a binary data string
-                // We need to convert it to byte array first
-                byte[] binaryData = Encoding.UTF8.GetBytes(message);
-                this.Logger.Debug($"Processing Zerodha binary message, length: {binaryData.Length} bytes");
+                // Zerodha messages from WebSocketSharp can come as strings or binary
+                // UTF8.GetByteCount + UTF8.GetBytes to avoid extra string allocations
+                int byteCount = Encoding.UTF8.GetByteCount(message);
+                rentedArray = ArrayPool<byte>.Shared.Rent(byteCount);
+                int actualBytes = Encoding.UTF8.GetBytes(message, 0, message.Length, rentedArray, 0);
+
+                this.Logger.Debug($"Processing Zerodha binary message, length: {actualBytes} bytes");
+
+                if (actualBytes < 2) return Activator.CreateInstance<T>();
 
                 if (typeof(T) == typeof(BrokerTradeData))
                 {
                     var tradeData = new BrokerTradeData
                     {
-                        // Set common IWebSocketResponse properties
                         EventType = "ticker",
                         EventTime = DateTime.Now,
                         Symbol = symbol
                     };
 
-                    // First, get the number of packets in the message (first 2 bytes)
-                    if (binaryData.Length < 2)
-                    {
-                        this.Logger.Error("Binary message too short to contain packet count");
-                        return (T)(object)tradeData; // Return empty object
-                    }
-
-                    short packetCount = ZerodhaBinaryReader.ReadInt16BE(binaryData, 0);
-                    this.Logger.Debug($"Number of packets in message: {packetCount}");
-
-                    int offset = 2; // Start after the packet count
+                    short packetCount = ZerodhaBinaryReader.ReadInt16BE(rentedArray, 0);
+                    int offset = 2;
 
                     for (int i = 0; i < packetCount; i++)
                     {
-                        if (offset + 2 > binaryData.Length) break;
-                        short packetLength = ZerodhaBinaryReader.ReadInt16BE(binaryData, offset);
+                        if (offset + 2 > actualBytes) break;
+                        short packetLength = ZerodhaBinaryReader.ReadInt16BE(rentedArray, offset);
                         offset += 2;
 
-                        if (offset + packetLength > binaryData.Length) break;
+                        if (offset + packetLength > actualBytes) break;
 
-                        // Use ZerodhaBinaryReader to extract values from the binary packet at the current offset
-                        int instrumentToken = ZerodhaBinaryReader.ReadInt32BE(binaryData, offset);
-                        
-                        // We only process if it matches the requested symbol's token (simplified check)
-                        // In a production environment, we'd have a token-to-symbol map
-                        
-                        // For demonstration/compatibility, populate first found packet
-                        if (i == 0)
+                        // Extract values from the binary packet
+                        if (i == 0) // Just take the first one for now as a baseline
                         {
-                            tradeData.LastPrice = (decimal)(ZerodhaBinaryReader.ReadInt32BE(binaryData, offset + 4) / 100.0);
-                            tradeData.LastQuantity = (decimal)ZerodhaBinaryReader.ReadInt32BE(binaryData, offset + 8);
+                            tradeData.LastPrice = (decimal)(ZerodhaBinaryReader.ReadInt32BE(rentedArray, offset + 4) / 100.0);
+                            tradeData.LastQuantity = (decimal)ZerodhaBinaryReader.ReadInt32BE(rentedArray, offset + 8);
                         }
                         
                         offset += packetLength;
@@ -427,17 +418,17 @@ namespace QABrokerAPI.Zerodha.Websockets
 
                     return (T)(object)tradeData;
                 }
-                else
-                {
-                    this.Logger.Error($"Unsupported type for Zerodha binary data: {typeof(T).Name}");
-                    // Create a default instance of the requested type
-                    return Activator.CreateInstance<T>();
-                }
+
+                return Activator.CreateInstance<T>();
             }
             catch (Exception ex)
             {
                 this.Logger.Error($"Error processing Zerodha binary message: {ex.Message}", ex);
-                return Activator.CreateInstance<T>(); // Return empty object on error
+                return Activator.CreateInstance<T>();
+            }
+            finally
+            {
+                if (rentedArray != null) ArrayPool<byte>.Shared.Return(rentedArray);
             }
         }
 

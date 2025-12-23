@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using QABrokerAPI.Common.Models.WebSocket.Interfaces;
 using System;
 using System.Collections.Generic;

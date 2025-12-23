@@ -1,4 +1,4 @@
-﻿using QABrokerAPI.Zerodha;
+using QABrokerAPI.Zerodha;
 using QABrokerAPI.Common.Caching;
 using QABrokerAPI.Common.Caching.Interfaces;
 using QABrokerAPI.Common.Interfaces;
@@ -99,9 +99,9 @@ namespace QABrokerAPI.Zerodha
             return await this._apiProcessor.ProcessGetRequest<ServerTimeResponse>(ZerodhaEndpoints.General.ServerTime);
         }
 
-        public async Task<ExchangeInfoResponse> GetExchangeInfo()
+        public async Task<BrokerResponse> GetBroker()
         {
-            return await this._apiProcessor.ProcessGetRequest<ExchangeInfoResponse>(ZerodhaEndpoints.General.ExchangeInfo);
+            return await this._apiProcessor.ProcessGetRequest<BrokerResponse>(ZerodhaEndpoints.General.Broker);
         }
 
         public async Task<OrderBookResponse> GetOrderBook(string symbol, bool useCache = false, int limit = 100)

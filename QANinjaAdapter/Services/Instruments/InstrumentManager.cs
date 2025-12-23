@@ -14,7 +14,6 @@ using NinjaTrader.Core;
 using NinjaTrader.Core.FloatingPoint;
 using QABrokerAPI.Common.Enums;
 using QANinjaAdapter.Classes;
-using QANinjaAdapter.Classes.Binance.Symbols;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Zerodha;
 
@@ -30,7 +29,7 @@ namespace QANinjaAdapter.Services.Instruments
         
         // Cache for all instrument data and tokens
         private readonly Dictionary<string, long> _symbolToTokenMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<long, InstrumentData> _tokenToInstrumentDataMap = new Dictionary<long, InstrumentData>();
+        private readonly Dictionary<long, InstrumentDefinition> _tokenToInstrumentDataMap = new Dictionary<long, InstrumentDefinition>();
         
         private string _sqliteDbFullPath;
         private bool _isInitialized = false;
@@ -54,56 +53,81 @@ namespace QANinjaAdapter.Services.Instruments
         private InstrumentManager()
         {
             _zerodhaClient = ZerodhaClient.Instance;
-            // Load the instrument tokens on initialization
-            EnsureInitialized();
+            // Initialize asynchronously
+            _ = InitializeAsync();
         }
 
-        private void EnsureInitialized()
+        /// <summary>
+        /// Unified initialization of instrument data from all sources
+        /// </summary>
+        public async Task InitializeAsync()
         {
             if (_isInitialized) return;
 
+            try
+            {
+                Logger.Info("InstrumentManager: Starting unified initialization...");
+                
+                // 1. Load local mappings (JSON) - Fast and prioritized
+                LoadMappingsFromJson();
+
+                // 2. Ensure SQLite database is ready
+                await EnsureDatabaseExists();
+
+                // 3. Load tokens into memory from SQLite (improves startup)
+                LoadTokensFromSqlite();
+
+                // 4. Optionally refresh tokens from API if memory cache is empty
+                if (_symbolToTokenMap.Count < 10) // Threshold for "critically empty"
+                {
+                    await LoadInstrumentTokensFromApi();
+                }
+
+                _isInitialized = true;
+                Logger.Info($"InstrumentManager: Initialization complete. Total symbols cached: {_symbolToTokenMap.Count}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: Critical error during initialization: {ex.Message}", ex);
+            }
+        }
+
+        private void LoadMappingsFromJson()
+        {
             string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.MappedInstrumentsFileName);
-            _sqliteDbFullPath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.InstrumentDbFileName);
+
+            if (!File.Exists(jsonFilePath))
+            {
+                Logger.Info($"InstrumentManager: No mapping file found at {jsonFilePath}");
+                return;
+            }
 
             try
             {
-                if (!File.Exists(jsonFilePath))
-                {
-                    Logger.Info($"InstrumentManager: Instrument mapping file not found at: {jsonFilePath}");
-                    return;
-                }
-
                 string jsonContent = File.ReadAllText(jsonFilePath);
-                var instruments = JsonConvert.DeserializeObject<List<InstrumentData>>(jsonContent);
-
+                var instruments = JsonConvert.DeserializeObject<List<InstrumentDefinition>>(jsonContent);
                 if (instruments != null)
                 {
                     foreach (var instrument in instruments)
                     {
-                        if (!string.IsNullOrEmpty(instrument.symbol) && instrument.instrument_token > 0)
+                        if (string.IsNullOrEmpty(instrument.Symbol) || instrument.InstrumentToken <= 0) continue;
+                        
+                        _symbolToTokenMap[instrument.Symbol] = instrument.InstrumentToken;
+                        _tokenToInstrumentDataMap[instrument.InstrumentToken] = instrument;
+                        
+                        if (!string.IsNullOrEmpty(instrument.BrokerSymbol) && 
+                            !instrument.BrokerSymbol.Equals(instrument.Symbol, StringComparison.OrdinalIgnoreCase))
                         {
-                            _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
-                            _tokenToInstrumentDataMap[instrument.instrument_token] = instrument;
-
-                            // Also map zerodhaSymbol if it's different
-                            if (!string.IsNullOrEmpty(instrument.zerodhaSymbol) &&
-                                !instrument.zerodhaSymbol.Equals(instrument.symbol, StringComparison.OrdinalIgnoreCase))
-                            {
-                                _symbolToTokenMap[instrument.zerodhaSymbol] = instrument.instrument_token;
-                            }
+                            _symbolToTokenMap[instrument.BrokerSymbol] = instrument.InstrumentToken;
                         }
                     }
-
-                    _isInitialized = true;
-                    Logger.Info($"InstrumentManager: Loaded {_symbolToTokenMap.Count} instrument mappings and {_tokenToInstrumentDataMap.Count} token-to-data mappings from {jsonFilePath}");
+                    Logger.Info($"InstrumentManager: Loaded {instruments.Count} mappings from JSON.");
                 }
             }
             catch (Exception ex)
             {
-                string pathForError = string.IsNullOrEmpty(jsonFilePath) ? "[unknown path]" : jsonFilePath;
-                Logger.Error($"InstrumentManager: Error loading instrument mappings from {pathForError}. Error: {ex.Message}", ex);
-                throw;
+                Logger.Error($"InstrumentManager: Error loading JSON mappings: {ex.Message}");
             }
         }
 
@@ -119,22 +143,22 @@ namespace QANinjaAdapter.Services.Instruments
             if (_symbolToTokenMap.TryGetValue(ntSymbol, out long token))
             {
                 // Then get the instrument data
-                if (_tokenToInstrumentDataMap.TryGetValue(token, out InstrumentData data))
+                if (_tokenToInstrumentDataMap.TryGetValue(token, out InstrumentDefinition data))
                 {
-                    // Convert InstrumentData to MappedInstrument
+                    // Convert InstrumentDefinition to MappedInstrument
                     return new MappedInstrument
                     {
-                        symbol = data.symbol,
-                        zerodhaSymbol = data.zerodhaSymbol,
-                        underlying = data.underlying,
-                        expiry = string.IsNullOrEmpty(data.expiry) ? (DateTime?)null : DateTime.Parse(data.expiry),
-                        strike = data.strike,
-                        option_type = data.option_type,
-                        segment = data.segment,
-                        instrument_token = data.instrument_token,
-                        exchange_token = (int?)data.exchange_token,
-                        tick_size = data.tick_size,
-                        lot_size = data.lot_size
+                        symbol = data.Symbol,
+                        zerodhaSymbol = data.BrokerSymbol,
+                        underlying = data.Underlying,
+                        expiry = data.Expiry,
+                        strike = data.Strike,
+                        option_type = data.MarketType.ToString(),
+                        segment = data.Segment,
+                        instrument_token = data.InstrumentToken,
+                        exchange_token = (int?)data.ExchangeToken,
+                        tick_size = data.TickSize,
+                        lot_size = data.LotSize
                     };
                 }
             }
@@ -155,18 +179,19 @@ namespace QANinjaAdapter.Services.Instruments
                 // Update memory maps
                 _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
                 
-                var data = new InstrumentData {
-                    symbol = instrument.symbol,
-                    zerodhaSymbol = instrument.zerodhaSymbol,
-                    underlying = instrument.underlying,
-                    expiry = instrument.expiry?.ToString("yyyy-MM-dd"), // formatting
-                    strike = instrument.strike,
-                    option_type = instrument.option_type,
-                    segment = instrument.segment,
-                    instrument_token = instrument.instrument_token,
-                    exchange_token = (long)(instrument.exchange_token ?? 0),
-                    tick_size = instrument.tick_size,
-                    lot_size = instrument.lot_size
+                var data = new InstrumentDefinition {
+                    Symbol = instrument.symbol,
+                    BrokerSymbol = instrument.zerodhaSymbol,
+                    Underlying = instrument.underlying,
+                    Expiry = instrument.expiry,
+                    Strike = instrument.strike,
+                    // Map option_type or segment to MarketType if needed
+                    MarketType = MarketType.Spot, 
+                    Segment = instrument.segment,
+                    InstrumentToken = instrument.instrument_token,
+                    ExchangeToken = (long)(instrument.exchange_token ?? 0),
+                    TickSize = instrument.tick_size,
+                    LotSize = instrument.lot_size
                 };
                 
                 _tokenToInstrumentDataMap[instrument.instrument_token] = data;
@@ -176,15 +201,15 @@ namespace QANinjaAdapter.Services.Instruments
                 string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
                 string jsonFilePath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.MappedInstrumentsFileName);
                 
-                List<InstrumentData> currentList = new List<InstrumentData>();
+                List<InstrumentDefinition> currentList = new List<InstrumentDefinition>();
                 if (File.Exists(jsonFilePath))
                 {
                     string content = File.ReadAllText(jsonFilePath);
-                    currentList = JsonConvert.DeserializeObject<List<InstrumentData>>(content) ?? new List<InstrumentData>();
+                    currentList = JsonConvert.DeserializeObject<List<InstrumentDefinition>>(content) ?? new List<InstrumentDefinition>();
                 }
                 
                 // Remove existing if any
-                currentList.RemoveAll(x => x.symbol == instrument.symbol);
+                currentList.RemoveAll(x => x.Symbol == instrument.symbol);
                 currentList.Add(data);
                 
                 File.WriteAllText(jsonFilePath, JsonConvert.SerializeObject(currentList, Formatting.Indented));
@@ -243,20 +268,6 @@ namespace QANinjaAdapter.Services.Instruments
         }
 
         
-        private class InstrumentData
-        {
-            public string symbol { get; set; }
-            public string underlying { get; set; }
-            public string expiry { get; set; }
-            public double? strike { get; set; }
-            public string option_type { get; set; }
-            public string segment { get; set; }
-            public long instrument_token { get; set; }
-            public long exchange_token { get; set; }
-            public string zerodhaSymbol { get; set; }
-            public double tick_size { get; set; }
-            public int lot_size { get; set; }
-        }
 
         /// <summary>
         /// Gets the instrument token for a symbol
@@ -267,9 +278,7 @@ namespace QANinjaAdapter.Services.Instruments
         {
             try
             {
-                EnsureInitialized();
-
-                // First try exact match in JSON mappings (custom mappings like NIFTY_I)
+                // First try exact match in memory cache
                 if (_symbolToTokenMap.TryGetValue(symbol, out long token))
                     return Task.FromResult(token);
 
@@ -417,8 +426,7 @@ namespace QANinjaAdapter.Services.Instruments
         /// <summary>
         /// Loads instrument tokens from the Zerodha API
         /// </summary>
-        /// <returns>A task representing the asynchronous operation</returns>
-        public async Task LoadInstrumentTokens()
+        private async Task LoadInstrumentTokensFromApi()
         {
             try
             {
@@ -662,7 +670,7 @@ namespace QANinjaAdapter.Services.Instruments
                                     }
                                     catch (Exception ex)
                                     {
-                                        Logger.Warn($"InstrumentManager: Error inserting row {i}: {ex.Message}");
+                                        Logger.Warn($"InstrumentManager: Error inserting row {insertedCount + 1}: {ex.Message}");
                                     }
                                 }
 
@@ -672,6 +680,9 @@ namespace QANinjaAdapter.Services.Instruments
                         }
                     }
 
+                    Logger.Info($"InstrumentManager: Successfully created SQLite database at {_sqliteDbFullPath}");
+                    _isInitialized = false; // Trigger reload
+                    await InitializeAsync();
                     return true;
                 }
             }
@@ -679,6 +690,40 @@ namespace QANinjaAdapter.Services.Instruments
             {
                 Logger.Error($"InstrumentManager: Error creating instrument database: {ex.Message}", ex);
                 return false;
+            }
+        }
+
+        private void LoadTokensFromSqlite()
+        {
+            if (string.IsNullOrEmpty(_sqliteDbFullPath) || !File.Exists(_sqliteDbFullPath)) return;
+
+            try
+            {
+                using (var connection = new SQLiteConnection($"Data Source={_sqliteDbFullPath};Version=3;Read Only=True;"))
+                {
+                    connection.Open();
+                    string query = "SELECT tradingsymbol, instrument_token FROM instruments";
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        int count = 0;
+                        while (reader.Read())
+                        {
+                            string symbol = reader.GetString(0);
+                            long token = reader.GetInt64(1);
+                            if (!_symbolToTokenMap.ContainsKey(symbol))
+                            {
+                                _symbolToTokenMap[symbol] = token;
+                                count++;
+                            }
+                        }
+                        Logger.Info($"InstrumentManager: Loaded {count} additional tokens from SQLite cache.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"InstrumentManager: Non-critical error loading tokens from SQLite: {ex.Message}");
             }
         }
 
@@ -790,12 +835,12 @@ namespace QANinjaAdapter.Services.Instruments
         /// <summary>
         /// Gets exchange information for all available instruments
         /// </summary>
-        /// <returns>A collection of symbol objects</returns>
-        public async Task<ObservableCollection<SymbolObject>> GetExchangeInformation()
+        /// <returns>A collection of instrument definitions</returns>
+        public async Task<ObservableCollection<InstrumentDefinition>> GetBrokerInformation()
         {
             return await Task.Run(() =>
             {
-                ObservableCollection<SymbolObject> exchangeInformation = new ObservableCollection<SymbolObject>();
+                ObservableCollection<InstrumentDefinition> BrokerInformation = new ObservableCollection<InstrumentDefinition>();
 
                 try
                 {
@@ -809,7 +854,7 @@ namespace QANinjaAdapter.Services.Instruments
                         Logger.Error($"Error: JSON file does not exist at {jsonFilePath}");
                         MessageBox.Show($"Symbol JSON file not found at: {jsonFilePath}",
                                 "File Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                        return exchangeInformation;
+                        return BrokerInformation;
                     }
 
                     // Read the JSON file
@@ -830,40 +875,22 @@ namespace QANinjaAdapter.Services.Instruments
                             if (string.IsNullOrEmpty(instrument.symbol))
                                 continue;
 
-                            // Create filters for tick size and lot size
-                            List<Filter> filters = new List<Filter>();
-
-                            // Add PRICE_FILTER if tick_size is available
-                            if (instrument.tick_size > 0)
-                            {
-                                filters.Add(new Filter
-                                {
-                                    FilterType = "PRICE_FILTER",
-                                    TickSize = instrument.tick_size
-                                });
-                            }
-
-                            // Add LOT_SIZE if lot_size is available
-                            if (instrument.lot_size > 0)
-                            {
-                                filters.Add(new Filter
-                                {
-                                    FilterType = "LOT_SIZE",
-                                    StepSize = Convert.ToDouble(instrument.lot_size)
-                                });
-                            }
-
                             // Extract segment from the segment field (e.g., "NFO-FUT" -> "NFO")
                             string segment = instrument.segment.Split('-')[0];
 
-                            // Create the SymbolObject
-                            SymbolObject symbolObject = new SymbolObject
+                            // Create the InstrumentDefinition
+                            InstrumentDefinition instrumentDef = new InstrumentDefinition
                             {
                                 Symbol = instrument.symbol,
-                                BaseAsset = instrument.zerodhaSymbol ?? instrument.symbol,
-                                QuoteAsset = segment, // Using segment as exchange/quote asset
-                                Status = "TRADING",
-                                Filters = filters.ToArray()
+                                BrokerSymbol = instrument.zerodhaSymbol ?? instrument.symbol,
+                                Segment = segment,
+                                TickSize = instrument.tick_size,
+                                LotSize = instrument.lot_size,
+                                Expiry = instrument.expiry,
+                                Strike = instrument.strike,
+                                Underlying = instrument.underlying,
+                                InstrumentToken = instrument.instrument_token,
+                                ExchangeToken = instrument.exchange_token
                             };
 
                             // Set market type based on segment
@@ -871,27 +898,27 @@ namespace QANinjaAdapter.Services.Instruments
                             {
                                 case "NSE":
                                 case "BSE":
-                                    symbolObject.MarketType = MarketType.Spot;
+                                    instrumentDef.MarketType = MarketType.Spot;
                                     break;
                                 case "NFO":
                                 case "BFO":
-                                    symbolObject.MarketType = MarketType.UsdM;
+                                    instrumentDef.MarketType = MarketType.UsdM;
                                     break;
                                 case "MCX":
-                                    symbolObject.MarketType = MarketType.Futures;
+                                    instrumentDef.MarketType = MarketType.Futures;
                                     break;
                                 case "CDS":
-                                    symbolObject.MarketType = MarketType.CoinM;
+                                    instrumentDef.MarketType = MarketType.CoinM;
                                     break;
                                 default:
-                                    symbolObject.MarketType = MarketType.Spot;
+                                    instrumentDef.MarketType = MarketType.Spot;
                                     break;
                             }
 
                             _symbolToTokenMap[instrument.symbol] = instrument.instrument_token;
 
                             // Add to the collection
-                            exchangeInformation.Add(symbolObject);
+                            BrokerInformation.Add(instrumentDef);
                             count++;
 
                             // Log progress for every 1000 symbols
@@ -911,12 +938,12 @@ namespace QANinjaAdapter.Services.Instruments
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error($"Exception in GetExchangeInformation: {ex.Message}");
+                    Logger.Error($"Exception in GetBrokerInformation: {ex.Message}");
                     MessageBox.Show($"Error loading symbols from JSON file: {ex.Message}",
                         "File Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
 
-                return exchangeInformation;
+                return BrokerInformation;
             });
         }
 
@@ -926,7 +953,7 @@ namespace QANinjaAdapter.Services.Instruments
         /// <returns>A task representing the asynchronous operation</returns>
         public async Task RegisterSymbols()
         {
-            var symbols = await GetExchangeInformation();
+            var symbols = await GetBrokerInformation();
             int createdCount = 0;
 
             foreach (var symbol in symbols)
@@ -1020,76 +1047,35 @@ namespace QANinjaAdapter.Services.Instruments
             }
         }
 
-        /// <summary>
-        /// Creates an instrument in NinjaTrader
-        /// </summary>
-        /// <param name="instrument">The instrument to create</param>
-        /// <param name="ntSymbolName">The NinjaTrader symbol name</param>
-        /// <returns>True if the instrument was created successfully, false otherwise</returns>
-        public bool CreateInstrument(SymbolObject instrument, out string ntSymbolName)
+        public bool CreateInstrument(InstrumentDefinition instrument, out string ntSymbolName)
         {
             ntSymbolName = "";
             InstrumentType instrumentType = InstrumentType.Stock;
             string validName = instrument.Symbol;
 
-            // We'll use the default trading hours for now
-            // In a real implementation, we would need to set up proper trading hours
-            Logger.Info("Using default trading hours");
+            // Use the helper to determine and set trading hours
+            string templateName = NinjaTraderHelper.GetTradingHoursTemplate(instrument.Segment);
+            Logger.Info($"Setting up instrument '{validName}' with trading hours '{templateName}'");
 
-            MasterInstrument masterInstrument1 = MasterInstrument.DbGet(validName, instrumentType) ?? MasterInstrument.DbGet(validName, instrumentType);
-            string symbol = instrument.Symbol;
+            MasterInstrument masterInstrument1 = MasterInstrument.DbGet(validName, instrumentType);
             if (masterInstrument1 != null)
             {
                 ntSymbolName = validName;
                 if (DataContext.Instance.SymbolNames.ContainsKey(validName))
                     return false;
-                DataContext.Instance.SymbolNames.Add(validName, symbol);
+                    
+                DataContext.Instance.SymbolNames.Add(validName, instrument.Symbol);
                 int index = 1019;
-                List<string> stringList = new List<string>((IEnumerable<string>)masterInstrument1.ProviderNames);
-                for (int count = stringList.Count; count <= index; ++count)
-                    stringList.Add("");
-                masterInstrument1.ProviderNames = stringList.ToArray();
+                List<string> providerNames = new List<string>(masterInstrument1.ProviderNames);
+                while (providerNames.Count <= index) providerNames.Add("");
+                
+                masterInstrument1.ProviderNames = providerNames.ToArray();
                 masterInstrument1.ProviderNames[index] = instrument.Symbol;
 
-                // Set default trading hours if not already set
+                // Ensure trading hours are set
                 if (masterInstrument1.TradingHours == null)
                 {
-                    // Try to find a trading hours template by name
-                    string tradingHoursName = "Default 24 x 7";
-                    // Use reflection to get the trading hours to avoid direct namespace reference
-                    object tradingHoursObj = null;
-                    try {
-                        // Try to find the Get method on TradingHours using reflection
-                        var tradingHoursType = AppDomain.CurrentDomain.GetAssemblies()
-                            .SelectMany(a => a.GetTypes())
-                            .FirstOrDefault(t => t.Name == "TradingHours");
-                            
-                        if (tradingHoursType != null) {
-                            var getMethod = tradingHoursType.GetMethod("Get", new[] { typeof(string) });
-                            if (getMethod != null) {
-                                tradingHoursObj = getMethod.Invoke(null, new object[] { tradingHoursName });
-                            }
-                        }
-                    } catch (Exception ex) {
-                        Logger.Error($"Error getting trading hours: {ex.Message}");
-                    }
-                    
-                    if (tradingHoursObj != null)
-                    {
-                        Logger.Info($"Setting trading hours template: {tradingHoursName}");
-                        
-                        // Use reflection to set the TradingHours property to avoid type conversion issues
-                        var tradingHoursProperty = typeof(MasterInstrument).GetProperty("TradingHours");
-                        if (tradingHoursProperty != null)
-                        {
-                            tradingHoursProperty.SetValue(masterInstrument1, tradingHoursObj);
-                        }
-                    }
-                    else
-                    {
-                        Logger.Error("No trading hours template found. Please create a trading hours template in NinjaTrader.");
-                        return false;
-                    }
+                    NinjaTraderHelper.SetTradingHours(masterInstrument1, templateName);
                 }
 
                 masterInstrument1.DbUpdate();
@@ -1097,208 +1083,29 @@ namespace QANinjaAdapter.Services.Instruments
                 return true;
             }
 
-            double num = 0.0;
-            if (instrument.Filters != null && instrument.Filters.Length != 0)
-            {
-                Filter filter = ((IEnumerable<Filter>)instrument.Filters).FirstOrDefault<Filter>((Func<Filter, bool>)(x => x.FilterType == "PRICE_FILTER"));
-                if (filter != null)
-                    num = filter.TickSize;
-            }
+            double tickSize = instrument.TickSize > 0 ? instrument.TickSize : 0.05;
 
-            int index1 = 1019;
-            List<string> stringList1 = new List<string>();
-            for (int count = stringList1.Count; count <= index1; ++count)
-                stringList1.Add("");
-
-            // We don't set trading hours directly
-            // This is similar to the original plugin's approach
-            Logger.Info("Using default trading hours");
-            
-            // Set up trading hours - this is crucial to prevent the TradingHours == null error
-            Logger.Info("Setting up trading hours");
-            
-            // Create the MasterInstrument without setting TradingHours in the constructor
+            // Create the MasterInstrument
             MasterInstrument masterInstrument2 = new MasterInstrument()
             {
                 Description = instrument.Symbol,
                 InstrumentType = instrumentType,
                 Name = validName,
                 PointValue = 1.0,
-                TickSize = num > 0 ? num : 0.05, // Default tick size if not specified
+                TickSize = tickSize,
                 Url = new Uri("https://kite.zerodha.com"),
-                Exchanges = {
-                    Exchange.Default
-                },
-                Currency = Currency.IndianRupee,
-                ProviderNames = stringList1.ToArray()
+                Exchanges = { Exchange.Default },
+                Currency = Currency.IndianRupee
             };
 
-            masterInstrument2.ProviderNames[index1] = instrument.Symbol;
-            
-            // Set the trading hours property based on segment
-            try
-            {
-                // Determine the appropriate trading hours template based on the segment
-                string tradingHoursName = "Default 24 x 7";
-                
-                // Extract segment from the instrument's QuoteAsset or BaseAsset
-                string segment = instrument.QuoteAsset;
-                if (string.IsNullOrEmpty(segment))
-                {
-                    segment = instrument.BaseAsset;
-                }
-                
-                // Set specific trading hours template based on segment
-                if (!string.IsNullOrEmpty(segment))
-                {
-                    segment = segment.ToUpper();
-                    if (segment.Contains("NSE") || segment.Contains("NFO") || 
-                        segment.Contains("BSE") || segment.Contains("BFO"))
-                    {
-                        tradingHoursName = "Nse";
-                    }
-                    else if (segment.Contains("MCX"))
-                    {
-                        tradingHoursName = "MCX";
-                    }
-                }
-                
-                Logger.Info($"Setting trading hours template: {tradingHoursName}");
-                
-                // Use reflection to set the trading hours property
-                // This approach avoids direct reference to the TradingHours class which might be causing issues
-                var tradingHoursProperty = typeof(MasterInstrument).GetProperty("TradingHours");
-                if (tradingHoursProperty != null)
-                {
-                    // Try to find the TradingHours class using reflection
-                    Type tradingHoursType = null;
-                    
-                    // Try different possible namespaces for TradingHours
-                    string[] possibleNamespaces = new[] {
-                        "NinjaTrader.Cbi.TradingHours",
-                        "NinjaTrader.Core.TradingHours",
-                        "NinjaTrader.TradingHours"
-                    };
-                    
-                    foreach (var ns in possibleNamespaces)
-                    {
-                        try
-                        {
-                            tradingHoursType = Type.GetType(ns) ?? 
-                                              AppDomain.CurrentDomain.GetAssemblies()
-                                                .SelectMany(a => a.GetTypes())
-                                                .FirstOrDefault(t => t.FullName == ns);
-                                                
-                            if (tradingHoursType != null)
-                                break;
-                        }
-                        catch
-                        {
-                            // Ignore errors and try the next namespace
-                        }
-                    }
-                    
-                    // If we couldn't find the type, try to get it from a known instance
-                    if (tradingHoursType == null)
-                    {
-                        // Try to get a MasterInstrument that has TradingHours set
-                        var existingInstrument = MasterInstrument.All.FirstOrDefault(mi => mi.TradingHours != null);
-                        if (existingInstrument != null && existingInstrument.TradingHours != null)
-                        {
-                            tradingHoursType = existingInstrument.TradingHours.GetType();
-                            
-                            // Just use this existing trading hours
-                            tradingHoursProperty.SetValue(masterInstrument2, existingInstrument.TradingHours);
-                            Logger.Info("Using existing trading hours template");
+            int providerIndex = 1019;
+            var providers = new string[providerIndex + 1];
+            for (int i = 0; i <= providerIndex; i++) providers[i] = "";
+            providers[providerIndex] = instrument.Symbol;
+            masterInstrument2.ProviderNames = providers;
 
-                            // Must save the instrument before returning
-                            masterInstrument2.DbAdd(false);
-                            new Instrument()
-                            {
-                                Exchange = Exchange.Default,
-                                MasterInstrument = masterInstrument2
-                            }.DbAdd();
-
-                            if (!DataContext.Instance.SymbolNames.ContainsKey(validName))
-                                DataContext.Instance.SymbolNames.Add(validName, instrument.Symbol);
-
-                            ntSymbolName = validName;
-                            return true;
-                        }
-                    }
-                    
-                    // If we still couldn't find it, try a direct approach
-                    if (tradingHoursType == null)
-                    {
-                        Logger.Error("Could not find TradingHours type. Using direct property access.");
-                        
-                        // Try to set the TradingHoursName property instead
-                        var tradingHoursNameProperty = typeof(MasterInstrument).GetProperty("TradingHoursName");
-                        if (tradingHoursNameProperty != null)
-                        {
-                            tradingHoursNameProperty.SetValue(masterInstrument2, tradingHoursName);
-                            Logger.Info($"Set TradingHoursName to {tradingHoursName}");
-
-                            // Must save the instrument before returning
-                            masterInstrument2.DbAdd(false);
-                            new Instrument()
-                            {
-                                Exchange = Exchange.Default,
-                                MasterInstrument = masterInstrument2
-                            }.DbAdd();
-
-                            if (!DataContext.Instance.SymbolNames.ContainsKey(validName))
-                                DataContext.Instance.SymbolNames.Add(validName, instrument.Symbol);
-
-                            ntSymbolName = validName;
-                            return true;
-                        }
-
-                        return false;
-                    }
-                    
-                    // Get the All property from the TradingHours type
-                    var allTradingHoursProperty = tradingHoursType.GetProperty("All", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                    if (allTradingHoursProperty != null)
-                    {
-                        var allTradingHours = allTradingHoursProperty.GetValue(null) as System.Collections.IList;
-                        if (allTradingHours != null && allTradingHours.Count > 0)
-                        {
-                            // Find the trading hours template by name
-                            object selectedTemplate = null;
-                            foreach (var template in allTradingHours)
-                            {
-                                var nameProperty = template.GetType().GetProperty("Name");
-                                if (nameProperty != null)
-                                {
-                                    string name = nameProperty.GetValue(template) as string;
-                                    if (name == tradingHoursName)
-                                    {
-                                        selectedTemplate = template;
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            // If not found, use the first template
-                            if (selectedTemplate == null && allTradingHours.Count > 0)
-                            {
-                                selectedTemplate = allTradingHours[0];
-                            }
-                            
-                            if (selectedTemplate != null)
-                            {
-                                tradingHoursProperty.SetValue(masterInstrument2, selectedTemplate);
-                                Logger.Info("Successfully set trading hours template");
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error setting trading hours: {ex.Message}");
-            }
+            // Set trading hours via helper
+            NinjaTraderHelper.SetTradingHours(masterInstrument2, templateName);
             
             masterInstrument2.DbAdd(false);
 
@@ -1320,7 +1127,7 @@ namespace QANinjaAdapter.Services.Instruments
         /// </summary>
         /// <param name="instrument">The instrument to remove</param>
         /// <returns>True if the instrument was removed successfully, false otherwise</returns>
-        public bool RemoveInstrument(SymbolObject instrument)
+        public bool RemoveInstrument(InstrumentDefinition instrument)
         {
             InstrumentType instrumentType = InstrumentType.Stock;
             string symbol = instrument.Symbol;
@@ -1344,18 +1151,18 @@ namespace QANinjaAdapter.Services.Instruments
         /// <summary>
         /// Gets all NinjaTrader symbols
         /// </summary>
-        /// <returns>A collection of symbol objects</returns>
-        public async Task<ObservableCollection<SymbolObject>> GetNTSymbols()
+        /// <returns>A collection of instrument definitions</returns>
+        public async Task<ObservableCollection<InstrumentDefinition>> GetNTSymbols()
         {
             return await Task.Run(() =>
             {
-                ObservableCollection<SymbolObject> ntSymbols = new ObservableCollection<SymbolObject>();
+                ObservableCollection<InstrumentDefinition> ntSymbols = new ObservableCollection<InstrumentDefinition>();
                 IEnumerable<MasterInstrument> source = MasterInstrument.All
                     .Where(x => !string.IsNullOrEmpty(x.ProviderNames.ElementAtOrDefault(1019)));
 
                 foreach (MasterInstrument masterInstrument in source.OrderBy(x => x.Name).ToList())
                 {
-                    ntSymbols.Add(new SymbolObject()
+                    ntSymbols.Add(new InstrumentDefinition()
                     {
                         Symbol = masterInstrument.Name
                     });
@@ -1372,9 +1179,9 @@ namespace QANinjaAdapter.Services.Instruments
         /// <returns>The segment string if found; otherwise, null.</returns>
         public string GetSegmentForToken(long token)
         {
-            if (_isInitialized && _tokenToInstrumentDataMap.TryGetValue(token, out InstrumentData data))
+            if (_isInitialized && _tokenToInstrumentDataMap.TryGetValue(token, out InstrumentDefinition data))
             {
-                return data.segment;
+                return data.Segment;
             }
             Logger.Warn($"InstrumentManager: Instrument data not found for token {token} when trying to get segment.");
             return null;

@@ -181,13 +181,9 @@
     <Compile Include="QAAdapterAddOn\Styles.cs" />
     <Compile Include="QAAdapterAddOn\ViewModels\LoadViewModel.cs" />
     <Compile Include="QAConnectorOptions.cs" />
-    <Compile Include="Classes\Binance\Klines\Kline.cs" />
-    <Compile Include="Classes\Binance\Klines\KlinesRoot.cs" />
-    <Compile Include="Classes\Binance\Symbols\Filter.cs" />
-    <Compile Include="Classes\Binance\Symbols\RateLimit.cs" />
-    <Compile Include="Classes\Binance\Symbols\SymbolObject.cs" />
-    <Compile Include="Classes\Binance\Symbols\SymbolsRoot.cs" />
     <Compile Include="Classes\Record.cs" />
+    <Compile Include="Models\InstrumentDefinition.cs" />
+    <Compile Include="Services\Instruments\NinjaTraderHelper.cs" />
     <Compile Include="Classes\Constants.cs" />
     <Compile Include="Connector.cs" />
     <Compile Include="Models\DepthEntry.cs" />
@@ -208,7 +204,6 @@
       <DependentUpon>Loadwindow.xaml</DependentUpon>
     </Compile>
     <Compile Include="LogLevel.cs" />
-    <Compile Include="Parsers\DataParser.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="QALogger.cs" />
     <Compile Include="TickVolumeLogger.cs" />

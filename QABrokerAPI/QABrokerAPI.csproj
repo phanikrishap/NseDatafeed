@@ -66,6 +66,9 @@
       <SpecificVersion>False</SpecificVersion>
       <HintPath>..\References\System.Memory.dll</HintPath>
     </Reference>
+    <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\QANinjaAdapter\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll</HintPath>
+    </Reference>
     <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.0.1, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
@@ -103,15 +106,15 @@
     <Compile Include="Common\Caching\Interfaces\IAPICacheManager.cs" />
     <Compile Include="Common\Caching\SingletonCacheManager.cs" />
     <Compile Include="Common\Converter\EpochTimeConverter.cs" />
-    <Compile Include="Common\Converter\ExchangeInfoSymbolFilterConverter.cs" />
+    <Compile Include="Common\Converter\BrokerSymbolFilterConverter.cs" />
     <Compile Include="Common\Converter\KlineCandleSticksConverter.cs" />
     <Compile Include="Common\Converter\StringDecimalConverter.cs" />
     <Compile Include="Common\Converter\TimeSpanConverter.cs" />
     <Compile Include="Common\Converter\TraderPriceConverter.cs" />
     <Compile Include="Common\Enums\DepositHistoryStatus.cs" />
     <Compile Include="Common\Enums\EndpointSecurityType.cs" />
-    <Compile Include="Common\Enums\ExchangeInfoOrderType.cs" />
-    <Compile Include="Common\Enums\ExchangeInfoSymbolFilterType.cs" />
+    <Compile Include="Common\Enums\BrokerOrderType.cs" />
+    <Compile Include="Common\Enums\BrokerSymbolFilterType.cs" />
     <Compile Include="Common\Enums\ExecutionType.cs" />
     <Compile Include="Common\Enums\HttpVerb.cs" />
     <Compile Include="Common\Enums\KlineInterval.cs" />
@@ -136,7 +139,7 @@
     <Compile Include="Common\Models\Request\CreateOrderRequest.cs" />
     <Compile Include="Common\Models\Request\CurrentOpenOrdersRequest.cs" />
     <Compile Include="Common\Models\Request\DepositAddressRequest.cs" />
-    <Compile Include="Common\Models\Request\ExchangeInfo.cs" />
+    <Compile Include="Common\Models\Request\Broker.cs" />
     <Compile Include="Common\Models\Request\FundHistoryRequest.cs" />
     <Compile Include="Common\Models\Request\GetCompressedAggregateTradesRequest.cs" />
     <Compile Include="Common\Models\Request\GetKlinesCandlesticksRequest.cs" />
@@ -154,28 +157,28 @@
     <Compile Include="Common\Models\Response\DepositListItem.cs" />
     <Compile Include="Common\Models\Response\DepositListResponse.cs" />
     <Compile Include="Common\Models\Response\EmptyResponse.cs" />
-    <Compile Include="Common\Models\Response\Error\BinanceBadRequestException.cs" />
-    <Compile Include="Common\Models\Response\Error\BinanceError.cs" />
-    <Compile Include="Common\Models\Response\Error\BinanceException.cs" />
-    <Compile Include="Common\Models\Response\Error\BinanceServerException.cs" />
-    <Compile Include="Common\Models\Response\Error\BinanceTimeoutException.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoRateLimit.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoResponse.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbol.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilter.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterExchangeMaxNumAlgoOrders.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterExchangeMaxNumOrders.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterIcebergParts.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterLotSize.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterMarketLotSize.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterMaxNumAlgoOrders.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterMaxNumIcebergOrders.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterMaxNumOrders.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterMaxPosition.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterMinNotional.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterPercentagePrice.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterPercentPrice.cs" />
-    <Compile Include="Common\Models\Response\ExchangeInfoSymbolFilterPrice.cs" />
+    <Compile Include="Common\Models\Response\Error\BrokerBadRequestException.cs" />
+    <Compile Include="Common\Models\Response\Error\BrokerError.cs" />
+    <Compile Include="Common\Models\Response\Error\BrokerException.cs" />
+    <Compile Include="Common\Models\Response\Error\BrokerServerException.cs" />
+    <Compile Include="Common\Models\Response\Error\BrokerTimeoutException.cs" />
+    <Compile Include="Common\Models\Response\BrokerRateLimit.cs" />
+    <Compile Include="Common\Models\Response\BrokerResponse.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbol.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilter.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterExchangeMaxNumAlgoOrders.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterExchangeMaxNumOrders.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterIcebergParts.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterLotSize.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterMarketLotSize.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterMaxNumAlgoOrders.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterMaxNumIcebergOrders.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterMaxNumOrders.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterMaxPosition.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterMinNotional.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterPercentagePrice.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterPercentPrice.cs" />
+    <Compile Include="Common\Models\Response\BrokerSymbolFilterPrice.cs" />
     <Compile Include="Common\Models\Response\Fill.cs" />
     <Compile Include="Common\Models\Response\FullCreateOrderResponse.cs" />
     <Compile Include="Common\Models\Response\Interfaces\IBalanceResponse.cs" />
