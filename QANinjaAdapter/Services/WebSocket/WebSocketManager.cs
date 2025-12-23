@@ -55,7 +55,10 @@ namespace QANinjaAdapter.Services.WebSocket
             
             // Set WebSocket options for performance
             ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
-            ws.Options.SetBuffer(16384, 16384); // Increase buffer sizes
+            ws.Options.SetBuffer(32768, 32768); // Larger buffers for high-frequency data
+            
+            // Note: TcpNoDelay and other socket options are typically managed by the 
+            // .NET Framework's underlying HttpWebRequest/WinHttpHandler used by ClientWebSocket.
             
             return ws;
         }

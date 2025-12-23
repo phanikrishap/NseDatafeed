@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -150,221 +151,91 @@ namespace QANinjaAdapter.Services.MarketData
                 return;
             }
 
-            ClientWebSocket ws = null;
+            int retryCount = 0;
+            const int maxRetries = 10;
             var cts = new CancellationTokenSource();
+            
+            // Start monitoring chart-close in separate task
+            StartExitMonitoringTask(webSocketConnectionFunc, cts);
 
-            // Preallocate buffers to reduce GC pressure
-            byte[] buffer = new byte[16384]; // Larger buffer for better network efficiency
-
-            // Pre-calculate constants
-            int tokenInt = 0;
-
-            try
+            while (!cts.Token.IsCancellationRequested && retryCount < maxRetries)
             {
-                // Create and connect WebSocket
-                ws = _webSocketManager.CreateWebSocketClient();
-                await _webSocketManager.ConnectAsync(ws);
+                ClientWebSocket ws = null;
+                byte[] buffer = null;
 
-                // Get instrument token
-                tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
-
-                // Subscribe in quote mode
-                //await _webSocketManager.SubscribeAsync(ws, tokenInt, "quote");
-                await _webSocketManager.SubscribeAsync(ws, tokenInt, "full");
-
-                // Start monitoring chart-close in separate task
-                StartExitMonitoringTask(webSocketConnectionFunc, cts);
-
-                // Main message processing loop
-                while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
+                try
                 {
-                    WebSocketReceiveResult result = await _webSocketManager.ReceiveMessageAsync(ws, buffer, cts.Token);
-
-                    // Log raw WebSocket message before any processing
-                    if (result.Count > 0) // Only log if there's data
+                    // Exponential backoff for reconnection
+                    if (retryCount > 0)
                     {
-                        string rawMessageContent = "";
-                        if (result.MessageType == WebSocketMessageType.Text)
-                        {
-                            rawMessageContent = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                        }
-                        else if (result.MessageType == WebSocketMessageType.Binary)
-                        {
-                            // Convert binary data to hex string for logging
-                            rawMessageContent = BitConverter.ToString(buffer, 0, result.Count).Replace("-", "");
-                        }
-
-                        if (!string.IsNullOrEmpty(rawMessageContent))
-                        {
-                            //NinjaTrader.NinjaScript.NinjaScript.Log(
-                            //    $"[RAW-WS-RECV] Symbol: {nativeSymbolName}, Type: {result.MessageType}, Count: {result.Count}, Data: {rawMessageContent}",
-                            //    NinjaTrader.Cbi.LogLevel.Information); // Or LogLevel.Debug if preferred
-                        }
-                        else if (result.MessageType != WebSocketMessageType.Close) // Log if not empty and not a close message already handled below
-                        {
-                             //NinjaTrader.NinjaScript.NinjaScript.Log(
-                             //   $"[RAW-WS-RECV] Symbol: {nativeSymbolName}, Type: {result.MessageType}, Count: {result.Count}, Data: [Non-text/binary or empty data received but not a Close message]",
-                             //   NinjaTrader.Cbi.LogLevel.Warning);
-                        }
+                        int delay = Math.Min(10000, (int)Math.Pow(2, retryCount) * 500);
+                        await Task.Delay(delay, cts.Token);
+                        NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-RECONNECT] Reconnecting {nativeSymbolName} (Attempt {retryCount}/{maxRetries}) after {delay}ms", NinjaTrader.Cbi.LogLevel.Information);
                     }
 
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        NinjaTrader.NinjaScript.NinjaScript.Log(
-                            $"[TICK-SUBSCRIBE] WebSocket closed by server for {nativeSymbolName}. Status: {result.CloseStatus}, Description: {result.CloseStatusDescription}",
-                            NinjaTrader.Cbi.LogLevel.Warning);
-                        break; // Exit the loop gracefully
-                    }
+                    ws = _webSocketManager.CreateWebSocketClient();
+                    await _webSocketManager.ConnectAsync(ws);
 
-                    if (result.MessageType == WebSocketMessageType.Text)
-                        continue; // Ignore JSON heartbeats/postbacks
+                    int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
+                    await _webSocketManager.SubscribeAsync(ws, tokenInt, "full");
 
-                    // Specific logging for 1-byte binary messages
-                    if (result.MessageType == WebSocketMessageType.Binary && result.Count == 1)
-                    {
-                        //NinjaTrader.NinjaScript.NinjaScript.Log(
-                        //    $"[WS-DEBUG] Received 1-byte binary message for {nativeSymbolName}. Data: {BitConverter.ToString(buffer, 0, result.Count)}. Potentially significant.",
-                        //    NinjaTrader.Cbi.LogLevel.Warning);
-                        // Let it fall through to be handled by the next check or parser, which should reject it.
-                    }
-
-                    // Skip processing if no valid data, ensuring Close messages are not caught here
-                    if (result.Count < 2 && result.MessageType != WebSocketMessageType.Close) 
-                    {
-                         //NinjaTrader.NinjaScript.NinjaScript.Log(
-                         //   $"[WS-DEBUG] Skipping processing for {nativeSymbolName} due to insufficient data (Count: {result.Count}, Type: {result.MessageType}).",
-                         //   NinjaTrader.Cbi.LogLevel.Information);
-                        continue;
-                    }
-
-                    // Timestamp message receipt immediately to reduce timing errors
-                    var receivedTime = DateTime.Now;
-                    DateTime now = TimeZoneInfo.ConvertTime(receivedTime, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
-
-                    // Log message receipt with timestamp
-                    //NinjaTrader.NinjaScript.NinjaScript.Log(
-                    //    $"[WS-RECV] Received WebSocket message for {nativeSymbolName} at {receivedTime:HH:mm:ss.fff}, size: {result.Count} bytes",
-                    //    NinjaTrader.Cbi.LogLevel.Information);
-
-                    // Check if we have a valid subscription
-                    if (!l1Subscriptions.TryGetValue(nativeSymbolName, out var sub))
-                    {
-                        NinjaTrader.NinjaScript.NinjaScript.Log(
-                            $"[TICK-SUBSCRIBE] No subscription found for {nativeSymbolName}",
-                            NinjaTrader.Cbi.LogLevel.Warning);
-                        continue;
-                    }
-
-                    // Fetch segment
+                    // Get segment and index info
                     string segment = _instrumentManager.GetSegmentForToken(tokenInt);
                     bool isMcxSegment = !string.IsNullOrEmpty(segment) && segment.Equals("MCX", StringComparison.OrdinalIgnoreCase);
-
-                    // Check if this is an index symbol (NIFTY 50, SENSEX, GIFT NIFTY, etc.)
-                    bool isIndex = sub.IsIndex;
-
-                    // Log before parsing
-                    //NinjaTrader.NinjaScript.NinjaScript.Log(
-                    //    $"[WS-PARSE] Parsing binary message for {nativeSymbolName}, token: {tokenInt}, segment: {segment}",
-                    //    NinjaTrader.Cbi.LogLevel.Information);
-
-                    // Parse the binary message into a rich data structure
-                    var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, isMcxSegment, isIndex);
-                    DateTime parsedTime = DateTime.Now; // Capture time immediately after parsing
                     
-                    // Log parsing result
-                    if (tickData != null)
-                    {
-                        // OPTIMIZATION: Queue tick to OptimizedTickProcessor instead of synchronous processing
-                        // This decouples WebSocket receive from NinjaTrader callbacks for better performance
-                        if (_useOptimizedProcessor)
-                        {
-                            // Queue the tick for async processing - this returns immediately
-                            bool queued = TickProcessor.QueueTick(nativeSymbolName, tickData);
+                    bool isIndex = false;
+                    if (l1Subscriptions.TryGetValue(nativeSymbolName, out var sub))
+                        isIndex = sub.IsIndex;
 
-                            // Update the subscription cache when subscriptions change
-                            // This is done periodically, not on every tick
-                            if (queued && _tickProcessor != null)
-                            {
-                                // Ensure the processor has the latest subscription cache
-                                // This is lightweight - only updates if needed
-                                _tickProcessor.UpdateSubscriptionCache(l1Subscriptions);
-                            }
-                        }
-                        else
+                    // Use ArrayPool for network buffer
+                    buffer = ArrayPool<byte>.Shared.Rent(16384);
+
+                    while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
+                    {
+                        WebSocketReceiveResult result = await _webSocketManager.ReceiveMessageAsync(ws, buffer, cts.Token);
+
+                        if (result.MessageType == WebSocketMessageType.Close) break;
+                        if (result.MessageType == WebSocketMessageType.Text || result.Count < 2) continue;
+
+                        var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, isMcxSegment, isIndex);
+
+                        if (tickData != null)
                         {
-                            // FALLBACK: Original synchronous processing path
-                            // Use the QAAdapter's ProcessParsedTick method to update NinjaTrader with all available market data
-                            QAAdapter adapter = Connector.Instance.GetAdapter() as QAAdapter;
-                            if (adapter != null)
+                            if (_useOptimizedProcessor)
                             {
-                                adapter.ProcessParsedTick(nativeSymbolName, tickData);
+                                TickProcessor.QueueTick(nativeSymbolName, tickData);
+                                // Note: Subscription cache update is handled by the caller or periodically
                             }
                             else
                             {
-                                NinjaTrader.NinjaScript.NinjaScript.Log(
-                                    $"[WS-PROCESS-ERROR] QAAdapter instance is null, cannot process tick for {nativeSymbolName}",
-                                    NinjaTrader.Cbi.LogLevel.Error);
+                                QAAdapter adapter = Connector.Instance.GetAdapter() as QAAdapter;
+                                adapter?.ProcessParsedTick(nativeSymbolName, tickData);
                             }
                         }
-
-                        // Log to TickVolumeLogger CSV (minimal overhead - just updates tracking)
-                        int currentVolume = tickData.TotalQtyTraded;
-                        _lastVolumeMap.TryGetValue(nativeSymbolName, out int previousVolume);
-                        int volumeDelta = currentVolume - previousVolume;
-                        _lastVolumeMap[nativeSymbolName] = currentVolume; // Update last volume
-
-                        DateTime exchangeTime = tickData.ExchangeTimestamp;
-
-                        TickVolumeLogger.LogTickVolume(
-                            nativeSymbolName,
-                            receivedTime,      // Time WS message was received
-                            exchangeTime,      // Exchange timestamp from tick data
-                            parsedTime,        // Time after parsing
-                            tickData.LastTradePrice,
-                            tickData.LastTradeQty,
-                            currentVolume,
-                            volumeDelta
-                        );
-
-                        // Log tick information periodically (only if verbose logging is enabled)
-                        if (_configManager.EnableVerboseTickLogging)
-                        {
-                            // Fire and forget the logging task
-                            _ = LogTickInformationAsync(nativeSymbolName, tickData.LastTradePrice, tickData.LastTradeQty,
-                                tickData.TotalQtyTraded, tickData.LastTradeTime, receivedTime);
-                        }
                     }
-                    else
-                    {
-                        NinjaTrader.NinjaScript.NinjaScript.Log(
-                            $"[WS-PARSE-ERROR] Failed to parse tick for {nativeSymbolName}, parsing took {(parsedTime - receivedTime).TotalMilliseconds:F2}ms",
-                            NinjaTrader.Cbi.LogLevel.Warning);
-                    }
+
+                    // If we reach here, the connection was closed normally or a break occurred
+                    retryCount = 0; // Reset retry count if we had a successful session
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                // Normal teardown - no logging needed
-            }
-            catch (Exception ex)
-            {
-                NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-SUBSCRIBE] Error: {ex.Message}", NinjaTrader.Cbi.LogLevel.Error);
-            }
-            finally
-            {
-                // Clean up resources
-                if (ws != null && ws.State == WebSocketState.Open)
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
                 {
-                    try
-                    {
-                        await _webSocketManager.UnsubscribeAsync(ws, tokenInt);
-                        await _webSocketManager.CloseAsync(ws);
-                    }
-                    catch { }
+                    retryCount++;
+                    NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-SUBSCRIBE] Error for {nativeSymbolName}: {ex.Message}. Retry {retryCount}/{maxRetries}", NinjaTrader.Cbi.LogLevel.Warning);
                 }
-                cts.Cancel();
-                cts.Dispose();
+                finally
+                {
+                    if (buffer != null) ArrayPool<byte>.Shared.Return(buffer);
+                    if (ws != null)
+                    {
+                        try { await _webSocketManager.CloseAsync(ws); } catch { }
+                        ws.Dispose();
+                    }
+                }
             }
+
+            cts.Cancel();
+            cts.Dispose();
         }
 
         /// <summary>
@@ -383,93 +254,76 @@ namespace QANinjaAdapter.Services.MarketData
             ConcurrentDictionary<string, L2Subscription> l2Subscriptions,
             WebSocketConnectionFunc webSocketConnectionFunc)
         {
-            if (string.IsNullOrEmpty(symbol) || webSocketConnectionFunc == null)
-            {
-                NinjaTrader.NinjaScript.NinjaScript.Log($"[DEPTH-SUBSCRIBE] Invalid parameters for {symbol}", NinjaTrader.Cbi.LogLevel.Error);
-                return;
-            }
+            if (string.IsNullOrEmpty(symbol) || webSocketConnectionFunc == null) return;
 
-            ClientWebSocket ws = null;
+            int retryCount = 0;
+            const int maxRetries = 10;
             var cts = new CancellationTokenSource();
-            int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
+            StartExitMonitoringTask(webSocketConnectionFunc, cts);
 
-            try
+            while (!cts.Token.IsCancellationRequested && retryCount < maxRetries)
             {
-                // Create and connect WebSocket
-                ws = _webSocketManager.CreateWebSocketClient();
-                await _webSocketManager.ConnectAsync(ws);
+                ClientWebSocket ws = null;
+                byte[] buffer = null;
 
-                // Subscribe in full mode to get market depth
-                await _webSocketManager.SubscribeAsync(ws, tokenInt, "full");
-
-                //NinjaTrader.NinjaScript.NinjaScript.Log($"[DEPTH-SUBSCRIBE] Subscribed to token {tokenInt} in full mode", NinjaTrader.Cbi.LogLevel.Information);
-
-                // Monitor exit condition
-                _ = Task.Run(async () =>
+                try
                 {
-                    if (webSocketConnectionFunc.IsTimeout)
+                    if (retryCount > 0)
                     {
-                        await Task.Delay(webSocketConnectionFunc.Timeout, cts.Token);
-                        cts.Cancel();
+                        int delay = Math.Min(10000, (int)Math.Pow(2, retryCount) * 500);
+                        await Task.Delay(delay, cts.Token);
                     }
-                    else
+
+                    ws = _webSocketManager.CreateWebSocketClient();
+                    await _webSocketManager.ConnectAsync(ws);
+
+                    int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
+                    await _webSocketManager.SubscribeAsync(ws, tokenInt, "full");
+
+                    buffer = ArrayPool<byte>.Shared.Rent(16384);
+
+                    while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
                     {
-                        while (!cts.IsCancellationRequested)
+                        WebSocketReceiveResult result = await _webSocketManager.ReceiveMessageAsync(ws, buffer, cts.Token);
+
+                        if (result.MessageType == WebSocketMessageType.Close) break;
+                        if (result.MessageType == WebSocketMessageType.Text || result.Count < 2) continue;
+
+                        // Parse and queue depth data
+                        var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, false, false);
+                        if (tickData != null && tickData.HasMarketDepth)
                         {
-                            if (webSocketConnectionFunc.ExitFunction())
+                            if (_useOptimizedProcessor)
                             {
-                                cts.Cancel();
-                                break;
+                                TickProcessor.UpdateL2SubscriptionCache(l2Subscriptions);
+                                TickProcessor.QueueTick(nativeSymbolName, tickData);
                             }
-                            await Task.Delay(100, cts.Token);
+                            else
+                            {
+                                ProcessDepthData(buffer, tokenInt, nativeSymbolName, l2Subscriptions);
+                            }
                         }
                     }
-                });
-
-                // Process WebSocket messages
-                var buffer = new byte[4096];
-                while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
+                    retryCount = 0;
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
                 {
-                    // Receive message
-                    WebSocketReceiveResult result = await _webSocketManager.ReceiveMessageAsync(ws, buffer, cts.Token);
-
-                    if (result.MessageType == WebSocketMessageType.Close)
+                    retryCount++;
+                    NinjaTrader.NinjaScript.NinjaScript.Log($"[DEPTH-SUBSCRIBE] Error for {nativeSymbolName}: {ex.Message}. Retry {retryCount}/{maxRetries}", NinjaTrader.Cbi.LogLevel.Warning);
+                }
+                finally
+                {
+                    if (buffer != null) ArrayPool<byte>.Shared.Return(buffer);
+                    if (ws != null)
                     {
-                        NinjaTrader.NinjaScript.NinjaScript.Log(
-                            $"[DEPTH-SUBSCRIBE] WebSocket closed by server for {nativeSymbolName}. Status: {result.CloseStatus}, Description: {result.CloseStatusDescription}",
-                            NinjaTrader.Cbi.LogLevel.Warning);
-                        break; // Exit the loop gracefully
+                        try { await _webSocketManager.CloseAsync(ws); } catch { }
+                        ws.Dispose();
                     }
-
-                    if (result.MessageType == WebSocketMessageType.Text)
-                        continue; // Ignore JSON heartbeats/postbacks
-
-                    // Process the binary message for market depth
-                    ProcessDepthData(buffer, tokenInt, nativeSymbolName, l2Subscriptions);
                 }
             }
-            catch (OperationCanceledException)
-            {
-                // Normal shutdown
-            }
-            catch (Exception ex)
-            {
-                NinjaTrader.NinjaScript.NinjaScript.Log($"[DEPTH-SUBSCRIBE] Error: {ex.Message}", NinjaTrader.Cbi.LogLevel.Error);
-            }
-            finally
-            {
-                if (ws != null && ws.State == WebSocketState.Open)
-                {
-                    try
-                    {
-                        await _webSocketManager.UnsubscribeAsync(ws, tokenInt);
-                        await _webSocketManager.CloseAsync(ws);
-                    }
-                    catch { }
-                }
-                cts.Cancel();
-                cts.Dispose();
-            }
+            cts.Cancel();
+            cts.Dispose();
         }
 
         /// <summary>

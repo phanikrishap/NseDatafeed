@@ -1,67 +1,78 @@
 # Ignore obj directories
+**/obj/
 **/[Oo]bj/
-**/QA.Tests/[Oo]bj/
 
 # Ignore bin directories
+**/bin/
 **/[Bb]in/
-**/QA.Tests/[Bb]in/
-
-# User-specific files
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
 
 # Build results
 [Dd]ebug/
-[Dd]ebugPublic/
 [Rr]elease/
-[Rr]eleases/
 x64/
 x86/
 bld/
-[Bb]in/
-[Oo]bj/
 [Oo]ut/
-msbuild.log
-msbuild.err
-msbuild.wrn
+build/
+dist/
 
-# Visual Studio cache/options directory
+# Visual Studio files
 .vs/
 .vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
 *.userprefs
+*.dbmdl
+*.jfm
+*.lfm
+*.tfm
+*.vfm
 
 # NuGet Packages
 *.nupkg
-# The packages folder can be ignored because of Package Restore
 **/packages/*
-# except build/, which is used as an MSBuild target.
 !**/packages/build/
-# Uncomment if necessary however generally it will be regenerated when needed
-#!**/packages/repositories.config
-# NuGet v3's project.json files produces more ignoreable files
 *.nuget.props
 *.nuget.targets
 
-# MSTest test Results
+# Test Results
 [Tt]est[Rr]esult*/
 [Bb]uild[Ll]og.*
-
-# NUNIT
-*.VisualState.xml
 TestResult.xml
 
-# ReSharper is a .NET coding add-in
+# ReSharper/JetBrains
 _ReSharper*/
 *.[Rr]e[Ss]harper
 *.DotSettings.user
 
-# Local History for Visual Studio
+# Local History
 .localhistory/
 
-# Backup folder for Package Reference Convert tool in Visual Studio 2017
+# Backup folder
 MigrationBackup/
 
-# Ionide (cross platform F# VS Code tools) working folder
-.ionide/
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Project specific ignores
+mapped_instruments.json
+InstrumentMasters.db
+QAAdapter.log
+QANinjaAdapter.dll
+QABrokerAPI.dll
+*.log
+*.sqlite
+*.db
+
+# Sensitive files
+config.json
+secrets.json
+.env
+auth.json
+token.json
+credentials.json

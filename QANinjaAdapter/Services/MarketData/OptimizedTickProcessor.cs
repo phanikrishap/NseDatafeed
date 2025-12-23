@@ -9,6 +9,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using QANinjaAdapter.Models.MarketData;
 using QANinjaAdapter.Classes;
+using System.Buffers;
 
 namespace QANinjaAdapter.Services.MarketData
 {
@@ -27,11 +28,32 @@ namespace QANinjaAdapter.Services.MarketData
     /// </summary>
     public class OptimizedTickProcessor : IDisposable
     {
-        private readonly ConcurrentQueue<TickProcessingItem> _tickQueue;
+        // Sharded RingBuffer Configuration
+        private const int SHARD_COUNT = 4; // Configurable based on CPU cores
+        private const int RING_BUFFER_SIZE = 16384; // Must be power of 2 for fast masking
+        private const int RING_BUFFER_MASK = RING_BUFFER_SIZE - 1;
+
+        private class Shard
+        {
+            public readonly TickProcessingItem[] RingBuffer = new TickProcessingItem[RING_BUFFER_SIZE];
+            public long Sequence = 0; // Produced count
+            public long ProcessedSequence = 0; // Consumed count
+            public readonly EventWaitHandle WaitHandle = new AutoResetEvent(false);
+            public Task WorkerTask;
+            
+            public Shard()
+            {
+                for (int i = 0; i < RING_BUFFER_SIZE; i++)
+                    RingBuffer[i] = new TickProcessingItem();
+            }
+        }
+
+        private readonly Shard[] _shards;
         private readonly CancellationTokenSource _cancellationTokenSource;
-        private readonly Task _processingTask;
-        private readonly SemaphoreSlim _queueSemaphore;
         private readonly int _maxQueueSize;
+        
+        // Performance optimization: Cached TimeZone
+        private static readonly TimeZoneInfo IstTimeZone = TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId);
 
         // Backpressure Management - Tiered Queue Limits
         private readonly int _warningQueueSize;
@@ -41,20 +63,9 @@ namespace QANinjaAdapter.Services.MarketData
         // High-performance caches for O(1) lookups
         private readonly ConcurrentDictionary<string, string> _symbolMappingCache = new ConcurrentDictionary<string, string>();
         private readonly ConcurrentDictionary<string, L1Subscription> _subscriptionCache = new ConcurrentDictionary<string, L1Subscription>();
+        private readonly ConcurrentDictionary<string, L2Subscription> _l2SubscriptionCache = new ConcurrentDictionary<string, L2Subscription>();
         private readonly ConcurrentDictionary<string, List<SubscriptionCallback>> _callbackCache = new ConcurrentDictionary<string, List<SubscriptionCallback>>();
         private readonly HashSet<string> _loggedMissedSymbols = new HashSet<string>(); // Track which symbols we've logged misses for
-
-        // Object pooling to reduce GC pressure
-        private readonly ConcurrentBag<TickProcessingItem> _tickItemPool = new ConcurrentBag<TickProcessingItem>();
-        private readonly ConcurrentBag<List<TickProcessingItem>> _batchPool = new ConcurrentBag<List<TickProcessingItem>>();
-        private long _poolHits = 0;
-        private long _poolMisses = 0;
-
-        // Pool size limits to prevent unbounded growth
-        private const int MAX_TICK_ITEM_POOL_SIZE = 1000;
-        private const int MAX_BATCH_POOL_SIZE = 50;
-        private volatile int _currentTickItemPoolSize = 0;
-        private volatile int _currentBatchPoolSize = 0;
 
         // Performance monitoring
         private readonly PerformanceMonitor _performanceMonitor;
@@ -101,115 +112,95 @@ namespace QANinjaAdapter.Services.MarketData
             _maxQueueSize = maxQueueSize;
 
             // Initialize tiered backpressure limits
-            // Warning at 60% capacity, Critical at 80%, Max acceptable at 90%
-            _warningQueueSize = (int)(maxQueueSize * 0.6);      // 12,000 for default 20,000
-            _criticalQueueSize = (int)(maxQueueSize * 0.8);     // 16,000 for default 20,000
-            _maxAcceptableQueueSize = (int)(maxQueueSize * 0.9); // 18,000 for default 20,000
+            _warningQueueSize = (int)(maxQueueSize * 0.6);
+            _criticalQueueSize = (int)(maxQueueSize * 0.8);
+            _maxAcceptableQueueSize = (int)(maxQueueSize * 0.9);
 
-            _tickQueue = new ConcurrentQueue<TickProcessingItem>();
-            _queueSemaphore = new SemaphoreSlim(0);
             _cancellationTokenSource = new CancellationTokenSource();
-
-            // Initialize performance monitoring
             _performanceMonitor = new PerformanceMonitor(TimeSpan.FromSeconds(30));
 
-            // Initialize health monitoring system
+            // Initialize Shards
+            _shards = new Shard[SHARD_COUNT];
+            for (int i = 0; i < SHARD_COUNT; i++)
+            {
+                int shardIndex = i;
+                _shards[i] = new Shard();
+                _shards[i].WorkerTask = Task.Factory.StartNew(
+                    () => ProcessShardSynchronously(shardIndex),
+                    _cancellationTokenSource.Token,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default
+                );
+            }
+
+            // Initialize health monitoring
             _healthMonitoringTimer.Elapsed += LogHealthMetrics;
             _healthMonitoringTimer.AutoReset = true;
             _healthMonitoringTimer.Start();
 
-            Log($"OptimizedTickProcessor: Starting initialization with backpressure limits - Warning: {_warningQueueSize}, Critical: {_criticalQueueSize}, Max: {_maxAcceptableQueueSize}");
-
-            // Use Task.Factory.StartNew with LongRunning for dedicated thread
-            _processingTask = Task.Factory.StartNew(
-                ProcessTicksSynchronously,
-                _cancellationTokenSource.Token,
-                TaskCreationOptions.LongRunning,
-                TaskScheduler.Default
-            );
-
-            Log($"OptimizedTickProcessor initialized with health monitoring (30s intervals). Task Status: {_processingTask.Status}, Task ID: {_processingTask.Id}");
+            Log($"OptimizedTickProcessor: Initialized with {SHARD_COUNT} shards and Disruptor-style RingBuffers.");
         }
 
         /// <summary>
-        /// Synchronous processing method using dedicated thread for .NET Framework 4.8 compatibility.
-        /// Uses object pooling for batch processing.
+        /// Process ticks for a specific shard. 
+        /// Uses a busy-yield-wait strategy for minimal latency.
         /// </summary>
-        private void ProcessTicksSynchronously()
+        private void ProcessShardSynchronously(int shardIndex)
         {
-            var batchBuffer = GetPooledBatch();
-
-            Log("OptimizedTickProcessor: Starting processing loop");
+            var shard = _shards[shardIndex];
+            Log($"OptimizedTickProcessor: Shard {shardIndex} worker starting");
 
             try
             {
                 while (!_cancellationTokenSource.IsCancellationRequested)
                 {
-                    // Use synchronous wait instead of async
-                    bool signaled = _queueSemaphore.Wait(1000, _cancellationTokenSource.Token); // 1 second timeout
+                    // Fast path: Check if there's anything to process without waiting
+                    long currentSequence = Interlocked.Read(ref shard.Sequence);
+                    long processedSequence = shard.ProcessedSequence;
 
-                    if (!signaled)
+                    if (currentSequence == processedSequence)
                     {
-                        continue; // Timeout, check cancellation and continue
+                        // Wait for more data
+                        shard.WaitHandle.WaitOne(100); // 100ms timeout to re-check cancellation
+                        continue;
                     }
 
-                    // Dequeue ticks efficiently
-                    while (_tickQueue.TryDequeue(out var tick))
+                    // Processing loop
+                    while (processedSequence < currentSequence && !_cancellationTokenSource.IsCancellationRequested)
                     {
-                        batchBuffer.Add(tick);
+                        int index = (int)(processedSequence & RING_BUFFER_MASK);
+                        var item = shard.RingBuffer[index];
 
-                        // Dynamic batch sizing based on queue depth and memory pressure
-                        var queueDepth = Interlocked.Read(ref _ticksQueued) - Interlocked.Read(ref _ticksProcessed);
-                        int targetBatchSize = CalculateOptimalBatchSize(queueDepth);
-                        int maxProcessingDelay = _isUnderMemoryPressure ? 5 : 10; // Reduce delay under pressure
-
-                        // Process in batches for better performance
-                        if (batchBuffer.Count >= targetBatchSize ||
-                            (batchBuffer.Count > 0 && (DateTime.UtcNow - batchBuffer[0].QueueTime).TotalMilliseconds > maxProcessingDelay))
+                        if (item != null && item.TickData != null)
                         {
-                            ProcessTickBatch(batchBuffer);
-                            // Return items to pool and clear buffer
-                            ReturnBatchToPool(batchBuffer);
-                            batchBuffer = GetPooledBatch();
+                            try
+                            {
+                                ProcessSingleTick(item);
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"Shard {shardIndex}: Error processing tick: {ex.Message}");
+                            }
+                            finally
+                            {
+                                // Item cleanup for reuse (Disruptor pattern)
+                                item.Reset();
+                            }
                         }
-                    }
 
-                    // Process any remaining items in buffer after a short delay
-                    if (batchBuffer.Count > 0)
-                    {
-                        // Reduce sleep time under memory pressure or high queue depth
-                        var queueDepth = Interlocked.Read(ref _ticksQueued) - Interlocked.Read(ref _ticksProcessed);
-                        int sleepTime = (_isUnderMemoryPressure || queueDepth > 100) ? 1 : 5;
-                        Thread.Sleep(sleepTime);
-
-                        if (batchBuffer.Count > 0)
-                        {
-                            ProcessTickBatch(batchBuffer);
-                            ReturnBatchToPool(batchBuffer);
-                            batchBuffer = GetPooledBatch();
-                        }
+                        processedSequence++;
+                        shard.ProcessedSequence = processedSequence;
+                        Interlocked.Increment(ref _ticksProcessed);
                     }
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected during shutdown
-                Log("OptimizedTickProcessor: Processing loop canceled");
             }
             catch (Exception ex)
             {
-                Log($"CRITICAL: OptimizedTickProcessor processing loop failed: {ex.Message}");
+                Log($"CRITICAL: Shard {shardIndex} failed: {ex.Message}");
             }
             finally
             {
-                // Process any remaining ticks
-                if (batchBuffer.Count > 0)
-                {
-                    ProcessTickBatch(batchBuffer);
-                }
-                // Return final batch to pool
-                ReturnBatchToPool(batchBuffer);
-                Log("OptimizedTickProcessor: Processing loop ended");
+                Log($"OptimizedTickProcessor: Shard {shardIndex} worker ended");
             }
         }
 
@@ -222,35 +213,39 @@ namespace QANinjaAdapter.Services.MarketData
         {
             if (_isDisposed) return false;
 
-            // Get item from pool or create new one
-            var item = GetPooledTickItem();
+            // Record tick received
+            _performanceMonitor.RecordTickReceived(nativeSymbolName);
+
+            // Shard selection based on symbol hash
+            int shardIndex = (nativeSymbolName.GetHashCode() & 0x7FFFFFFF) % SHARD_COUNT;
+            var shard = _shards[shardIndex];
+
+            // Backpressure check
+            long currentCount = Interlocked.Read(ref shard.Sequence) - shard.ProcessedSequence;
+            if (currentCount >= RING_BUFFER_SIZE - 2048) // Safety margin before full
+            {
+                var backpressureResult = ApplyBackpressureManagement(currentCount, null, nativeSymbolName);
+                if (!backpressureResult.shouldQueue)
+                {
+                    _performanceMonitor.RecordTickDropped(nativeSymbolName);
+                    return false;
+                }
+            }
+
+            // Get next sequence in RingBuffer
+            long sequence = Interlocked.Read(ref shard.Sequence);
+            int index = (int)(sequence & RING_BUFFER_MASK);
+
+            // Assign data directly to pre-allocated item
+            var item = shard.RingBuffer[index];
             item.NativeSymbolName = nativeSymbolName;
             item.TickData = tickData;
             item.QueueTime = DateTime.UtcNow;
 
-            // Record tick received for performance monitoring
-            _performanceMonitor.RecordTickReceived(nativeSymbolName);
-
-            // Intelligent backpressure management
-            var currentCount = Interlocked.Read(ref _ticksQueued) - Interlocked.Read(ref _ticksProcessed);
-            var backpressureResult = ApplyBackpressureManagement(currentCount, item, nativeSymbolName);
-
-            if (!backpressureResult.shouldQueue)
-            {
-                // Return item to pool before dropping
-                ReturnTickItemToPool(item);
-
-                // Record the drop for monitoring
-                _performanceMonitor.RecordTickDropped(nativeSymbolName);
-
-                return false;
-            }
-
-            _tickQueue.Enqueue(item);
+            // Commit sequence and signal
+            Interlocked.Increment(ref shard.Sequence);
             Interlocked.Increment(ref _ticksQueued);
-
-            // Signal that a new item is available
-            _queueSemaphore.Release();
+            shard.WaitHandle.Set();
 
             return true;
         }
@@ -297,9 +292,7 @@ namespace QANinjaAdapter.Services.MarketData
                         return (false, $"Dropped symbol {symbol} at critical level");
                     }
 
-                    // Remove oldest ticks to make room
-                    DropOldestTicks(Math.Min(50, (int)(currentQueueDepth * 0.1))); // Drop up to 10% or 50 ticks
-                    return (true, "Critical level - oldest ticks dropped");
+                    return (true, "Critical level - accepting high priority symbol");
 
                 case BackpressureState.Emergency:
                     // At emergency level: Drop all but essential ticks
@@ -309,8 +302,6 @@ namespace QANinjaAdapter.Services.MarketData
                         return (false, $"Emergency: Only essential symbols accepted, dropped {symbol}");
                     }
 
-                    // Aggressively remove oldest ticks
-                    DropOldestTicks(Math.Min(100, (int)(currentQueueDepth * 0.2))); // Drop up to 20% or 100 ticks
                     return (true, "Emergency level - essential symbol accepted");
 
                 default:
@@ -332,41 +323,6 @@ namespace QANinjaAdapter.Services.MarketData
             return BackpressureState.Normal;
         }
 
-        /// <summary>
-        /// Drop oldest ticks from queue to reduce pressure
-        /// </summary>
-        private void DropOldestTicks(int maxToDrop)
-        {
-            var dropped = 0;
-            var tempList = new List<TickProcessingItem>();
-
-            // Dequeue items and keep only newer ones
-            while (dropped < maxToDrop && _tickQueue.TryDequeue(out var oldestItem))
-            {
-                var age = DateTime.UtcNow - oldestItem.QueueTime;
-                if (age.TotalMilliseconds > 100) // Drop ticks older than 100ms
-                {
-                    ReturnTickItemToPool(oldestItem);
-                    dropped++;
-                    Interlocked.Increment(ref _oldestTicksDropped);
-                }
-                else
-                {
-                    tempList.Add(oldestItem); // Keep newer items
-                }
-            }
-
-            // Re-enqueue the items we want to keep
-            foreach (var item in tempList)
-            {
-                _tickQueue.Enqueue(item);
-            }
-
-            if (dropped > 0)
-            {
-                Log($"BACKPRESSURE: Dropped {dropped} oldest ticks (>100ms age)");
-            }
-        }
 
         /// <summary>
         /// Determine if symbol is low priority for dropping
@@ -400,82 +356,6 @@ namespace QANinjaAdapter.Services.MarketData
                    symbol.Contains("BANKNIFTY");
         }
 
-        /// <summary>
-        /// Get a tick processing item from pool or create new one
-        /// </summary>
-        private TickProcessingItem GetPooledTickItem()
-        {
-            if (_tickItemPool.TryTake(out var item))
-            {
-                Interlocked.Increment(ref _poolHits);
-                Interlocked.Decrement(ref _currentTickItemPoolSize);
-                return item;
-            }
-
-            Interlocked.Increment(ref _poolMisses);
-            return new TickProcessingItem();
-        }
-
-        /// <summary>
-        /// Return tick processing item to pool for reuse
-        /// </summary>
-        private void ReturnTickItemToPool(TickProcessingItem item)
-        {
-            if (item == null) return;
-
-            // Clear references for GC
-            item.Reset();
-
-            // Only add to pool if under size limit
-            if (_currentTickItemPoolSize < MAX_TICK_ITEM_POOL_SIZE)
-            {
-                _tickItemPool.Add(item);
-                Interlocked.Increment(ref _currentTickItemPoolSize);
-            }
-            // If pool is full, let GC collect the item instead of pooling it
-        }
-
-        /// <summary>
-        /// Get a batch list from pool or create new one
-        /// </summary>
-        private List<TickProcessingItem> GetPooledBatch()
-        {
-            if (_batchPool.TryTake(out var batch))
-            {
-                batch.Clear(); // Ensure it's empty
-                Interlocked.Decrement(ref _currentBatchPoolSize);
-                return batch;
-            }
-
-            // Reduce initial capacity under memory pressure
-            int initialCapacity = _isUnderMemoryPressure ? 25 : 100;
-            return new List<TickProcessingItem>(initialCapacity);
-        }
-
-        /// <summary>
-        /// Return batch list to pool for reuse
-        /// </summary>
-        private void ReturnBatchToPool(List<TickProcessingItem> batch)
-        {
-            if (batch == null) return;
-
-            // Return individual items to their pool
-            foreach (var item in batch)
-            {
-                ReturnTickItemToPool(item);
-            }
-
-            batch.Clear();
-
-            // Only pool if under size limit and reasonable capacity
-            if (_currentBatchPoolSize < MAX_BATCH_POOL_SIZE &&
-                batch.Capacity <= (_isUnderMemoryPressure ? 100 : 200))
-            {
-                _batchPool.Add(batch);
-                Interlocked.Increment(ref _currentBatchPoolSize);
-            }
-            // If pool is full or batch is too large, let GC collect it
-        }
 
         /// <summary>
         /// Updates subscription cache (thread-safe)
@@ -516,18 +396,34 @@ namespace QANinjaAdapter.Services.MarketData
                     }
                     _callbackCache[kvp.Key] = callbacks;
                     itemsProcessed++;
-                }
+            }
 
-                Log($"OptimizedTickProcessor: Updated caches - {_subscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
-                Logger.Info($"[OTP] Updated caches - {_subscriptionCache.Count} subscriptions, {_callbackCache.Count} callback entries");
+            Log($"OptimizedTickProcessor: Updated caches - {_subscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
+            Logger.Info($"[OTP] Updated caches - {_subscriptionCache.Count} subscriptions, {_callbackCache.Count} callback entries");
 
-                // Force GC if under pressure and cache is large
-                if (_isUnderMemoryPressure && _subscriptionCache.Count > 100)
-                {
-                    GC.Collect(0, GCCollectionMode.Optimized);
-                }
+            // Force GC if under pressure and cache is large
+            if (_isUnderMemoryPressure && _subscriptionCache.Count > 100)
+            {
+                GC.Collect(0, GCCollectionMode.Optimized);
             }
         }
+    }
+
+    /// <summary>
+    /// Updates L2 subscription cache (thread-safe)
+    /// </summary>
+    public void UpdateL2SubscriptionCache(ConcurrentDictionary<string, L2Subscription> subscriptions)
+    {
+        lock (_cacheUpdateLock)
+        {
+            _l2SubscriptionCache.Clear();
+            foreach (var kvp in subscriptions)
+            {
+                _l2SubscriptionCache[kvp.Key] = kvp.Value;
+            }
+            Log($"OptimizedTickProcessor: Updated L2 caches - {_l2SubscriptionCache.Count} subscriptions");
+        }
+    }
 
         /// <summary>
         /// Detect memory pressure and adjust behavior
@@ -603,27 +499,6 @@ namespace QANinjaAdapter.Services.MarketData
             }
         }
 
-        /// <summary>
-        /// Process a batch of ticks efficiently
-        /// </summary>
-        private void ProcessTickBatch(List<TickProcessingItem> batch)
-        {
-            // Process all ticks in the batch
-            foreach (var item in batch)
-            {
-                try
-                {
-                    ProcessSingleTick(item);
-                }
-                catch (Exception ex)
-                {
-                    // Only log critical processing errors
-                    Log($"ProcessTickBatch: Error processing tick for {item.NativeSymbolName}: {ex.Message}");
-                }
-            }
-
-            Interlocked.Add(ref _ticksProcessed, batch.Count);
-        }
 
         /// <summary>
         /// Process a single tick with optimized lookups and performance tracking
@@ -719,39 +594,66 @@ namespace QANinjaAdapter.Services.MarketData
         /// <summary>
         /// Ensure DateTime has proper Kind for NinjaTrader compatibility
         /// </summary>
+        /// <summary>
+        /// Process market depth updates with sharded parallelism
+        /// </summary>
+        private void ProcessMarketDepth(ZerodhaTickData tickData, DateTime now)
+        {
+            if (!_l2SubscriptionCache.TryGetValue(tickData.InstrumentIdentifier, out var l2Subscription))
+                return;
+
+            for (int index = 0; index < l2Subscription.L2Callbacks.Count; ++index)
+            {
+                var callback = l2Subscription.L2Callbacks.Values[index];
+                
+                // Process asks
+                if (tickData.AskDepth != null)
+                {
+                    foreach (var ask in tickData.AskDepth)
+                    {
+                        if (ask != null && ask.Quantity > 0)
+                            l2Subscription.L2Callbacks.Keys[index].UpdateMarketDepth(
+                                MarketDataType.Ask, ask.Price, ask.Quantity, Operation.Update, now, callback);
+                    }
+                }
+
+                // Process bids
+                if (tickData.BidDepth != null)
+                {
+                    foreach (var bid in tickData.BidDepth)
+                    {
+                        if (bid != null && bid.Quantity > 0)
+                            l2Subscription.L2Callbacks.Keys[index].UpdateMarketDepth(
+                                MarketDataType.Bid, bid.Price, bid.Quantity, Operation.Update, now, callback);
+                    }
+                }
+            }
+        }
+
         private DateTime EnsureNinjaTraderDateTime(DateTime dateTime)
         {
             try
             {
+                // Optimization: Case-by-case handling without expensive TimeZoneInfo.FindSystemTimeZoneById calls
                 if (dateTime.Kind == DateTimeKind.Local)
                 {
-                    return new DateTime(dateTime.Year, dateTime.Month, dateTime.Day,
-                                      dateTime.Hour, dateTime.Minute, dateTime.Second,
-                                      dateTime.Millisecond, DateTimeKind.Local);
+                    return dateTime; // Already local
                 }
 
-                // Handle UTC DateTime - convert to IST
+                // Handle UTC DateTime - convert to cached IST
                 if (dateTime.Kind == DateTimeKind.Utc)
                 {
-                    TimeZoneInfo istTimeZone = TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId);
-                    var istTime = TimeZoneInfo.ConvertTimeFromUtc(dateTime, istTimeZone);
-                    return new DateTime(istTime.Year, istTime.Month, istTime.Day,
-                                      istTime.Hour, istTime.Minute, istTime.Second,
-                                      istTime.Millisecond, DateTimeKind.Local);
+                    var istTime = TimeZoneInfo.ConvertTimeFromUtc(dateTime, IstTimeZone);
+                    return DateTime.SpecifyKind(istTime, DateTimeKind.Local);
                 }
 
                 // Handle Unspecified DateTime - assume it's local IST
-                return new DateTime(dateTime.Year, dateTime.Month, dateTime.Day,
-                                  dateTime.Hour, dateTime.Minute, dateTime.Second,
-                                  dateTime.Millisecond, DateTimeKind.Local);
+                return DateTime.SpecifyKind(dateTime, DateTimeKind.Local);
             }
             catch
             {
                 // Fallback: Create DateTime with current time
-                var now = DateTime.Now;
-                return new DateTime(now.Year, now.Month, now.Day,
-                                  now.Hour, now.Minute, now.Second,
-                                  now.Millisecond, DateTimeKind.Local);
+                return DateTime.Now;
             }
         }
 
@@ -828,15 +730,21 @@ namespace QANinjaAdapter.Services.MarketData
                         if (tickData.SellPrice > 0)
                         {
                             double askPrice = instrument.MasterInstrument.RoundToTickSize(tickData.SellPrice);
-                            callback(MarketDataType.Ask, askPrice, tickData.SellQty, now, 0L);
+                        callback(MarketDataType.Ask, askPrice, tickData.SellQty, now, 0L);
                         }
                     }
 
                     // Process daily statistics
-                    ProcessAdditionalMarketData(callback, instrument, tickData, now);
+            ProcessAdditionalMarketData(callback, instrument, tickData, now);
 
-                    // Track successful callback execution
-                    _callbacksExecuted++;
+            // Process market depth if available
+            if (tickData.HasMarketDepth)
+            {
+                ProcessMarketDepth(tickData, now);
+            }
+
+            // Track successful callback execution
+            _callbacksExecuted++;
                 }
                 catch (Exception ex)
                 {
@@ -944,16 +852,11 @@ namespace QANinjaAdapter.Services.MarketData
             sb.AppendLine("=== OptimizedTickProcessor Diagnostic Info ===");
             sb.AppendLine($"Is Disposed: {_isDisposed}");
             sb.AppendLine($"Cancellation Requested: {_cancellationTokenSource.Token.IsCancellationRequested}");
-            sb.AppendLine($"Processing Task Status: {_processingTask?.Status}");
             sb.AppendLine($"Ticks Queued: {Interlocked.Read(ref _ticksQueued)}");
             sb.AppendLine($"Ticks Processed: {Interlocked.Read(ref _ticksProcessed)}");
             sb.AppendLine($"Pending Ticks: {Interlocked.Read(ref _ticksQueued) - Interlocked.Read(ref _ticksProcessed)}");
             sb.AppendLine($"Callbacks Executed: {Interlocked.Read(ref _callbacksExecuted)}");
             sb.AppendLine($"Callback Errors: {Interlocked.Read(ref _callbackErrors)}");
-            sb.AppendLine($"Pool Hits: {Interlocked.Read(ref _poolHits)}");
-            sb.AppendLine($"Pool Misses: {Interlocked.Read(ref _poolMisses)}");
-            var totalPool = Interlocked.Read(ref _poolHits) + Interlocked.Read(ref _poolMisses);
-            sb.AppendLine($"Pool Hit Rate: {(totalPool > 0 ? (Interlocked.Read(ref _poolHits) * 100.0 / totalPool) : 0.0):F1}%");
             sb.AppendLine($"Slow Callbacks (>1ms): {Interlocked.Read(ref _slowCallbacks)}");
             sb.AppendLine($"Very Slow Callbacks (>5ms): {Interlocked.Read(ref _verySlowCallbacks)}");
             sb.AppendLine($"Backpressure State: {_currentBackpressureState}");
@@ -1021,11 +924,6 @@ namespace QANinjaAdapter.Services.MarketData
                 var slowCallbackPercentage = currentCallbacksExecuted > 0 ?
                     (slowCallbacks * 100.0 / currentCallbacksExecuted) : 0.0;
 
-                // Pool efficiency
-                var totalPoolRequests = Interlocked.Read(ref _poolHits) + Interlocked.Read(ref _poolMisses);
-                var poolHitRate = totalPoolRequests > 0 ?
-                    (Interlocked.Read(ref _poolHits) * 100.0 / totalPoolRequests) : 0.0;
-
                 // Determine overall health status
                 var healthStatus = AssessHealthStatus(queueDepth, callbackSuccessRate, processingEfficiency, gc2Rate);
 
@@ -1034,7 +932,7 @@ namespace QANinjaAdapter.Services.MarketData
                     $"   Queue: {queueDepth} pending | {queuedRate}/30s in, {processedRate}/30s out | {processingEfficiency:F1}% efficiency\n" +
                     $"   Callbacks: {callbacksRate}/30s | {callbackSuccessRate:F1}% success | {avgCallbackTime:F3}ms avg | {slowCallbackPercentage:F1}% slow (>1ms)\n" +
                     $"   Backpressure: {_currentBackpressureState} | {ticksDroppedBP} dropped | {oldestDropped} aged out | Events: W{warningEvents}/C{criticalEvents}\n" +
-                    $"   Memory: {totalMemoryMB}MB | GC: {gc0Rate}/0, {gc1Rate}/1, {gc2Rate}/2 | Pool: {poolHitRate:F1}% hit rate\n" +
+                    $"   Memory: {totalMemoryMB}MB | GC: {gc0Rate}/0, {gc1Rate}/1, {gc2Rate}/2\n" +
                     $"   Totals: {currentQueued:N0} queued, {currentProcessed:N0} processed, {currentCallbacksExecuted:N0} callbacks");
 
                 // Issue health alerts if needed
@@ -1165,46 +1063,56 @@ namespace QANinjaAdapter.Services.MarketData
             }
         }
 
+        private bool _enableHotPathLogging = false;
+
         private void Log(string message)
         {
-            // Disabled - too verbose for NinjaTrader control panel
-            // try
-            // {
-            //     NinjaTrader.NinjaScript.NinjaScript.Log($"[OTP] {message}", NinjaTrader.Cbi.LogLevel.Information);
-            // }
-            // catch
-            // {
-            //     // Ignore logging errors
-            // }
+            if (!_enableHotPathLogging) return;
+
+            try
+            {
+                // Simple logging for hot-path diagnostics
+                Logger.Info($"[OTP] {message}");
+            }
+            catch
+            {
+                // Ignore logging errors
+            }
         }
 
         public void Dispose()
         {
             if (_isDisposed) return;
-
             _isDisposed = true;
+
+            Log("OptimizedTickProcessor: Disposing...");
+
             _cancellationTokenSource.Cancel();
+
+            // Wait for shards to shut down
+            if (_shards != null)
+            {
+                foreach (var shard in _shards)
+                {
+                    shard.WaitHandle.Set(); // Signal to exit
+                    try
+                    {
+                        shard.WorkerTask?.Wait(500);
+                        shard.WaitHandle.Dispose();
+                    }
+                    catch { }
+                }
+            }
 
             try
             {
-                // Stop health monitoring timer
-                _healthMonitoringTimer?.Stop();
-                _healthMonitoringTimer?.Dispose();
+                _performanceMonitor?.Dispose();
 
-                _processingTask?.Wait(5000); // Wait up to 5 seconds for graceful shutdown
+                // Dispose resources
+                _cancellationTokenSource.Dispose();
+                Log("OptimizedTickProcessor disposed");
             }
-            catch (Exception ex)
-            {
-                Log($"Error during OptimizedTickProcessor disposal: {ex.Message}");
-            }
-
-            // Dispose performance monitor
-            _performanceMonitor?.Dispose();
-
-            // Dispose resources
-            _queueSemaphore?.Dispose();
-            _cancellationTokenSource.Dispose();
-            Log("OptimizedTickProcessor disposed");
+            catch { }
         }
     }
 

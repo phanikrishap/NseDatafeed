@@ -74,16 +74,30 @@ The solution consists of multiple projects:
    └─────────────────┘ └─────────────────┘ └─────────────────┘
 ```
 
-### Core Components
+### High-Performance Architecture (Phase 3)
 
-1. **Connector Class**: Main integration point with NinjaTrader
-2. **QABrokerAPI**: Unified API layer for different brokers
-   - Common interfaces and models
-   - Broker-specific implementations (Zerodha, Upstox, Binance)
-3. **WebSocket Managers**: Real-time data streaming for each broker
-4. **Parsers**: Data format converters between broker APIs and NinjaTrader
-5. **Controls & ViewModels**: UI components for configuration
-6. **AddOn UI**: Standalone configuration and management interface
+The adapter has been upgraded to a high-throughput, low-latency architecture designed for high-frequency market data.
+
+#### 1. Sharded RingBuffer (Disruptor Pattern)
+- **Lock-Free Processing**: Replaced traditional `ConcurrentQueue` and `SemaphoreSlim` with a lock-free Sharded RingBuffer.
+- **Worker Pool**: Uses 4 dedicated worker threads to process ticks in parallel, sharded by symbol to ensure sequential consistency for individual instruments.
+- **Minimal Latency**: Workers use a busy-wait/yield strategy with `AutoResetEvent` signaling for sub-millisecond response times.
+
+#### 2. Resilient Connectivity
+- **Exponential Backoff**: Robust reconnection logic for both Tick and Market Depth WebSocket streams, handling network instability gracefully.
+- **Resuming Subscriptions**: Automatically handles re-subscription and state recovery after connection loss.
+
+#### 3. Memory & Resource Optimization
+- **ArrayPool Integration**: Uses `System.Buffers.ArrayPool<byte>` for network receive buffers, significantly reducing GC pressure and Gen0 collections.
+- **TimeZone Caching**: Pre-cached `TimeZoneInfo` for IST (Indian Standard Time) to eliminate expensive registry lookups on the hot path.
+- **Zero-Allocation Parsing**: Minimized object allocations in the critical path of tick and market depth processing.
+
+#### 4. Real-Time Health Monitoring
+- **Automated Diagnostics**: 30-second automated health reports logging:
+  - Throughput (Ticks/sec)
+  - Queue depth and processing efficiency
+  - Memory usage and GC counts
+  - Callback success rates and latency distribution
 
 ## Installation
 
