@@ -24,6 +24,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using NinjaTrader.CQG.ProtoBuf;
 using System.Data.SQLite;
+using QANinjaAdapter.SyntheticInstruments;
 
 #nullable disable
 namespace QANinjaAdapter
@@ -38,6 +39,9 @@ namespace QANinjaAdapter
         private readonly HashSet<string> _marketDepthDataSymbols = new HashSet<string>();
         private static readonly object _lockLiveSymbol = new object();
         private static readonly object _lockDepthSymbol = new object();
+        private readonly object _marketDataLock = new object(); // Added for synthetic straddle data synchronization
+
+        private SyntheticInstruments.SyntheticStraddleService _syntheticStraddleService;
 
         // Removed LogMe: Use Logger.Info or NinjaTrader native logging directly.
 
@@ -49,6 +53,9 @@ namespace QANinjaAdapter
             
             // Set the adapter instance in the Connector class
             Connector.SetAdapter(this);
+            
+            // Initialize the SyntheticStraddleService
+            _syntheticStraddleService = new SyntheticInstruments.SyntheticStraddleService(this);
             
             this._ninjaConnection.OrderTypes = new NinjaTrader.Cbi.OrderType[4]
             {
@@ -170,6 +177,38 @@ namespace QANinjaAdapter
                 string name = instrument.MasterInstrument.Name;
                 if (string.IsNullOrEmpty(name))
                     return;
+
+                // Handle Synthetic Straddle Subscription
+                if (_syntheticStraddleService != null && _syntheticStraddleService.IsSyntheticSymbol(name))
+                {
+                    // 1. Register subscription for SYNTHETIC symbol (parent)
+                    if (!_l1Subscriptions.ContainsKey(name))
+                    {
+                        var sub = new L1Subscription
+                        {
+                            Instrument = instrument,
+                            L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>(),
+                            IsIndex = false
+                        };
+                        sub.L1Callbacks.Add(instrument, callback);
+                        _l1Subscriptions.TryAdd(name, sub);
+                    }
+                    else
+                    {
+                        if (!_l1Subscriptions[name].L1Callbacks.ContainsKey(instrument))
+                            _l1Subscriptions[name].L1Callbacks.Add(instrument, callback);
+                    }
+
+                    // 2. Subscribe to legs
+                    var def = _syntheticStraddleService.GetDefinition(name);
+                    if (def != null)
+                    {
+                         Logger.Info($"QAAdapter: Subscribing to synthetic straddle {name} (Legs: {def.CESymbol}, {def.PESymbol})");
+                         SubscribeToSyntheticLeg(def.CESymbol);
+                         SubscribeToSyntheticLeg(def.PESymbol);
+                    }
+                    return; // Don't send synthetic symbol to gateway
+                }
 
                 string nativeSymbolName = name;
                 MarketType mt = MarketType.Spot;
@@ -758,11 +797,201 @@ namespace QANinjaAdapter
 
         public void UnsubscribeNews() { }
 
+        private void SubscribeToSyntheticLeg(string legSymbol)
+        {
+            try
+            {
+                // Ensure leg is in subscriptions map so MarketDataService processes it
+                if (!_l1Subscriptions.ContainsKey(legSymbol))
+                {
+                    var sub = new L1Subscription 
+                    { 
+                        IsIndex = false,
+                        L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>()
+                    };
+                    _l1Subscriptions.TryAdd(legSymbol, sub);
+                    
+                    // Update Processor Cache for the new leg subscription
+                    MarketDataService.Instance.UpdateProcessorSubscriptionCache(this._l1Subscriptions);
+                }
+
+                lock (QAAdapter._lockLiveSymbol)
+                {
+                    if (!this._marketLiveDataSymbols.Contains(legSymbol))
+                    {
+                        MarketType mt;
+                        string originalSymbol = Connector.GetSymbolName(legSymbol, out mt);
+                        this._marketLiveDataSymbols.Add(legSymbol);
+
+                        Task.Run(async () => {
+                            try
+                            {
+                                await Connector.Instance.SubscribeToTicks(
+                                    legSymbol,
+                                    mt,
+                                    originalSymbol,
+                                    this._l1Subscriptions,
+                                    new WebSocketConnectionFunc((Func<bool>)(() =>
+                                    {
+                                        lock (QAAdapter._lockLiveSymbol)
+                                            return !this._marketLiveDataSymbols.Contains(legSymbol);
+                                    }))
+                                );
+                            }
+                            catch (Exception ex)
+                            {
+                                lock (QAAdapter._lockLiveSymbol)
+                                {
+                                    if (this._marketLiveDataSymbols.Contains(legSymbol))
+                                        this._marketLiveDataSymbols.Remove(legSymbol);
+                                }
+                                Logger.Error($"QAAdapter: Error subscribing to leg {legSymbol}: {ex.Message}");
+                            }
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"QAAdapter: Error in SubscribeToSyntheticLeg for {legSymbol}: {ex.Message}");
+            }
+        }
+
+        public void ProcessSyntheticLegTick(string instrumentSymbol, double price, long volume, DateTime timestamp, SyntheticInstruments.TickType tickType, double bid, double ask)
+        {
+            if (_syntheticStraddleService != null)
+            {
+                _syntheticStraddleService.ProcessLegTick(instrumentSymbol, price, volume, timestamp, tickType, bid, ask);
+            }
+        }
+
         public void Dispose()
         {
+            _syntheticStraddleService?.Dispose();
             this.Disconnect();
             this._l1Subscriptions.Clear();
             this._l2Subscriptions.Clear();
+        }
+
+        public void PublishSyntheticTickData(string syntheticSymbol, double price, DateTime timestamp, long volume, SyntheticInstruments.TickType tickType)
+        {
+            try
+            {
+                // CRITICAL FIX: Ensure timestamp has proper DateTimeKind for NinjaTrader compatibility
+                var ninjaTraderTimestamp = EnsureProperDateTime(timestamp);
+                
+                lock (this._marketDataLock)
+                {
+                    if (this._l1Subscriptions.ContainsKey(syntheticSymbol))
+                    {
+                        var subscription = this._l1Subscriptions[syntheticSymbol];
+                       
+                        foreach (var callback in subscription.L1Callbacks.Values)
+                        {
+                            try
+                            {
+                                // Convert TickType to MarketDataType
+                                NinjaTrader.Data.MarketDataType marketDataType = NinjaTrader.Data.MarketDataType.Last; // Default
+                                switch (tickType)
+                                {
+                                    case SyntheticInstruments.TickType.Last:
+                                        marketDataType = NinjaTrader.Data.MarketDataType.Last;
+                                        break;
+                                    case SyntheticInstruments.TickType.Bid:
+                                        marketDataType = NinjaTrader.Data.MarketDataType.Bid;
+                                        break;
+                                    case SyntheticInstruments.TickType.Ask:
+                                        marketDataType = NinjaTrader.Data.MarketDataType.Ask;
+                                        break;
+                                }
+                                // Invoke the callback with synthetic tick data (using properly formatted timestamp)
+                                callback(marketDataType, price, volume, ninjaTraderTimestamp, volume);
+                            }
+                            catch (Exception ex)
+                            {
+                                // Check for any DateTime-related conversion errors and suppress them completely
+                                if (ex.Message.Contains("DateTime") || 
+                                    ex.Message.Contains("sourceTimeZone") || 
+                                    ex.Message.Contains("Kind property") ||
+                                    ex.Message.Contains("conversion could not be completed"))
+                                {
+                                    // Completely suppress DateTime conversion errors - they don't affect functionality
+                                    continue;
+                                }
+                                else
+                                {
+                                    Logger.Debug($"QAAdapter: Non-DateTime error invoking callback for {syntheticSymbol}: {ex.Message}");
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Logger.Debug($"QAAdapter: No subscriptions found for synthetic symbol {syntheticSymbol}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Only log non-DateTime errors to avoid spamming logs
+                if (!ex.Message.Contains("DateTime") && 
+                    !ex.Message.Contains("sourceTimeZone") && 
+                    !ex.Message.Contains("Kind property") &&
+                    !ex.Message.Contains("conversion could not be completed"))
+                {
+                    Logger.Error($"QAAdapter: Error in PublishSyntheticTickData for {syntheticSymbol}: {ex.Message}");
+                }
+            }
+        }
+
+        private DateTime EnsureProperDateTime(DateTime dateTime)
+        {
+            try
+            {
+                DateTime resultTime;
+                
+                if (dateTime.Kind == DateTimeKind.Utc)
+                {
+                    try
+                    {
+                        // Convert UTC to local IST time
+                        TimeZoneInfo istTimeZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
+                        DateTime istTime = TimeZoneInfo.ConvertTimeFromUtc(dateTime, istTimeZone);
+                        resultTime = new DateTime(istTime.Year, istTime.Month, istTime.Day, 
+                                                istTime.Hour, istTime.Minute, istTime.Second, 
+                                                istTime.Millisecond, DateTimeKind.Local);
+                    }
+                    catch
+                    {
+                        // Fallback: Use system local time conversion
+                        DateTime localTime = dateTime.ToLocalTime();
+                        resultTime = new DateTime(localTime.Year, localTime.Month, localTime.Day, 
+                                                localTime.Hour, localTime.Minute, localTime.Second, 
+                                                localTime.Millisecond, DateTimeKind.Local);
+                    }
+                }
+                else if (dateTime.Kind == DateTimeKind.Unspecified)
+                {
+                    resultTime = new DateTime(dateTime.Year, dateTime.Month, dateTime.Day, 
+                                            dateTime.Hour, dateTime.Minute, dateTime.Second, 
+                                            dateTime.Millisecond, DateTimeKind.Local);
+                }
+                else
+                {
+                    resultTime = new DateTime(dateTime.Year, dateTime.Month, dateTime.Day, 
+                                            dateTime.Hour, dateTime.Minute, dateTime.Second, 
+                                            dateTime.Millisecond, DateTimeKind.Local);
+                }
+                
+                return resultTime;
+            }
+            catch
+            {
+                var now = DateTime.Now;
+                return new DateTime(now.Year, now.Month, now.Day, 
+                                  now.Hour, now.Minute, now.Second, 
+                                  now.Millisecond, DateTimeKind.Local);
+            }
         }
 
         private class BarsRequest

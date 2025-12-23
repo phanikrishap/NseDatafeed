@@ -228,6 +228,22 @@ namespace QANinjaAdapter.Services.MarketData
                                 QAAdapter adapter = Connector.Instance.GetAdapter() as QAAdapter;
                                 adapter?.ProcessParsedTick(nativeSymbolName, tickData);
                             }
+
+                            // SYNTHETIC STRADDLE INTEGRATION:
+                            // Always route ticks to the synthetic service if the adapter is available.
+                            // The service will filter out non-leg instruments internally for performance.
+                            QAAdapter qaAdapter = Connector.Instance.GetAdapter() as QAAdapter;
+                            if (qaAdapter != null)
+                            {
+                                qaAdapter.ProcessSyntheticLegTick(
+                                    nativeSymbolName, 
+                                    tickData.LastTradePrice, 
+                                    tickData.LastTradeQty, 
+                                    tickData.ExchangeTimestamp, 
+                                    QANinjaAdapter.SyntheticInstruments.TickType.Last,
+                                    tickData.BuyPrice, 
+                                    tickData.SellPrice);
+                            }
                         }
                     }
 

@@ -222,6 +222,13 @@
     <Compile Include="AddOns\MarketAnalyzer\OptionChainWindow.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />
+    <Compile Include="SyntheticInstruments\Tick.cs" />
+    <Compile Include="SyntheticInstruments\StraddleDefinition.cs" />
+    <Compile Include="SyntheticInstruments\StraddleState.cs" />
+    <Compile Include="SyntheticInstruments\SyntheticDataLogger.cs" />
+    <Compile Include="SyntheticInstruments\StraddleCacheManager.cs" />
+    <Compile Include="SyntheticInstruments\AsyncStraddleProcessor.cs" />
+    <Compile Include="SyntheticInstruments\SyntheticStraddleService.cs" />
   </ItemGroup>
   <ItemGroup>
     <Page Include="Controls\CircularProgressBar.xaml">
