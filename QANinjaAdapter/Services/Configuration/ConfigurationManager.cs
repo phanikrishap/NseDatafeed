@@ -1,7 +1,10 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using QANinjaAdapter.Services.Auth;
 
 namespace QANinjaAdapter.Services.Configuration
 {
@@ -189,6 +192,197 @@ namespace QANinjaAdapter.Services.Configuration
             _accessToken = brokerConfig["AccessToken"]?.ToString() ?? _accessToken;
 
             Logger.Info($"Broker API credentials have been processed.");
+        }
+
+        /// <summary>
+        /// Checks if the access token is valid or needs regeneration
+        /// </summary>
+        /// <param name="brokerConfig">The broker configuration object</param>
+        /// <returns>True if token is valid, false if expired or missing</returns>
+        private bool IsTokenValid(JObject brokerConfig)
+        {
+            string accessToken = brokerConfig["AccessToken"]?.ToString();
+            string generatedAtStr = brokerConfig["AccessTokenGeneratedAt"]?.ToString();
+
+            // No token - invalid
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                Logger.Info("No access token found in configuration.");
+                return false;
+            }
+
+            // No generation timestamp - invalid (token format may be old)
+            if (string.IsNullOrEmpty(generatedAtStr))
+            {
+                Logger.Info("No token generation timestamp found - token may be stale.");
+                return false;
+            }
+
+            // Parse and check expiry (tokens expire at midnight IST)
+            if (DateTime.TryParse(generatedAtStr, out DateTime generatedAt))
+            {
+                if (ZerodhaTokenGenerator.IsTokenExpired(generatedAt))
+                {
+                    Logger.Info($"Access token has expired (generated: {generatedAt:yyyy-MM-dd HH:mm:ss}).");
+                    return false;
+                }
+
+                Logger.Info($"Access token is valid (generated: {generatedAt:yyyy-MM-dd HH:mm:ss}).");
+                return true;
+            }
+
+            Logger.Info("Could not parse token generation timestamp - treating as invalid.");
+            return false;
+        }
+
+        /// <summary>
+        /// Attempts to auto-generate a new access token for Zerodha
+        /// </summary>
+        /// <param name="brokerConfig">The broker configuration object</param>
+        /// <returns>True if token was generated successfully</returns>
+        public async Task<bool> TryAutoGenerateTokenAsync(JObject brokerConfig)
+        {
+            try
+            {
+                // Check if AutoLogin is enabled
+                bool autoLogin = brokerConfig["AutoLogin"]?.ToObject<bool>() ?? false;
+                if (!autoLogin)
+                {
+                    Logger.Info("AutoLogin is disabled for this broker.");
+                    return false;
+                }
+
+                // Get credentials for token generation
+                string apiKey = brokerConfig["Api"]?.ToString();
+                string apiSecret = brokerConfig["Secret"]?.ToString();
+                string userId = brokerConfig["UserId"]?.ToString();
+                string password = brokerConfig["Password"]?.ToString();
+                string totpSecret = brokerConfig["TotpSecret"]?.ToString();
+                string redirectUrl = brokerConfig["RedirectUrl"]?.ToString() ?? "http://127.0.0.1:8001/callback";
+
+                // Validate required fields
+                if (string.IsNullOrEmpty(apiKey) || string.IsNullOrEmpty(apiSecret) ||
+                    string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(password) ||
+                    string.IsNullOrEmpty(totpSecret))
+                {
+                    Logger.Info("Missing credentials for auto token generation. Please configure UserId, Password, and TotpSecret.");
+                    return false;
+                }
+
+                Logger.Info($"Starting automatic token generation for user: {userId}");
+
+                // Create token generator and subscribe to status updates (log to file only, not NinjaTrader control panel)
+                var generator = new ZerodhaTokenGenerator(apiKey, apiSecret, userId, password, totpSecret, redirectUrl);
+                generator.StatusChanged += (sender, e) =>
+                {
+                    // Log all status updates to file only (not to NinjaTrader control panel - too verbose)
+                    if (e.IsError)
+                    {
+                        Logger.Info($"[TokenGen ERROR] {e.Message}");
+                    }
+                    else
+                    {
+                        Logger.Info($"[TokenGen] {e.Message}");
+                    }
+                };
+
+                // Use synchronous method on dedicated thread to avoid NinjaTrader sync context deadlocks
+                Logger.Info("Starting synchronous token generation on dedicated thread...");
+
+                var tokenData = generator.GenerateTokenSync();
+
+                // Update config with new token
+                brokerConfig["AccessToken"] = tokenData.AccessToken;
+                brokerConfig["AccessTokenGeneratedAt"] = tokenData.GeneratedAt.ToString("yyyy-MM-dd HH:mm:ss");
+                brokerConfig["AccessTokenExpiry"] = tokenData.GeneratedAt.Date.AddDays(1).ToString("yyyy-MM-dd") + " 00:00:00";
+
+                // Update instance variables
+                _accessToken = tokenData.AccessToken;
+
+                // Save updated config to file
+                SaveConfiguration();
+
+                Logger.Info($"Token generated successfully at {tokenData.GeneratedAt:yyyy-MM-dd HH:mm:ss}");
+                NinjaTrader.NinjaScript.NinjaScript.Log(
+                    $"[QAAdapter] Zerodha token generated successfully! Expires at midnight IST.",
+                    NinjaTrader.Cbi.LogLevel.Information);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Info($"Auto token generation failed: {ex.Message}");
+                NinjaTrader.NinjaScript.NinjaScript.Log(
+                    $"[QAAdapter] Auto token generation FAILED: {ex.Message}",
+                    NinjaTrader.Cbi.LogLevel.Error);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Saves the current configuration back to the config file
+        /// </summary>
+        private void SaveConfiguration()
+        {
+            try
+            {
+                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                string fullConfigPath = Path.Combine(documentsPath, CONFIG_FILE_PATH);
+
+                string json = _config.ToString(Formatting.Indented);
+                File.WriteAllText(fullConfigPath, json);
+
+                Logger.Info("Configuration saved successfully.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Info($"Failed to save configuration: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Ensures a valid access token is available, generating one if necessary
+        /// Call this during adapter initialization
+        /// </summary>
+        /// <returns>True if a valid token is available</returns>
+        public async Task<bool> EnsureValidTokenAsync()
+        {
+            try
+            {
+                if (_config == null)
+                {
+                    Logger.Info("Configuration not loaded, cannot ensure valid token.");
+                    return false;
+                }
+
+                // Only auto-generate for Zerodha for now
+                if (_activeWebSocketBroker != "Zerodha")
+                {
+                    Logger.Info($"Auto token generation not supported for broker: {_activeWebSocketBroker}");
+                    return !string.IsNullOrEmpty(_accessToken);
+                }
+
+                JObject brokerConfig = _config["Zerodha"] as JObject;
+                if (brokerConfig == null)
+                {
+                    Logger.Info("Zerodha configuration not found.");
+                    return false;
+                }
+
+                // Check if current token is valid
+                if (IsTokenValid(brokerConfig))
+                {
+                    return true;
+                }
+
+                // Token is invalid or expired - try to generate a new one
+                Logger.Info("Token is invalid or expired. Attempting auto-generation...");
+                return await TryAutoGenerateTokenAsync(brokerConfig).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Logger.Info($"Error ensuring valid token: {ex.Message}");
+                return false;
+            }
         }
 
         /// <summary>

@@ -63,8 +63,8 @@ namespace QANinjaAdapter.Services.MarketData
             MarketType marketType,
             ViewModelBase viewModelBase)
         {
-            // Log request parameters
-            NinjaTrader.NinjaScript.NinjaScript.Log($"Getting historical data for {symbol}, period: {barsPeriodType}, market type: {marketType}, dates: {fromDate} to {toDate}", NinjaTrader.Cbi.LogLevel.Information);
+            // Log request parameters (to file only, not NinjaTrader control panel)
+            Logger.Info($"Getting historical data for {symbol}, period: {barsPeriodType}, market type: {marketType}, dates: {fromDate} to {toDate}");
 
             List<Record> records = new List<Record>();
 
@@ -106,7 +106,7 @@ namespace QANinjaAdapter.Services.MarketData
                 NinjaTrader.NinjaScript.NinjaScript.Log($"Exception in GetHistoricalTrades: {ex.Message}", NinjaTrader.Cbi.LogLevel.Error);
             }
 
-            NinjaTrader.NinjaScript.NinjaScript.Log($"Returning {records.Count} historical records", NinjaTrader.Cbi.LogLevel.Information);
+            Logger.Info($"Returning {records.Count} historical records for {symbol}");
             return records;
         }
 
@@ -133,7 +133,7 @@ namespace QANinjaAdapter.Services.MarketData
                 if (response.IsSuccessStatusCode)
                 {
                     string content = await response.Content.ReadAsStringAsync();
-                    NinjaTrader.NinjaScript.NinjaScript.Log($"Received response with length: {content.Length} from {fromDateStr} to {toDateStr}", NinjaTrader.Cbi.LogLevel.Information);
+                    Logger.Info($"Received historical response with length: {content.Length} from {fromDateStr} to {toDateStr}");
 
                     // Parse the JSON response
                     JObject json = JObject.Parse(content);

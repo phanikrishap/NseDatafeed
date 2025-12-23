@@ -134,18 +134,18 @@ namespace QANinjaAdapter.Services.WebSocket
         {
             try
             {
-                NinjaTrader.NinjaScript.NinjaScript.Log(
-                    $"[WS-SEND] Sending WebSocket message: {message}",
-                    NinjaTrader.Cbi.LogLevel.Information);
+                //NinjaTrader.NinjaScript.NinjaScript.Log(
+                //    $"[WS-SEND] Sending WebSocket message: {message}",
+                //    NinjaTrader.Cbi.LogLevel.Information);
                 
                 byte[] messageBytes = Encoding.UTF8.GetBytes(message);
                 await ws.SendAsync(
                     new ArraySegment<byte>(messageBytes),
                     WebSocketMessageType.Text, true, CancellationToken.None);
                 
-                NinjaTrader.NinjaScript.NinjaScript.Log(
-                    $"[WS-SEND-DONE] WebSocket message sent successfully",
-                    NinjaTrader.Cbi.LogLevel.Information);
+                //NinjaTrader.NinjaScript.NinjaScript.Log(
+                //    $"[WS-SEND-DONE] WebSocket message sent successfully",
+                //    NinjaTrader.Cbi.LogLevel.Information);
             }
             catch (Exception ex)
             {
@@ -167,15 +167,15 @@ namespace QANinjaAdapter.Services.WebSocket
         {
             try
             {
-                NinjaTrader.NinjaScript.NinjaScript.Log(
-                    $"[WS-RECV-START] Waiting for WebSocket message, WebSocket state: {ws.State}",
-                    NinjaTrader.Cbi.LogLevel.Information);
+                //NinjaTrader.NinjaScript.NinjaScript.Log(
+                //    $"[WS-RECV-START] Waiting for WebSocket message, WebSocket state: {ws.State}",
+                //    NinjaTrader.Cbi.LogLevel.Information);
                 
                 var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
                 
-                NinjaTrader.NinjaScript.NinjaScript.Log(
-                    $"[WS-RECV-DONE] Received WebSocket message, Type: {result.MessageType}, Count: {result.Count}, EndOfMessage: {result.EndOfMessage}",
-                    NinjaTrader.Cbi.LogLevel.Information);
+                //NinjaTrader.NinjaScript.NinjaScript.Log(
+                //    $"[WS-RECV-DONE] Received WebSocket message, Type: {result.MessageType}, Count: {result.Count}, EndOfMessage: {result.EndOfMessage}",
+                //    NinjaTrader.Cbi.LogLevel.Information);
                 
                 return result;
             }
@@ -200,17 +200,17 @@ namespace QANinjaAdapter.Services.WebSocket
         {
             if (data.Length < 2)
             {
-                NinjaTrader.NinjaScript.NinjaScript.Log(
-                    $"[PARSE-ERROR] Data too small for {nativeSymbolName}, length: {data.Length}",
-                    NinjaTrader.Cbi.LogLevel.Error);
+                //NinjaTrader.NinjaScript.NinjaScript.Log(
+                //    $"[PARSE-ERROR] Data too small for {nativeSymbolName}, length: {data.Length}",
+                //    NinjaTrader.Cbi.LogLevel.Error);
                 return null;
             }
 
             // Log the raw binary data for debugging
             string hexData = BitConverter.ToString(data, 0, Math.Min(data.Length, 64)).Replace("-", "");
-            NinjaTrader.NinjaScript.NinjaScript.Log(
-                $"[PARSE-DEBUG] Parsing binary message for {nativeSymbolName}, token: {expectedToken}, data: {hexData}...",
-                NinjaTrader.Cbi.LogLevel.Information);
+            //NinjaTrader.NinjaScript.NinjaScript.Log(
+            //    $"[PARSE-DEBUG] Parsing binary message for {nativeSymbolName}, token: {expectedToken}, data: {hexData}...",
+            //    NinjaTrader.Cbi.LogLevel.Information);
 
             try
             {
@@ -218,9 +218,9 @@ namespace QANinjaAdapter.Services.WebSocket
                 int packetCount = ReadInt16BE(data, offset);
                 offset += 2;
 
-                NinjaTrader.NinjaScript.NinjaScript.Log(
-                    $"[PARSE-DEBUG] Packet count: {packetCount} for {nativeSymbolName}",
-                    NinjaTrader.Cbi.LogLevel.Information);
+                //NinjaTrader.NinjaScript.NinjaScript.Log(
+                //    $"[PARSE-DEBUG] Packet count: {packetCount} for {nativeSymbolName}",
+                //    NinjaTrader.Cbi.LogLevel.Information);
 
                 for (int i = 0; i < packetCount; i++)
                 {
@@ -285,9 +285,9 @@ namespace QANinjaAdapter.Services.WebSocket
                         ExchangeTimestamp = DateTime.Now
                     };
 
-                    NinjaTrader.NinjaScript.NinjaScript.Log(
-                        $"[PARSE-DEBUG] Found matching token {iToken} for {nativeSymbolName}, packet mode: LTP={isLtpMode}, Quote={isQuoteMode}, Full={isFullMode}, Length={packetLength}",
-                        NinjaTrader.Cbi.LogLevel.Information);
+                    //NinjaTrader.NinjaScript.NinjaScript.Log(
+                    //    $"[PARSE-DEBUG] Found matching token {iToken} for {nativeSymbolName}, packet mode: LTP={isLtpMode}, Quote={isQuoteMode}, Full={isFullMode}, Length={packetLength}",
+                    //    NinjaTrader.Cbi.LogLevel.Information);
 
                     // Parse the packet based on mode
                     if (isLtpMode)
@@ -299,10 +299,10 @@ namespace QANinjaAdapter.Services.WebSocket
                             tickData.LastTradePrice = lastTradedPrice / 100.0;
                         }
                         
-                        // Log LTP mode parsing
-                        NinjaTrader.NinjaScript.NinjaScript.Log(
-                            $"[PARSE-LTP] {nativeSymbolName}: LTP={tickData.LastTradePrice}, Time={tickData.LastTradeTime:HH:mm:ss.fff}",
-                            NinjaTrader.Cbi.LogLevel.Information);
+                        // Log LTP mode parsing (disabled - too verbose)
+                        // NinjaTrader.NinjaScript.NinjaScript.Log(
+                        //     $"[PARSE-LTP] {nativeSymbolName}: LTP={tickData.LastTradePrice}, Time={tickData.LastTradeTime:HH:mm:ss.fff}",
+                        //     NinjaTrader.Cbi.LogLevel.Information);
                     }
                     else if (isQuoteMode || isFullMode || (isMcxSegment && packetLength == 184))
                     {
@@ -340,10 +340,10 @@ namespace QANinjaAdapter.Services.WebSocket
                         if (offset + 40 + 4 <= data.Length)
                             tickData.Close = ReadInt32BE(data, offset + 40) / 100.0;
 
-                        // Log Quote mode parsing
-                        NinjaTrader.NinjaScript.NinjaScript.Log(
-                            $"[PARSE-QUOTE] {nativeSymbolName}: LTP={tickData.LastTradePrice}, LTQ={tickData.LastTradeQty}, Vol={tickData.TotalQtyTraded}",
-                            NinjaTrader.Cbi.LogLevel.Information);
+                        // Log Quote mode parsing (disabled - too verbose)
+                        // NinjaTrader.NinjaScript.NinjaScript.Log(
+                        //     $"[PARSE-QUOTE] {nativeSymbolName}: LTP={tickData.LastTradePrice}, LTQ={tickData.LastTradeQty}, Vol={tickData.TotalQtyTraded}",
+                        //     NinjaTrader.Cbi.LogLevel.Information);
 
                         // Get exchange timestamp if available (only for true Full mode, not MCX full)
                         if (isFullMode)
@@ -375,10 +375,10 @@ namespace QANinjaAdapter.Services.WebSocket
                                 }
                             }
 
-                            // Log Full mode timestamp parsing
-                            NinjaTrader.NinjaScript.NinjaScript.Log(
-                                $"[PARSE-FULL-TIME] {nativeSymbolName}: LastTradeTime={tickData.LastTradeTime:HH:mm:ss.fff}, ExchangeTime={tickData.ExchangeTimestamp:HH:mm:ss.fff}",
-                                NinjaTrader.Cbi.LogLevel.Information);
+                            // Log Full mode timestamp parsing (disabled - too verbose)
+                            // NinjaTrader.NinjaScript.NinjaScript.Log(
+                            //     $"[PARSE-FULL-TIME] {nativeSymbolName}: LastTradeTime={tickData.LastTradeTime:HH:mm:ss.fff}, ExchangeTime={tickData.ExchangeTimestamp:HH:mm:ss.fff}",
+                            //     NinjaTrader.Cbi.LogLevel.Information);
 
                             // Parse market depth if available
                             if (isFullMode)
@@ -444,18 +444,18 @@ namespace QANinjaAdapter.Services.WebSocket
                                         askCount++;
                                 }
                                 
-                                // Log market depth parsing
-                                NinjaTrader.NinjaScript.NinjaScript.Log(
-                                    $"[PARSE-DEPTH] {nativeSymbolName}: Parsed market depth with {bidCount} bids and {askCount} asks",
-                                    NinjaTrader.Cbi.LogLevel.Information);
+                                // Log market depth parsing (disabled - too verbose)
+                                // NinjaTrader.NinjaScript.NinjaScript.Log(
+                                //     $"[PARSE-DEPTH] {nativeSymbolName}: Parsed market depth with {bidCount} bids and {askCount} asks",
+                                //     NinjaTrader.Cbi.LogLevel.Information);
                             }
                         }
                     }
 
-                    // Log the parsed tick data
-                    NinjaTrader.NinjaScript.NinjaScript.Log(
-                        $"[PARSE-SUCCESS] {nativeSymbolName}: LTP={tickData.LastTradePrice}, LTQ={tickData.LastTradeQty}, Vol={tickData.TotalQtyTraded}, Time={tickData.LastTradeTime:HH:mm:ss.fff}",
-                        NinjaTrader.Cbi.LogLevel.Information);
+                    // Log the parsed tick data (disabled - too verbose)
+                    // NinjaTrader.NinjaScript.NinjaScript.Log(
+                    //     $"[PARSE-SUCCESS] {nativeSymbolName}: LTP={tickData.LastTradePrice}, LTQ={tickData.LastTradeQty}, Vol={tickData.TotalQtyTraded}, Time={tickData.LastTradeTime:HH:mm:ss.fff}",
+                    //     NinjaTrader.Cbi.LogLevel.Information);
 
                     return tickData;
                 }
@@ -480,9 +480,10 @@ namespace QANinjaAdapter.Services.WebSocket
                 ExchangeTimestamp = DateTime.Now
             };
 
-            NinjaTrader.NinjaScript.NinjaScript.Log(
-                $"[PARSE-DEFAULT] Returning default tick data for {nativeSymbolName}",
-                NinjaTrader.Cbi.LogLevel.Warning);
+            // Log default tick data (disabled - too verbose)
+            // NinjaTrader.NinjaScript.NinjaScript.Log(
+            //     $"[PARSE-DEFAULT] Returning default tick data for {nativeSymbolName}",
+            //     NinjaTrader.Cbi.LogLevel.Warning);
 
             return defaultTickData;
         }

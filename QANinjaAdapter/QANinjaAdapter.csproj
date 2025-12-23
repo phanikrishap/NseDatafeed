@@ -97,6 +97,7 @@
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Data" />
     <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web" />
     <Reference Include="System.Xml" />
     <Reference Include="WindowsBase" />
   </ItemGroup>
@@ -191,6 +192,7 @@
     <Compile Include="Models\DepthEntry.cs" />
     <Compile Include="Models\MappedInstrument.cs" />
     <Compile Include="Models\MarketData\ZerodhaTickData.cs" />
+    <Compile Include="Models\MarketData\TickProcessingItem.cs" />
     <Compile Include="Controls\CircularProgressBar.xaml.cs">
       <DependentUpon>CircularProgressBar.xaml</DependentUpon>
     </Compile>
@@ -214,6 +216,9 @@
     <Compile Include="Services\Instruments\InstrumentManager.cs" />
     <Compile Include="Services\MarketData\HistoricalDataService.cs" />
     <Compile Include="Services\MarketData\MarketDataService.cs" />
+    <Compile Include="Services\MarketData\OptimizedTickProcessor.cs" />
+    <Compile Include="Services\MarketData\PerformanceMonitor.cs" />
+    <Compile Include="Services\Auth\ZerodhaTokenGenerator.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />
   </ItemGroup>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Data.SQLite;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -26,10 +27,12 @@ namespace QANinjaAdapter.Services.Instruments
         private readonly Dictionary<string, long> _instrumentTokenCache = new Dictionary<string, long>();
         private readonly ZerodhaClient _zerodhaClient;
         
-        // Database file path
-        private const string DB_FILE_PATH = "NinjaTrader 8\\QAAdapter\\mapped_instruments.json";
+        // File paths
+        private const string JSON_FILE_PATH = "NinjaTrader 8\\QAAdapter\\mapped_instruments.json";
+        private const string SQLITE_DB_PATH = "NinjaTrader 8\\QAAdapter\\InstrumentMasters.db";
         private Dictionary<string, long> _symbolToTokenMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private Dictionary<long, InstrumentData> _tokenToInstrumentDataMap = new Dictionary<long, InstrumentData>();
+        private string _sqliteDbFullPath;
         private bool _isInitialized = false;
 
         /// <summary>
@@ -58,12 +61,13 @@ namespace QANinjaAdapter.Services.Instruments
         private async Task EnsureInitialized()
         {
             if (_isInitialized) return;
-            
+
             string jsonFilePath = string.Empty;
-            try 
+            try
             {
                 string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                jsonFilePath = Path.Combine(documentsPath, DB_FILE_PATH);
+                jsonFilePath = Path.Combine(documentsPath, JSON_FILE_PATH);
+                _sqliteDbFullPath = Path.Combine(documentsPath, SQLITE_DB_PATH);
 
                 if (!File.Exists(jsonFilePath))
                 {
@@ -109,7 +113,7 @@ namespace QANinjaAdapter.Services.Instruments
             public string symbol { get; set; }
             public string underlying { get; set; }
             public string expiry { get; set; }
-            public double strike { get; set; }
+            public double? strike { get; set; }
             public string option_type { get; set; }
             public string segment { get; set; }
             public long instrument_token { get; set; }
@@ -129,17 +133,37 @@ namespace QANinjaAdapter.Services.Instruments
             try
             {
                 await EnsureInitialized();
-                
-                // First try exact match
+
+                // First try exact match in JSON mappings (custom mappings like NIFTY_I)
                 if (_symbolToTokenMap.TryGetValue(symbol, out long token))
                     return token;
-                    
-                // If not found, try case-insensitive search
-                var match = _symbolToTokenMap.FirstOrDefault(kvp => 
+
+                // If not found, try case-insensitive search in JSON mappings
+                var match = _symbolToTokenMap.FirstOrDefault(kvp =>
                     string.Equals(kvp.Key, symbol, StringComparison.OrdinalIgnoreCase));
-                    
+
                 if (!match.Equals(default(KeyValuePair<string, long>)))
                     return match.Value;
+
+                // Check if this is a NIFTY futures symbol - map to NIFTY_I (continuous contract)
+                // Matches patterns like NIFTY25MAYFUT, NIFTY25DECFUT, etc.
+                string continuousSymbol = GetContinuousContractSymbol(symbol);
+                if (!string.IsNullOrEmpty(continuousSymbol) && _symbolToTokenMap.TryGetValue(continuousSymbol, out token))
+                {
+                    Logger.Info($"InstrumentManager: Mapped '{symbol}' to continuous contract '{continuousSymbol}' with token {token}");
+                    // Cache this mapping for future lookups
+                    _symbolToTokenMap[symbol] = token;
+                    return token;
+                }
+
+                // Fall back to SQLite database lookup
+                token = LookupTokenInSqlite(symbol);
+                if (token > 0)
+                {
+                    // Cache the result for future lookups
+                    _symbolToTokenMap[symbol] = token;
+                    return token;
+                }
 
                 throw new KeyNotFoundException($"Instrument token not found for symbol: {symbol}");
             }
@@ -148,6 +172,111 @@ namespace QANinjaAdapter.Services.Instruments
                 Logger.Error($"InstrumentManager: Error getting instrument token for symbol '{symbol}'. Error: {ex.Message}", ex);
                 return 0;
             }
+        }
+
+        /// <summary>
+        /// Gets the continuous contract symbol for a futures symbol
+        /// E.g., NIFTY25MAYFUT -> NIFTY_I, BANKNIFTY25DECFUT -> BANKNIFTY_I
+        /// </summary>
+        private string GetContinuousContractSymbol(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol))
+                return null;
+
+            string upperSymbol = symbol.ToUpperInvariant();
+
+            // Check for NIFTY futures (NIFTY25MAYFUT, NIFTY25DECFUT, etc.)
+            if (upperSymbol.StartsWith("NIFTY") && upperSymbol.EndsWith("FUT") && !upperSymbol.StartsWith("BANKNIFTY"))
+            {
+                return "NIFTY_I";
+            }
+
+            // Check for BANKNIFTY futures
+            if (upperSymbol.StartsWith("BANKNIFTY") && upperSymbol.EndsWith("FUT"))
+            {
+                return "BANKNIFTY_I";
+            }
+
+            // Check for SENSEX futures
+            if (upperSymbol.StartsWith("SENSEX") && upperSymbol.EndsWith("FUT"))
+            {
+                return "SENSEX_I";
+            }
+
+            // Check for FINNIFTY futures
+            if (upperSymbol.StartsWith("FINNIFTY") && upperSymbol.EndsWith("FUT"))
+            {
+                return "FINNIFTY_I";
+            }
+
+            // Check for MIDCPNIFTY futures
+            if (upperSymbol.StartsWith("MIDCPNIFTY") && upperSymbol.EndsWith("FUT"))
+            {
+                return "MIDCPNIFTY_I";
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Looks up instrument token from SQLite database
+        /// </summary>
+        private long LookupTokenInSqlite(string symbol)
+        {
+            if (string.IsNullOrEmpty(_sqliteDbFullPath) || !File.Exists(_sqliteDbFullPath))
+            {
+                return 0;
+            }
+
+            try
+            {
+                using (var connection = new SQLiteConnection($"Data Source={_sqliteDbFullPath};Version=3;Read Only=True;"))
+                {
+                    connection.Open();
+
+                    // Try exact match on zerodha_symbol first (this is the Zerodha trading symbol)
+                    string query = "SELECT instrument_token FROM instruments WHERE zerodha_symbol = @symbol LIMIT 1";
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@symbol", symbol);
+                        var result = cmd.ExecuteScalar();
+                        if (result != null && result != DBNull.Value)
+                        {
+                            return Convert.ToInt64(result);
+                        }
+                    }
+
+                    // Try exact match on symbol column (our internal symbol)
+                    query = "SELECT instrument_token FROM instruments WHERE symbol = @symbol LIMIT 1";
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@symbol", symbol);
+                        var result = cmd.ExecuteScalar();
+                        if (result != null && result != DBNull.Value)
+                        {
+                            return Convert.ToInt64(result);
+                        }
+                    }
+
+                    // Try case-insensitive match on zerodha_symbol
+                    query = "SELECT instrument_token FROM instruments WHERE zerodha_symbol = @symbol COLLATE NOCASE LIMIT 1";
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@symbol", symbol);
+                        var result = cmd.ExecuteScalar();
+                        if (result != null && result != DBNull.Value)
+                        {
+                            return Convert.ToInt64(result);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: SQLite lookup failed for symbol '{symbol}'. Error: {ex.Message}", ex);
+            }
+
+            return 0;
         }
 
         /// <summary>
@@ -253,7 +382,7 @@ namespace QANinjaAdapter.Services.Instruments
                 try
                 {
                     string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                    string jsonFilePath = Path.Combine(documentsPath, Path.ChangeExtension(DB_FILE_PATH, ".json"));
+                    string jsonFilePath = Path.Combine(documentsPath, JSON_FILE_PATH);
 
                     Logger.Info($"Reading symbols from JSON file: {jsonFilePath}");
 
@@ -807,8 +936,8 @@ namespace QANinjaAdapter.Services.Instruments
         {
             public string symbol { get; set; }
             public string underlying { get; set; }
-            public DateTime expiry { get; set; }
-            public double strike { get; set; }
+            public DateTime? expiry { get; set; }
+            public double? strike { get; set; }
             public string option_type { get; set; }
             public string segment { get; set; }
             public long instrument_token { get; set; }

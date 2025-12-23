@@ -147,6 +147,39 @@ namespace QANinjaAdapter
                 MessageBox.Show("Using default API keys. Please check your configuration file.",
                     "Configuration Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
+
+            // Ensure valid access token (auto-generate if needed)
+            try
+            {
+                Logger.Info("Checking access token validity...");
+
+                // Run async token validation on a thread pool thread to avoid deadlock
+                // NinjaTrader's synchronization context can cause deadlock with .Wait()
+                var tokenResult = Task.Run(async () => await _configManager.EnsureValidTokenAsync()).Result;
+
+                if (tokenResult)
+                {
+                    Logger.Info("Access token is valid.");
+                    NinjaTrader.NinjaScript.NinjaScript.Log(
+                        "[QAAdapter] Zerodha access token is valid.",
+                        NinjaTrader.Cbi.LogLevel.Information);
+                }
+                else
+                {
+                    Logger.Info("Failed to obtain valid access token. Manual login may be required.");
+                    NinjaTrader.NinjaScript.NinjaScript.Log(
+                        "[QAAdapter] WARNING: Failed to obtain valid Zerodha access token. Manual login may be required.",
+                        NinjaTrader.Cbi.LogLevel.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                var innerMessage = ex.InnerException?.Message ?? ex.Message;
+                Logger.Info($"Token validation error: {innerMessage}");
+                NinjaTrader.NinjaScript.NinjaScript.Log(
+                    $"[QAAdapter] Token validation error: {innerMessage}",
+                    NinjaTrader.Cbi.LogLevel.Error);
+            }
         }
 
         /// <summary>
