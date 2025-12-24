@@ -54,6 +54,19 @@ namespace QANinjaAdapter
 
         private static void ConfigureLog4Net()
         {
+            // Clear the log file on startup for a fresh session
+            try
+            {
+                if (File.Exists(_logFilePath))
+                {
+                    File.WriteAllText(_logFilePath, string.Empty);
+                }
+            }
+            catch
+            {
+                // Ignore errors clearing file - it may be locked
+            }
+
             // Create a new configuration
             var hierarchy = (log4net.Repository.Hierarchy.Hierarchy)LogManager.GetRepository();
             hierarchy.Root.RemoveAllAppenders(); // Remove any existing appenders
@@ -248,6 +261,92 @@ namespace QANinjaAdapter
             {
                 MessageBox.Show($"Failed to open log folder: {ex.Message}",
                     "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        /// <summary>
+        /// Sets the global log level at runtime
+        /// </summary>
+        /// <param name="level">The log level: "DEBUG", "INFO", "WARN", "ERROR", "FATAL"</param>
+        public static void SetLogLevel(string level)
+        {
+            try
+            {
+                var hierarchy = (log4net.Repository.Hierarchy.Hierarchy)LogManager.GetRepository();
+                Level logLevel;
+
+                switch (level.ToUpperInvariant())
+                {
+                    case "DEBUG":
+                        logLevel = Level.Debug;
+                        break;
+                    case "INFO":
+                        logLevel = Level.Info;
+                        break;
+                    case "WARN":
+                    case "WARNING":
+                        logLevel = Level.Warn;
+                        break;
+                    case "ERROR":
+                        logLevel = Level.Error;
+                        break;
+                    case "FATAL":
+                        logLevel = Level.Fatal;
+                        break;
+                    default:
+                        logLevel = Level.Info;
+                        break;
+                }
+
+                hierarchy.Root.Level = logLevel;
+                Info($"[Logger] Log level changed to: {logLevel}");
+            }
+            catch (Exception ex)
+            {
+                Error($"[Logger] Failed to set log level: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gets the current log level
+        /// </summary>
+        public static string GetLogLevel()
+        {
+            try
+            {
+                var hierarchy = (log4net.Repository.Hierarchy.Hierarchy)LogManager.GetRepository();
+                return hierarchy.Root.Level.Name;
+            }
+            catch
+            {
+                return "UNKNOWN";
+            }
+        }
+
+        /// <summary>
+        /// Reloads configuration from the log4net.config file if it exists
+        /// </summary>
+        public static void ReloadConfiguration()
+        {
+            try
+            {
+                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "QAAdapter", "log4net.config");
+
+                if (File.Exists(configPath))
+                {
+                    var configFile = new FileInfo(configPath);
+                    XmlConfigurator.Configure(configFile);
+                    Info($"[Logger] Reloaded configuration from: {configPath}");
+                }
+                else
+                {
+                    Warn($"[Logger] Configuration file not found at: {configPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Error($"[Logger] Failed to reload configuration: {ex.Message}");
             }
         }
     }

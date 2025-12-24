@@ -372,6 +372,18 @@ namespace QANinjaAdapter.Services.MarketData
             // Check memory pressure before expensive cache update
             CheckMemoryPressure();
 
+            // CRITICAL DEBUG: Log cache update
+            if (subscriptions.Count < 2 && subscriptions.Count > 0)
+            {
+                 // Suspicious: updating cache with very few items?
+                 Logger.Info($"[OTP-CACHE] UpdateSubscriptionCache called with only {subscriptions.Count} items! Possible cache stomp.");
+                 foreach(var key in subscriptions.Keys) Logger.Info($"[OTP-CACHE] Key: {key}");
+            }
+            else
+            {
+                 Logger.Info($"[OTP-CACHE] UpdateSubscriptionCache called with {subscriptions.Count} items.");
+            }
+
             // Build NEW caches without touching the current ones
             // This ensures readers always see a complete, consistent view
             var newSubscriptionCache = new ConcurrentDictionary<string, L1Subscription>();
@@ -603,13 +615,41 @@ namespace QANinjaAdapter.Services.MarketData
                         _loggedMissedSymbols.Add(ntSymbolName);
                         Logger.Info($"[OTP] No subscription for '{ntSymbolName}'. Cache has: {string.Join(", ", _subscriptionCache.Keys.Take(10))}");
                     }
+                    
+                    // CRITICAL DEBUG: Log attempts for SENSEX options even if not subscribed
+                    if (ntSymbolName.Contains("SENSEX") && ntSymbolName.Contains("CE"))
+                    {
+                        // Logger.Info($"[OTP-DEBUG] Tick received for {ntSymbolName} but NO SUBSCRIPTION found!");
+                    }
+                    
                     return; // No subscription found
+                }
+
+                // CRITICAL DEBUG: Log ALL SENSEX option ticks to verify data flow
+                if (ntSymbolName.Contains("SENSEX") && ntSymbolName.Contains("CE") && item.TickData.LastTradePrice > 0)
+                {
+                    // Rate limit: only log every 10th tick or if price > 0
+                     if (DateTime.Now.Millisecond < 50) // roughly 5% sample
+                        Logger.Info($"[OTP-DEBUG] Processing tick for {ntSymbolName}: LTP={item.TickData.LastTradePrice}, Vol={item.TickData.TotalQtyTraded}");
                 }
 
                 // Fast callback lookup using pre-built cache (O(1))
                 if (!_callbackCache.TryGetValue(ntSymbolName, out var callbacks) || callbacks?.Count == 0)
                 {
+                    // CRITICAL DEBUG: Subscription exists (passed check above) but NO CALLBACKS?
+                    if (ntSymbolName.Contains("SENSEX") && ntSymbolName.Contains("CE"))
+                    {
+                         Logger.Info($"[OTP-CALLBACK] Subscription exists but NO CALLBACKS for {ntSymbolName}!");
+                    }
                     return; // No callbacks found
+                }
+
+                // Invoke callbacks
+                // CRITICAL DEBUG: Log invocation
+                if (ntSymbolName.Contains("SENSEX") && ntSymbolName.Contains("CE") && item.TickData.LastTradePrice > 0)
+                {
+                     if (DateTime.Now.Millisecond < 50) // sample
+                        Logger.Info($"[OTP-CALLBACK] Invoking {callbacks.Count} callbacks for {ntSymbolName}");
                 }
 
                 // Calculate volume delta efficiently
@@ -618,7 +658,7 @@ namespace QANinjaAdapter.Services.MarketData
                 // Debug logging for index symbols
                 if (subscription.IsIndex)
                 {
-                    Logger.Info($"[OTP] ProcessSingleTick INDEX: symbol={ntSymbolName}, price={item.TickData.LastTradePrice}, volumeDelta={volumeDelta}, callbacks={callbacks?.Count}");
+                    Logger.Debug($"[OTP] ProcessSingleTick INDEX: symbol={ntSymbolName}, price={item.TickData.LastTradePrice}, volumeDelta={volumeDelta}, callbacks={callbacks?.Count}");
                 }
 
                 // Process all callbacks for this subscription (pass subscription for IsIndex handling)
@@ -737,7 +777,7 @@ namespace QANinjaAdapter.Services.MarketData
             // Debug logging for indices
             if (isIndex)
             {
-                Logger.Info($"[OTP] ProcessCallbacks INDEX: lastPrice={lastPrice}, prevPrice={prevPrice}, priceChanged={priceChanged}, volumeDelta={volumeDelta}, callbackCount={callbacks?.Count}");
+                Logger.Debug($"[OTP] ProcessCallbacks INDEX: lastPrice={lastPrice}, prevPrice={prevPrice}, priceChanged={priceChanged}, volumeDelta={volumeDelta}, callbackCount={callbacks?.Count}");
                 subscription.PreviousPrice = lastPrice;
             }
 
@@ -794,7 +834,7 @@ namespace QANinjaAdapter.Services.MarketData
                     // Debug logging for indices
                     if (isIndex)
                     {
-                        Logger.Info($"[OTP] INDEX callback check: shouldFire={shouldFireCallback}, lastPrice={tickData.LastTradePrice}, volumeDelta={volumeDelta}, isIndex={isIndex}, priceChanged={priceChanged}");
+                        Logger.Debug($"[OTP] INDEX callback check: shouldFire={shouldFireCallback}, lastPrice={tickData.LastTradePrice}, volumeDelta={volumeDelta}, isIndex={isIndex}, priceChanged={priceChanged}");
                     }
 
                     if (tickData.LastTradePrice > 0 && shouldFireCallback)

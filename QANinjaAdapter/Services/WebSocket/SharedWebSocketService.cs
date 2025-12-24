@@ -302,7 +302,7 @@ namespace QANinjaAdapter.Services.WebSocket
                     return;
                 }
 
-                Logger.Info($"[SharedWS] Unsubscribe request: symbol={symbol}, token={token}");
+                Logger.Info($"[SharedWS] ACTUAL UnsubscribeAsync called for {symbol} (token={token}) - Checking if this is unexpected!");
 
                 // Remove from mappings
                 _tokenToSymbolMap.TryRemove(token, out _);
@@ -503,12 +503,25 @@ namespace QANinjaAdapter.Services.WebSocket
                         _subscriptions.TryGetValue(symbol, out var subscription);
                         bool isIndex = subscription?.IsIndex ?? false;
 
+                        // DEBUG: Heartbeat for specific options to trace data flow
+                        if (!isIndex && symbol.Contains("SENSEX") && packetCount > 10) // Log occasionally
+                        {
+                             // Reduce spam via modulo if needed, or just log
+                             // Logger.Info($"[SharedWS-HEARTBEAT] Received tick for {symbol}");
+                        }
+
                         var tickData = ParseTickPacket(data, offset, packetLength, symbol, isIndex);
                         if (tickData != null)
                         {
                             // Fire tick event
                             TickReceived?.Invoke(symbol, tickData);
                         }
+                    }
+                    else
+                    {
+                         // Token not found in map - vital debug info
+                         if (instrumentToken > 0)
+                            Logger.Debug($"[SharedWS-DROP] Token {instrumentToken} received but not in map!");
                     }
 
                     offset += packetLength;

@@ -22,7 +22,8 @@
       "Bash(pip install:*)",
       "Bash(python test_gift_nifty_websocket.py:*)",
       "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\QANinjaAdapter\\\\QANinjaAdapter.csproj\" -t:Rebuild -p:Configuration=Debug -verbosity:minimal)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show d84b3ef8c7ac4d2aca3942cfd3cde15abb4aa550:QANinjaAdapter/README.md)"
     ]
   }
 }

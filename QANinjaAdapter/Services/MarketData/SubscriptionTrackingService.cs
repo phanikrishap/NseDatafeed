@@ -93,6 +93,16 @@ namespace QANinjaAdapter.Services.MarketData
             }
         }
 
+        public (int Count, bool IsSticky, List<string> Consumers) GetReferenceDetails(string symbol)
+        {
+            if (_subscriptions.TryGetValue(symbol, out var info))
+            {
+                // Return a copy of the consumers list to avoid thread safety issues
+                return (info.ReferenceCount, info.IsSticky, info.Consumers.ToList());
+            }
+            return (0, false, new List<string>());
+        }
+
         /// <summary>
         /// Removes a reference from a subscription. Returns true if this was the last reference (should unsubscribe).
         /// NOTE: Sticky subscriptions will NEVER return true - they stay active for the entire session.

@@ -186,7 +186,7 @@ namespace QANinjaAdapter.Services.Analysis
             {
                 GiftNiftyPrice = price;
                 if (priorClose > 0) GiftNiftyPriorClose = priorClose;
-                Logger.Info($"[MarketAnalyzerLogic] UpdatePrice(): GIFT_NIFTY updated - Price={GiftNiftyPrice}, PriorClose={GiftNiftyPriorClose}");
+                Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): GIFT_NIFTY updated - Price={GiftNiftyPrice}, PriorClose={GiftNiftyPriorClose}");
 
                 ticker = GiftNiftyTicker;
                 ticker.LastPrice = price;
@@ -205,7 +205,7 @@ namespace QANinjaAdapter.Services.Analysis
                      symbol.Equals("NIFTY", StringComparison.OrdinalIgnoreCase))
             {
                 NiftySpotPrice = price;
-                Logger.Info($"[MarketAnalyzerLogic] UpdatePrice(): NIFTY_SPOT updated - Price={NiftySpotPrice}");
+                Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): NIFTY_SPOT updated - Price={NiftySpotPrice}");
 
                 ticker = NiftyTicker;
                 ticker.LastPrice = price;
@@ -223,7 +223,7 @@ namespace QANinjaAdapter.Services.Analysis
                      symbol.Equals("SENSEX", StringComparison.OrdinalIgnoreCase))
             {
                 SensexSpotPrice = price;
-                Logger.Info($"[MarketAnalyzerLogic] UpdatePrice(): SENSEX_SPOT updated - Price={SensexSpotPrice}");
+                Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): SENSEX_SPOT updated - Price={SensexSpotPrice}");
 
                 ticker = SensexTicker;
                 ticker.LastPrice = price;
@@ -269,7 +269,7 @@ namespace QANinjaAdapter.Services.Analysis
             if (GiftNiftyPriorClose > 0)
             {
                 changePercent = (GiftNiftyPrice - GiftNiftyPriorClose) / GiftNiftyPriorClose;
-                Logger.Info($"[MarketAnalyzerLogic] CheckAndCalculate(): Change% = ({GiftNiftyPrice} - {GiftNiftyPriorClose}) / {GiftNiftyPriorClose} = {changePercent:P4}");
+                Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): Change% = ({GiftNiftyPrice} - {GiftNiftyPriorClose}) / {GiftNiftyPriorClose} = {changePercent:P4}");
             }
             else
             {
@@ -285,7 +285,7 @@ namespace QANinjaAdapter.Services.Analysis
             NiftyTicker.ProjectedOpen = niftyProjected;
             SensexTicker.ProjectedOpen = sensexProjected;
 
-            Logger.Info($"[MarketAnalyzerLogic] CheckAndCalculate(): Projected Opens - NIFTY={niftyProjected:F2}, SENSEX={sensexProjected:F2}");
+            Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): Projected Opens - NIFTY={niftyProjected:F2}, SENSEX={sensexProjected:F2}");
             StatusUpdated?.Invoke($"GIFT: {GiftNiftyPrice} ({changePercent:P2}) | Proj Nifty: {niftyProjected:F0} | Proj Sensex: {sensexProjected:F0}");
 
             if ((niftyProjected > 0 || sensexProjected > 0) && !_optionsAlreadyGenerated)

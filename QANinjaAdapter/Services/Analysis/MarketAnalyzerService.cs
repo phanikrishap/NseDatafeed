@@ -34,7 +34,7 @@ namespace QANinjaAdapter.Services.Analysis
 
             // Wire up events
             _logic.OptionsGenerated += OnOptionsGenerated;
-            _logic.StatusUpdated += msg => Logger.Info($"[MarketAnalyzerService] StatusUpdate: {msg}");
+            _logic.StatusUpdated += msg => Logger.Debug($"[MarketAnalyzerService] StatusUpdate: {msg}");
 
             Logger.Info("[MarketAnalyzerService] Constructor: Events wired up successfully");
         }

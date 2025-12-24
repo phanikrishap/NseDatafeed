@@ -231,7 +231,11 @@ namespace QANinjaAdapter.Services.Analysis
                             // Update UI with live prices
                             if (type == MarketDataType.Last && price > 0)
                             {
-                                Logger.Debug($"[SubscriptionManager] LiveData({symbolForClosure}): Last={price}");
+                                // DEBUG: Log to confirm callback is firing (sample to reduce log spam)
+                                if (symbolForClosure.Contains("85500") && DateTime.Now.Second % 5 == 0)
+                                {
+                                    Logger.Debug($"[SubscriptionManager] LiveData CALLBACK FIRING: {symbolForClosure} = {price}");
+                                }
                                 OptionPriceUpdated?.Invoke(symbolForClosure, price);
                             }
                         });
@@ -523,8 +527,17 @@ namespace QANinjaAdapter.Services.Analysis
                             if (errorCode == ErrorCode.NoError)
                             {
                                 Logger.Info($"[SubscriptionManager] BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
+                                
+                                // LOG SUBSCRIPTION STATE
+                                var refDetails = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
+                                Logger.Info($"[SubscriptionManager] PRE-DONE STATUS: {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
+
                                 // Update UI status to "Done" now that data is in NinjaTrader database
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
+                                
+                                // LOG SUBSCRIPTION STATE AGAIN
+                                var refDetailsAfter = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
+                                Logger.Info($"[SubscriptionManager] POST-DONE STATUS: {symbolForClosure} - RefCount={refDetailsAfter.Count}, Sticky={refDetailsAfter.IsSticky}, Consumers={string.Join(",", refDetailsAfter.Consumers)}");
                             }
                             else
                             {
@@ -591,8 +604,17 @@ namespace QANinjaAdapter.Services.Analysis
                             if (errorCode == ErrorCode.NoError)
                             {
                                 Logger.Info($"[SubscriptionManager] STRDL BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
+                                
+                                // LOG SUBSCRIPTION STATE
+                                var refDetails = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
+                                Logger.Info($"[SubscriptionManager] PRE-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
+
                                 // Update UI status to "Done" now that data is in NinjaTrader database
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
+
+                                // LOG SUBSCRIPTION STATE AGAIN
+                                var refDetailsAfter = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
+                                Logger.Info($"[SubscriptionManager] POST-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetailsAfter.Count}, Sticky={refDetailsAfter.IsSticky}, Consumers={string.Join(",", refDetailsAfter.Consumers)}");
                             }
                             else
                             {

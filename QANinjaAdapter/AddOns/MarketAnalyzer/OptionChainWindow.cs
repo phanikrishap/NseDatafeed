@@ -53,25 +53,51 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
     /// <summary>
     /// Row item for the Option Chain - represents a single strike with CE and PE data
     /// </summary>
-    public class OptionChainRow
+    /// <summary>
+    /// Row item for the Option Chain - represents a single strike with CE and PE data
+    /// Implements INotifyPropertyChanged for granular UI updates without full refresh
+    /// </summary>
+    public class OptionChainRow : System.ComponentModel.INotifyPropertyChanged
     {
+        public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
+        protected void OnPropertyChanged(string name) => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+
         public double Strike { get; set; }
         public string StrikeDisplay => Strike.ToString("F0");
 
         // CE (Call) data
-        public string CELast { get; set; } = "---";
-        public string CEStatus { get; set; } = "---";
-        public double CEPrice { get; set; }
+        private string _ceLast = "---";
+        public string CELast { get => _ceLast; set { if (_ceLast != value) { _ceLast = value; OnPropertyChanged(nameof(CELast)); } } }
+
+        private string _ceStatus = "---";
+        public string CEStatus { get => _ceStatus; set { if (_ceStatus != value) { _ceStatus = value; OnPropertyChanged(nameof(CEStatus)); } } }
+
+        private double _cePrice;
+        public double CEPrice { get => _cePrice; set { if (_cePrice != value) { _cePrice = value; OnPropertyChanged(nameof(CEPrice)); NotifyStraddleChanged(); } } }
+
         public string CESymbol { get; set; }
 
         // PE (Put) data
-        public string PELast { get; set; } = "---";
-        public string PEStatus { get; set; } = "---";
-        public double PEPrice { get; set; }
+        private string _peLast = "---";
+        public string PELast { get => _peLast; set { if (_peLast != value) { _peLast = value; OnPropertyChanged(nameof(PELast)); } } }
+
+        private string _peStatus = "---";
+        public string PEStatus { get => _peStatus; set { if (_peStatus != value) { _peStatus = value; OnPropertyChanged(nameof(PEStatus)); } } }
+
+        private double _pePrice;
+        public double PEPrice { get => _pePrice; set { if (_pePrice != value) { _pePrice = value; OnPropertyChanged(nameof(PEPrice)); NotifyStraddleChanged(); } } }
+
         public string PESymbol { get; set; }
 
         // Synthetic Straddle price from SyntheticStraddleService (live calculated)
-        public double SyntheticStraddlePrice { get; set; }
+        private double _syntheticStraddlePrice;
+        public double SyntheticStraddlePrice { get => _syntheticStraddlePrice; set { if (_syntheticStraddlePrice != value) { _syntheticStraddlePrice = value; OnPropertyChanged(nameof(SyntheticStraddlePrice)); NotifyStraddleChanged(); } } }
+
+        private void NotifyStraddleChanged()
+        {
+            OnPropertyChanged(nameof(StraddlePrice));
+            OnPropertyChanged(nameof(StraddleValue));
+        }
 
         // Straddle = Synthetic straddle price (if available) or CE + PE fallback
         public string StraddlePrice => SyntheticStraddlePrice > 0
@@ -87,13 +113,15 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         // Straddle symbol for the synthetic instrument (e.g., NIFTY25DEC24000_STRDL)
         public string StraddleSymbol { get; set; }
 
-        public bool IsATM { get; set; }
+        private bool _isATM;
+        public bool IsATM { get => _isATM; set { if (_isATM != value) { _isATM = value; OnPropertyChanged(nameof(IsATM)); } } }
 
         // Histogram width percentage (0-100) for visual representation
-        // CE histogram grows from right-to-left (aligned right in cell)
-        // PE histogram grows from left-to-right (aligned left in cell)
-        public double CEHistogramWidth { get; set; }
-        public double PEHistogramWidth { get; set; }
+        private double _ceHistogramWidth;
+        public double CEHistogramWidth { get => _ceHistogramWidth; set { if (_ceHistogramWidth != value) { _ceHistogramWidth = value; OnPropertyChanged(nameof(CEHistogramWidth)); } } }
+
+        private double _peHistogramWidth;
+        public double PEHistogramWidth { get => _peHistogramWidth; set { if (_peHistogramWidth != value) { _peHistogramWidth = value; OnPropertyChanged(nameof(PEHistogramWidth)); } } }
     }
 
     /// <summary>
@@ -216,6 +244,8 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 // Hook Events
                 Loaded += OnTabPageLoaded;
                 Unloaded += OnTabPageUnloaded;
+
+                InitializeThrottling(); // START UI THROTTLING
 
                 Logger.Info("[OptionChainTabPage] Constructor: Tab page created successfully");
             }
@@ -665,106 +695,132 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             });
         }
 
+        // Throttling for UI updates (Decoupling backend high-frequency ticks from UI rendering)
+        private readonly Dictionary<string, double> _pendingPriceUpdates = new Dictionary<string, double>();
+        private readonly Dictionary<string, string> _pendingStatusUpdates = new Dictionary<string, string>();
+        private readonly Dictionary<string, (double price, double ce, double pe)> _pendingStraddleUpdates = new Dictionary<string, (double, double, double)>();
+        private readonly object _throttleLock = new object();
+        private System.Windows.Threading.DispatcherTimer _uiUpdateTimer;
+
+        // Initialize Timer in Constructor
+        private void InitializeThrottling()
+        {
+            _uiUpdateTimer = new System.Windows.Threading.DispatcherTimer();
+            _uiUpdateTimer.Interval = TimeSpan.FromMilliseconds(500); // 0.5s interval for maximum stability
+            _uiUpdateTimer.Tick += OnUiUpdateTimerTick;
+            _uiUpdateTimer.Start();
+        }
+
+        private void OnUiUpdateTimerTick(object sender, EventArgs e)
+        {
+            bool needsRefresh = false;
+
+            try
+            {
+                lock (_throttleLock)
+                {
+                    if (_pendingPriceUpdates.Count == 0 && _pendingStatusUpdates.Count == 0 && _pendingStraddleUpdates.Count == 0)
+                        return;
+
+                    // DEBUG: Log pending updates count periodically
+                    if (_pendingPriceUpdates.Count > 0 && DateTime.Now.Second % 10 == 0)
+                    {
+                        Logger.Debug($"[OptionChainTabPage] UI Timer: {_pendingPriceUpdates.Count} pending price updates, {_symbolToRowMap.Count} mapped symbols");
+                    }
+
+                    // Process Price Updates
+                    foreach (var kvp in _pendingPriceUpdates)
+                    {
+                        if (_symbolToRowMap.TryGetValue(kvp.Key, out var mapping))
+                        {
+                            var (row, optionType) = mapping;
+                            if (optionType == "CE")
+                            {
+                                row.CELast = kvp.Value.ToString("F2");
+                                row.CEPrice = kvp.Value;
+                            }
+                            else
+                            {
+                                row.PELast = kvp.Value.ToString("F2");
+                                row.PEPrice = kvp.Value;
+                            }
+                            needsRefresh = true;
+                        }
+                    }
+                    _pendingPriceUpdates.Clear();
+
+                    // Process Status Updates
+                    foreach (var kvp in _pendingStatusUpdates)
+                    {
+                        if (_symbolToRowMap.TryGetValue(kvp.Key, out var mapping))
+                        {
+                            var (row, optionType) = mapping;
+                            if (optionType == "CE") row.CEStatus = kvp.Value;
+                            else row.PEStatus = kvp.Value;
+                            needsRefresh = true;
+                        }
+                    }
+                    _pendingStatusUpdates.Clear();
+
+                    // Process Straddle Updates
+                    foreach (var kvp in _pendingStraddleUpdates)
+                    {
+                        if (_straddleSymbolToRowMap.TryGetValue(kvp.Key, out var row))
+                        {
+                            row.SyntheticStraddlePrice = kvp.Value.price;
+                            UpdateATMStrike(); // Recalculate ATM on straddle change
+                            needsRefresh = true;
+                        }
+                    }
+                    _pendingStraddleUpdates.Clear();
+                }
+
+                if (needsRefresh)
+                {
+                    // _listView.Items.Refresh(); // REMOVED: INotifyPropertyChanged handles this efficiently now
+                    UpdateATMStrike(); // Ensure ATM/Histograms are updated (which will also raise PropertyChanged)
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[OptionChainTabPage] UI Timer Error: {ex.Message}");
+            }
+        }
+
         private void OnOptionPriceUpdated(string symbol, double price)
         {
-            Dispatcher.InvokeAsync(() =>
+            // DEBUG: Log first few price updates to confirm event is firing
+            if (symbol.Contains("85500") && DateTime.Now.Second % 5 == 0)
             {
-                try
-                {
-                    if (_symbolToRowMap.TryGetValue(symbol, out var mapping))
-                    {
-                        var (row, optionType) = mapping;
+                Logger.Debug($"[OptionChainTabPage] OnOptionPriceUpdated RECEIVED: {symbol} = {price}");
+            }
 
-                        if (optionType == "CE")
-                        {
-                            row.CELast = price.ToString("F2");
-                            row.CEPrice = price;
-                        }
-                        else
-                        {
-                            row.PELast = price.ToString("F2");
-                            row.PEPrice = price;
-                        }
-
-                        Logger.Debug($"[OptionChainTabPage] OnOptionPriceUpdated: {symbol} -> Strike {row.Strike} {optionType} = {price:F2}");
-
-                        UpdateATMStrike();
-                        _listView.Items.Refresh();
-                    }
-                    else
-                    {
-                        Logger.Warn($"[OptionChainTabPage] OnOptionPriceUpdated: No mapping found for symbol '{symbol}'");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[OptionChainTabPage] OnOptionPriceUpdated: Exception - {ex.Message}", ex);
-                }
-            });
+            lock (_throttleLock)
+            {
+                _pendingPriceUpdates[symbol] = price;
+            }
         }
 
         private void OnOptionStatusUpdated(string symbol, string status)
         {
-            Dispatcher.InvokeAsync(() =>
+            lock (_throttleLock)
             {
-                try
-                {
-                    if (_symbolToRowMap.TryGetValue(symbol, out var mapping))
-                    {
-                        var (row, optionType) = mapping;
-
-                        if (optionType == "CE")
-                        {
-                            row.CEStatus = status;
-                        }
-                        else
-                        {
-                            row.PEStatus = status;
-                        }
-
-                        Logger.Debug($"[OptionChainTabPage] OnOptionStatusUpdated: {symbol} -> Strike {row.Strike} {optionType} = {status}");
-                        _listView.Items.Refresh();
-                    }
-                    else
-                    {
-                        Logger.Warn($"[OptionChainTabPage] OnOptionStatusUpdated: No mapping found for symbol '{symbol}'");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[OptionChainTabPage] OnOptionStatusUpdated: Exception - {ex.Message}", ex);
-                }
-            });
+                _pendingStatusUpdates[symbol] = status;
+            }
         }
 
         /// <summary>
         /// Handles synthetic straddle price updates from SyntheticStraddleService
         /// </summary>
+        /// <summary>
+        /// Handles synthetic straddle price updates from SyntheticStraddleService
+        /// </summary>
         private void OnStraddlePriceCalculated(string straddleSymbol, double price, double cePrice, double pePrice)
         {
-            Dispatcher.InvokeAsync(() =>
+            lock (_throttleLock)
             {
-                try
-                {
-                    if (_straddleSymbolToRowMap.TryGetValue(straddleSymbol, out var row))
-                    {
-                        row.SyntheticStraddlePrice = price;
-                        Logger.Debug($"[OptionChainTabPage] OnStraddlePriceCalculated: {straddleSymbol} -> Strike {row.Strike} = {price:F2} (CE={cePrice:F2}, PE={pePrice:F2})");
-
-                        UpdateATMStrike();
-                        _listView.Items.Refresh();
-                    }
-                    else
-                    {
-                        // Try to find by parsing the strike from the symbol (e.g., NIFTY25DEC24000_STRDL -> 24000)
-                        Logger.Debug($"[OptionChainTabPage] OnStraddlePriceCalculated: No direct mapping for '{straddleSymbol}', attempting strike extraction");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[OptionChainTabPage] OnStraddlePriceCalculated: Exception - {ex.Message}", ex);
-                }
-            });
+                _pendingStraddleUpdates[straddleSymbol] = (price, cePrice, pePrice);
+            }
         }
 
         private void UpdateATMStrike()
