@@ -43,6 +43,11 @@ namespace QANinjaAdapter.Services.Analysis
         private const int HISTORICAL_BATCH_SIZE = 10;
         private const int HISTORICAL_BATCH_DELAY_MS = 4000; // 4 seconds between batches
 
+        // Optimized batch size for BarsRequest when data is already cached locally
+        // Since no API calls needed, we can process much faster
+        private const int CACHED_BATCH_SIZE = 25;
+        private const int CACHED_BATCH_DELAY_MS = 500; // 500ms between batches for cached data
+
         // Event for UI updates
         public event Action<string, double> OptionPriceUpdated;
 
@@ -437,6 +442,7 @@ namespace QANinjaAdapter.Services.Analysis
         /// <summary>
         /// Triggers BarsRequest for all processed instruments to push data into NinjaTrader's database.
         /// Called after all historical data has been fetched and cached.
+        /// OPTIMIZED: Uses larger batch size (25) and shorter delays (500ms) when data is cached locally.
         /// </summary>
         private async Task TriggerBarsRequestForAllInstruments()
         {
@@ -448,49 +454,125 @@ namespace QANinjaAdapter.Services.Analysis
             int batchCount = 0;
             int totalRequested = 0;
 
-            // Process CE/PE instruments in batches
+            // Separate CE/PE instruments into cached and non-cached for optimized batching
             var cepeInstruments = _processedInstruments.ToList();
-            for (int i = 0; i < cepeInstruments.Count; i += HISTORICAL_BATCH_SIZE)
+            var cachedCEPE = new List<(string ntSymbol, Instrument ntInstrument)>();
+            var nonCachedCEPE = new List<(string ntSymbol, Instrument ntInstrument)>();
+
+            foreach (var (ntSymbol, ntInstrument) in cepeInstruments)
             {
-                var batch = cepeInstruments.Skip(i).Take(HISTORICAL_BATCH_SIZE).ToList();
-                batchCount++;
+                if (HistoricalBarCache.Instance.HasCachedData(ntSymbol, "minute", fromDate, toDate))
+                    cachedCEPE.Add((ntSymbol, ntInstrument));
+                else
+                    nonCachedCEPE.Add((ntSymbol, ntInstrument));
+            }
 
-                Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Processing CE/PE batch {batchCount} with {batch.Count} instruments");
+            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: CE/PE split - {cachedCEPE.Count} cached, {nonCachedCEPE.Count} non-cached");
 
-                foreach (var (ntSymbol, ntInstrument) in batch)
+            // Process CACHED CE/PE instruments with larger batch size and shorter delay
+            if (cachedCEPE.Count > 0)
+            {
+                Logger.Info($"[SubscriptionManager] Processing {cachedCEPE.Count} CACHED CE/PE instruments (batch size={CACHED_BATCH_SIZE}, delay={CACHED_BATCH_DELAY_MS}ms)");
+                for (int i = 0; i < cachedCEPE.Count; i += CACHED_BATCH_SIZE)
                 {
-                    await RequestBarsForInstrument(ntSymbol, ntInstrument, fromDate, toDate);
-                    totalRequested++;
-                }
+                    var batch = cachedCEPE.Skip(i).Take(CACHED_BATCH_SIZE).ToList();
+                    batchCount++;
 
-                // Delay between batches to avoid overwhelming NinjaTrader
-                if (i + HISTORICAL_BATCH_SIZE < cepeInstruments.Count)
-                {
-                    await Task.Delay(1000); // 1 second between batches for NT
+                    Logger.Info($"[SubscriptionManager] Processing CACHED CE/PE batch {batchCount} with {batch.Count} instruments");
+
+                    foreach (var (ntSymbol, ntInstrument) in batch)
+                    {
+                        await RequestBarsForInstrument(ntSymbol, ntInstrument, fromDate, toDate);
+                        totalRequested++;
+                    }
+
+                    // Short delay between cached batches
+                    if (i + CACHED_BATCH_SIZE < cachedCEPE.Count)
+                    {
+                        await Task.Delay(CACHED_BATCH_DELAY_MS);
+                    }
                 }
             }
 
-            // Process STRDL instruments
-            var straddleSymbols = _processedStraddleSymbols.Distinct().ToList();
-            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Processing {straddleSymbols.Count} STRDL instruments");
-
-            for (int i = 0; i < straddleSymbols.Count; i += HISTORICAL_BATCH_SIZE)
+            // Process NON-CACHED CE/PE instruments with standard batch size
+            if (nonCachedCEPE.Count > 0)
             {
-                var batch = straddleSymbols.Skip(i).Take(HISTORICAL_BATCH_SIZE).ToList();
-                batchCount++;
-
-                Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Processing STRDL batch {batchCount} with {batch.Count} instruments");
-
-                foreach (var straddleSymbol in batch)
+                Logger.Info($"[SubscriptionManager] Processing {nonCachedCEPE.Count} NON-CACHED CE/PE instruments (batch size={HISTORICAL_BATCH_SIZE}, delay=1000ms)");
+                for (int i = 0; i < nonCachedCEPE.Count; i += HISTORICAL_BATCH_SIZE)
                 {
-                    await RequestBarsForStraddleSymbol(straddleSymbol, fromDate, toDate);
-                    totalRequested++;
+                    var batch = nonCachedCEPE.Skip(i).Take(HISTORICAL_BATCH_SIZE).ToList();
+                    batchCount++;
+
+                    Logger.Info($"[SubscriptionManager] Processing NON-CACHED CE/PE batch {batchCount} with {batch.Count} instruments");
+
+                    foreach (var (ntSymbol, ntInstrument) in batch)
+                    {
+                        await RequestBarsForInstrument(ntSymbol, ntInstrument, fromDate, toDate);
+                        totalRequested++;
+                    }
+
+                    // Standard delay between non-cached batches
+                    if (i + HISTORICAL_BATCH_SIZE < nonCachedCEPE.Count)
+                    {
+                        await Task.Delay(1000);
+                    }
                 }
+            }
 
-                // Delay between batches
-                if (i + HISTORICAL_BATCH_SIZE < straddleSymbols.Count)
+            // Process STRDL instruments - separate cached vs non-cached
+            var straddleSymbols = _processedStraddleSymbols.Distinct().ToList();
+            var cachedStraddles = straddleSymbols.Where(s => StraddleBarCache.Instance.HasCachedData(s)).ToList();
+            var nonCachedStraddles = straddleSymbols.Where(s => !StraddleBarCache.Instance.HasCachedData(s)).ToList();
+
+            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: STRDL split - {cachedStraddles.Count} cached, {nonCachedStraddles.Count} non-cached");
+
+            // Process CACHED STRDL instruments with larger batch size
+            if (cachedStraddles.Count > 0)
+            {
+                Logger.Info($"[SubscriptionManager] Processing {cachedStraddles.Count} CACHED STRDL instruments (batch size={CACHED_BATCH_SIZE}, delay={CACHED_BATCH_DELAY_MS}ms)");
+                for (int i = 0; i < cachedStraddles.Count; i += CACHED_BATCH_SIZE)
                 {
-                    await Task.Delay(1000);
+                    var batch = cachedStraddles.Skip(i).Take(CACHED_BATCH_SIZE).ToList();
+                    batchCount++;
+
+                    Logger.Info($"[SubscriptionManager] Processing CACHED STRDL batch {batchCount} with {batch.Count} instruments");
+
+                    foreach (var straddleSymbol in batch)
+                    {
+                        await RequestBarsForStraddleSymbol(straddleSymbol, fromDate, toDate);
+                        totalRequested++;
+                    }
+
+                    // Short delay between cached batches
+                    if (i + CACHED_BATCH_SIZE < cachedStraddles.Count)
+                    {
+                        await Task.Delay(CACHED_BATCH_DELAY_MS);
+                    }
+                }
+            }
+
+            // Process NON-CACHED STRDL instruments with standard batch size
+            if (nonCachedStraddles.Count > 0)
+            {
+                Logger.Info($"[SubscriptionManager] Processing {nonCachedStraddles.Count} NON-CACHED STRDL instruments (batch size={HISTORICAL_BATCH_SIZE}, delay=1000ms)");
+                for (int i = 0; i < nonCachedStraddles.Count; i += HISTORICAL_BATCH_SIZE)
+                {
+                    var batch = nonCachedStraddles.Skip(i).Take(HISTORICAL_BATCH_SIZE).ToList();
+                    batchCount++;
+
+                    Logger.Info($"[SubscriptionManager] Processing NON-CACHED STRDL batch {batchCount} with {batch.Count} instruments");
+
+                    foreach (var straddleSymbol in batch)
+                    {
+                        await RequestBarsForStraddleSymbol(straddleSymbol, fromDate, toDate);
+                        totalRequested++;
+                    }
+
+                    // Standard delay between non-cached batches
+                    if (i + HISTORICAL_BATCH_SIZE < nonCachedStraddles.Count)
+                    {
+                        await Task.Delay(1000);
+                    }
                 }
             }
 
@@ -498,19 +580,38 @@ namespace QANinjaAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Requests bars for a CE/PE instrument to save to NinjaTrader database
+        /// Requests bars for a CE/PE instrument to save to NinjaTrader database.
+        /// Optimized: Checks if data is already cached - if so, uses smaller BarsRequest
+        /// which will load quickly from NinjaTrader's local database.
         /// </summary>
         private async Task RequestBarsForInstrument(string ntSymbol, Instrument ntInstrument, DateTime fromDate, DateTime toDate)
         {
             try
             {
+                // Check if we have cached data - if so, NinjaTrader likely has it too
+                bool hasCachedData = HistoricalBarCache.Instance.HasCachedData(ntSymbol, "minute", fromDate, toDate);
+
+                // If cached, use smaller barsBack (just to trigger NT to load from its local DB)
+                // If not cached, use full 1500 bars to fetch from provider
+                int barsBack = hasCachedData ? 100 : 1500;
+
+                if (hasCachedData)
+                {
+                    Logger.Info($"[SubscriptionManager] RequestBarsForInstrument({ntSymbol}): Cache HIT - using optimized BarsRequest with {barsBack} bars");
+                }
+                else
+                {
+                    Logger.Info($"[SubscriptionManager] RequestBarsForInstrument({ntSymbol}): Cache MISS - using full BarsRequest with {barsBack} bars");
+                }
+
                 await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
                 {
                     try
                     {
                         // BarsRequest constructor: (Instrument, int barsBack)
-                        // Use a reasonable number of bars to cover 3 days of 1-minute data (~375 bars/day * 3 = ~1125)
-                        var barsRequest = new BarsRequest(ntInstrument, 1500);
+                        // If cached: small request that loads quickly from NT's local database
+                        // If not cached: full request to cover 3 days of 1-minute data (~375 bars/day * 3 = ~1125)
+                        var barsRequest = new BarsRequest(ntInstrument, barsBack);
                         barsRequest.BarsPeriod = new BarsPeriod
                         {
                             BarsPeriodType = BarsPeriodType.Minute,
@@ -521,23 +622,27 @@ namespace QANinjaAdapter.Services.Analysis
 
                         string symbolForClosure = ntSymbol; // Capture for closure
                         _activeBarsRequests.TryAdd(ntSymbol, barsRequest);
+                        Instrument instrumentForClosure = ntInstrument; // Capture for closure
                         barsRequest.Request((request, errorCode, errorMessage) =>
                         {
                             int barCount = request.Bars?.Count ?? 0;
                             if (errorCode == ErrorCode.NoError)
                             {
                                 Logger.Info($"[SubscriptionManager] BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
-                                
+
                                 // LOG SUBSCRIPTION STATE
                                 var refDetails = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
                                 Logger.Info($"[SubscriptionManager] PRE-DONE STATUS: {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
 
                                 // Update UI status to "Done" now that data is in NinjaTrader database
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
-                                
+
                                 // LOG SUBSCRIPTION STATE AGAIN
                                 var refDetailsAfter = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
                                 Logger.Info($"[SubscriptionManager] POST-DONE STATUS: {symbolForClosure} - RefCount={refDetailsAfter.Count}, Sticky={refDetailsAfter.IsSticky}, Consumers={string.Join(",", refDetailsAfter.Consumers)}");
+
+                                // Start VWAP calculation for this instrument using hidden BarsRequest
+                                _ = VWAPCalculatorService.Instance.StartVWAPCalculation(symbolForClosure, instrumentForClosure);
                             }
                             else
                             {
@@ -545,12 +650,11 @@ namespace QANinjaAdapter.Services.Analysis
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
                             }
 
-                            // Clean up
-                            if (_activeBarsRequests.TryRemove(symbolForClosure, out var req))
-                            {
-                                req.Update -= OnBarsRequestUpdate;
-                                req.Dispose();
-                            }
+                            // IMPORTANT: Do NOT dispose BarsRequest - keep it alive for real-time tick storage
+                            // When BarsRequest is active with Update handler, NinjaTrader writes incoming ticks to its database.
+                            // Disposing it stops real-time tick storage (only historical bars would be saved).
+                            // We keep the BarsRequest in _activeBarsRequests to maintain the live subscription.
+                            Logger.Info($"[SubscriptionManager] BarsRequest for {symbolForClosure} completed - keeping alive for real-time tick storage");
                         });
 
                         Logger.Debug($"[SubscriptionManager] BarsRequest sent for {ntSymbol}");
@@ -568,12 +672,28 @@ namespace QANinjaAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Requests bars for a STRDL synthetic instrument to save to NinjaTrader database
+        /// Requests bars for a STRDL synthetic instrument to save to NinjaTrader database.
+        /// Optimized: For STRDL instruments, we check StraddleBarCache to see if data is ready.
         /// </summary>
         private async Task RequestBarsForStraddleSymbol(string straddleSymbol, DateTime fromDate, DateTime toDate)
         {
             try
             {
+                // Check if straddle bars are already computed and cached
+                bool hasStraddleData = StraddleBarCache.Instance.HasCachedData(straddleSymbol);
+
+                // If straddle data is cached, NinjaTrader likely has it too - use smaller request
+                int barsBack = hasStraddleData ? 100 : 1500;
+
+                if (hasStraddleData)
+                {
+                    Logger.Info($"[SubscriptionManager] RequestBarsForStraddleSymbol({straddleSymbol}): Cache HIT - using optimized BarsRequest with {barsBack} bars");
+                }
+                else
+                {
+                    Logger.Info($"[SubscriptionManager] RequestBarsForStraddleSymbol({straddleSymbol}): Cache MISS - using full BarsRequest with {barsBack} bars");
+                }
+
                 await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
                 {
                     try
@@ -587,7 +707,9 @@ namespace QANinjaAdapter.Services.Analysis
                         }
 
                         // BarsRequest constructor: (Instrument, int barsBack)
-                        var barsRequest = new BarsRequest(ntInstrument, 1500);
+                        // If cached: small request that loads quickly from NT's local database
+                        // If not cached: full request to fetch all data
+                        var barsRequest = new BarsRequest(ntInstrument, barsBack);
                         barsRequest.BarsPeriod = new BarsPeriod
                         {
                             BarsPeriodType = BarsPeriodType.Minute,
@@ -597,6 +719,7 @@ namespace QANinjaAdapter.Services.Analysis
                         barsRequest.Update += OnBarsRequestUpdate;
 
                         string symbolForClosure = straddleSymbol; // Capture for closure
+                        Instrument instrumentForClosure = ntInstrument; // Capture for closure
                         _activeBarsRequests.TryAdd(straddleSymbol, barsRequest);
                         barsRequest.Request((request, errorCode, errorMessage) =>
                         {
@@ -604,7 +727,7 @@ namespace QANinjaAdapter.Services.Analysis
                             if (errorCode == ErrorCode.NoError)
                             {
                                 Logger.Info($"[SubscriptionManager] STRDL BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
-                                
+
                                 // LOG SUBSCRIPTION STATE
                                 var refDetails = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
                                 Logger.Info($"[SubscriptionManager] PRE-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
@@ -615,6 +738,9 @@ namespace QANinjaAdapter.Services.Analysis
                                 // LOG SUBSCRIPTION STATE AGAIN
                                 var refDetailsAfter = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
                                 Logger.Info($"[SubscriptionManager] POST-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetailsAfter.Count}, Sticky={refDetailsAfter.IsSticky}, Consumers={string.Join(",", refDetailsAfter.Consumers)}");
+
+                                // Start VWAP calculation for this STRDL instrument using hidden BarsRequest
+                                _ = VWAPCalculatorService.Instance.StartVWAPCalculation(symbolForClosure, instrumentForClosure);
                             }
                             else
                             {
@@ -622,12 +748,11 @@ namespace QANinjaAdapter.Services.Analysis
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
                             }
 
-                            // Clean up
-                            if (_activeBarsRequests.TryRemove(symbolForClosure, out var req))
-                            {
-                                req.Update -= OnBarsRequestUpdate;
-                                req.Dispose();
-                            }
+                            // IMPORTANT: Do NOT dispose BarsRequest - keep it alive for real-time tick storage
+                            // When BarsRequest is active with Update handler, NinjaTrader writes incoming ticks to its database.
+                            // Disposing it stops real-time tick storage (only historical bars would be saved).
+                            // We keep the BarsRequest in _activeBarsRequests to maintain the live subscription.
+                            Logger.Info($"[SubscriptionManager] STRDL BarsRequest for {symbolForClosure} completed - keeping alive for real-time tick storage");
                         });
 
                         Logger.Debug($"[SubscriptionManager] STRDL BarsRequest sent for {straddleSymbol}");

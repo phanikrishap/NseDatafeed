@@ -21,18 +21,18 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
     /// <summary>
     /// Converts a percentage (0-100) to a pixel width based on max width parameter
     /// </summary>
-    public class PercentageToWidthConverter : IMultiValueConverter
+    public class PercentageToWidthConverter : IValueConverter
     {
-        public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture)
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            if (values == null || values.Length < 1 || values[0] == DependencyProperty.UnsetValue)
+            if (value == null || value == DependencyProperty.UnsetValue)
                 return 0.0;
 
             double percentage = 0;
-            if (values[0] is double d)
+            if (value is double d)
                 percentage = d;
 
-            double maxWidth = 96; // Default
+            double maxWidth = 96; // Default histogram bar max width
             if (parameter is double mw)
                 maxWidth = mw;
             else if (parameter is string s && double.TryParse(s, out double parsed))
@@ -44,7 +44,32 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             return (percentage / 100.0) * maxWidth;
         }
 
-        public object[] ConvertBack(object value, Type[] targetTypes, object parameter, CultureInfo culture)
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
+    /// <summary>
+    /// Converts VWAP comparison value to color: Green if price > VWAP, Red if price < VWAP, Yellow if equal or no data
+    /// </summary>
+    public class VWAPComparisonToColorConverter : IValueConverter
+    {
+        private static readonly SolidColorBrush GreenBrush = new SolidColorBrush(Color.FromRgb(100, 200, 100));  // Price above VWAP
+        private static readonly SolidColorBrush RedBrush = new SolidColorBrush(Color.FromRgb(220, 80, 80));      // Price below VWAP
+        private static readonly SolidColorBrush YellowBrush = new SolidColorBrush(Color.FromRgb(255, 220, 100)); // No data or equal
+
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is int comparison)
+            {
+                if (comparison > 0) return GreenBrush;  // Price above VWAP
+                if (comparison < 0) return RedBrush;    // Price below VWAP
+            }
+            return YellowBrush; // No data or equal
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
             throw new NotImplementedException();
         }
@@ -73,7 +98,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         public string CEStatus { get => _ceStatus; set { if (_ceStatus != value) { _ceStatus = value; OnPropertyChanged(nameof(CEStatus)); } } }
 
         private double _cePrice;
-        public double CEPrice { get => _cePrice; set { if (_cePrice != value) { _cePrice = value; OnPropertyChanged(nameof(CEPrice)); NotifyStraddleChanged(); } } }
+        public double CEPrice { get => _cePrice; set { if (_cePrice != value) { _cePrice = value; OnPropertyChanged(nameof(CEPrice)); OnPropertyChanged(nameof(CEVWAPComparison)); NotifyStraddleChanged(); } } }
 
         public string CESymbol { get; set; }
 
@@ -85,7 +110,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         public string PEStatus { get => _peStatus; set { if (_peStatus != value) { _peStatus = value; OnPropertyChanged(nameof(PEStatus)); } } }
 
         private double _pePrice;
-        public double PEPrice { get => _pePrice; set { if (_pePrice != value) { _pePrice = value; OnPropertyChanged(nameof(PEPrice)); NotifyStraddleChanged(); } } }
+        public double PEPrice { get => _pePrice; set { if (_pePrice != value) { _pePrice = value; OnPropertyChanged(nameof(PEPrice)); OnPropertyChanged(nameof(PEVWAPComparison)); NotifyStraddleChanged(); } } }
 
         public string PESymbol { get; set; }
 
@@ -98,7 +123,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
         // Synthetic Straddle price from SyntheticStraddleService (live calculated)
         private double _syntheticStraddlePrice;
-        public double SyntheticStraddlePrice { get => _syntheticStraddlePrice; set { if (_syntheticStraddlePrice != value) { _syntheticStraddlePrice = value; OnPropertyChanged(nameof(SyntheticStraddlePrice)); NotifyStraddleChanged(); } } }
+        public double SyntheticStraddlePrice { get => _syntheticStraddlePrice; set { if (_syntheticStraddlePrice != value) { _syntheticStraddlePrice = value; OnPropertyChanged(nameof(SyntheticStraddlePrice)); OnPropertyChanged(nameof(StraddleVWAPComparison)); NotifyStraddleChanged(); } } }
 
         private void NotifyStraddleChanged()
         {
@@ -129,6 +154,89 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
         private double _peHistogramWidth;
         public double PEHistogramWidth { get => _peHistogramWidth; set { if (_peHistogramWidth != value) { _peHistogramWidth = value; OnPropertyChanged(nameof(PEHistogramWidth)); } } }
+
+        // VWAP data for CE
+        private double _ceVWAP;
+        public double CEVWAP
+        {
+            get => _ceVWAP;
+            set
+            {
+                if (_ceVWAP != value)
+                {
+                    _ceVWAP = value;
+                    OnPropertyChanged(nameof(CEVWAP));
+                    OnPropertyChanged(nameof(CEVWAPDisplay));
+                    OnPropertyChanged(nameof(CEVWAPComparison));
+                }
+            }
+        }
+        public string CEVWAPDisplay => _ceVWAP > 0 ? _ceVWAP.ToString("F2") : "---";
+        // Returns: 1 if price > VWAP, -1 if price < VWAP, 0 if no data
+        public int CEVWAPComparison => (_ceVWAP > 0 && _cePrice > 0) ? (_cePrice > _ceVWAP ? 1 : (_cePrice < _ceVWAP ? -1 : 0)) : 0;
+
+        private int _ceVWAPPosition;  // -2, -1, 0, +1, +2 relative to VWAP bands
+        public int CEVWAPPosition { get => _ceVWAPPosition; set { if (_ceVWAPPosition != value) { _ceVWAPPosition = value; OnPropertyChanged(nameof(CEVWAPPosition)); OnPropertyChanged(nameof(CEVWAPPositionDisplay)); } } }
+        public string CEVWAPPositionDisplay => GetVWAPPositionText(_ceVWAPPosition, _cePrice, _ceVWAP);
+
+        // VWAP data for PE
+        private double _peVWAP;
+        public double PEVWAP
+        {
+            get => _peVWAP;
+            set
+            {
+                if (_peVWAP != value)
+                {
+                    _peVWAP = value;
+                    OnPropertyChanged(nameof(PEVWAP));
+                    OnPropertyChanged(nameof(PEVWAPDisplay));
+                    OnPropertyChanged(nameof(PEVWAPComparison));
+                }
+            }
+        }
+        public string PEVWAPDisplay => _peVWAP > 0 ? _peVWAP.ToString("F2") : "---";
+        // Returns: 1 if price > VWAP, -1 if price < VWAP, 0 if no data
+        public int PEVWAPComparison => (_peVWAP > 0 && _pePrice > 0) ? (_pePrice > _peVWAP ? 1 : (_pePrice < _peVWAP ? -1 : 0)) : 0;
+
+        private int _peVWAPPosition;
+        public int PEVWAPPosition { get => _peVWAPPosition; set { if (_peVWAPPosition != value) { _peVWAPPosition = value; OnPropertyChanged(nameof(PEVWAPPosition)); OnPropertyChanged(nameof(PEVWAPPositionDisplay)); } } }
+        public string PEVWAPPositionDisplay => GetVWAPPositionText(_peVWAPPosition, _pePrice, _peVWAP);
+
+        // VWAP data for Straddle (synthetic instrument)
+        private double _straddleVWAP;
+        public double StraddleVWAP
+        {
+            get => _straddleVWAP;
+            set
+            {
+                if (_straddleVWAP != value)
+                {
+                    _straddleVWAP = value;
+                    OnPropertyChanged(nameof(StraddleVWAP));
+                    OnPropertyChanged(nameof(StraddleVWAPDisplay));
+                    OnPropertyChanged(nameof(StraddleVWAPComparison));
+                }
+            }
+        }
+        public string StraddleVWAPDisplay => _straddleVWAP > 0 ? _straddleVWAP.ToString("F2") : "---";
+        // Returns: 1 if straddle price > VWAP, -1 if price < VWAP, 0 if no data
+        public int StraddleVWAPComparison => (_straddleVWAP > 0 && StraddleValue < double.MaxValue) ? (StraddleValue > _straddleVWAP ? 1 : (StraddleValue < _straddleVWAP ? -1 : 0)) : 0;
+
+        private static string GetVWAPPositionText(int position, double price, double vwap)
+        {
+            if (vwap <= 0 || price <= 0) return "---";
+            double pct = ((price - vwap) / vwap) * 100;
+            string sign = pct >= 0 ? "+" : "";
+            switch (position)
+            {
+                case 2: return $"{sign}{pct:F1}% (>+2SD)";
+                case 1: return $"{sign}{pct:F1}% (+1SD)";
+                case -1: return $"{sign}{pct:F1}% (-1SD)";
+                case -2: return $"{sign}{pct:F1}% (<-2SD)";
+                default: return $"{sign}{pct:F1}%";
+            }
+        }
     }
 
     /// <summary>
@@ -421,9 +529,29 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 ItemsSource = _rows
             };
 
+            // Override system selection highlight colors
+            listView.Resources.Add(SystemColors.HighlightBrushKey, new SolidColorBrush(Color.FromRgb(60, 60, 65)));
+            listView.Resources.Add(SystemColors.HighlightTextBrushKey, new SolidColorBrush(Color.FromRgb(255, 255, 255)));
+            listView.Resources.Add(SystemColors.InactiveSelectionHighlightBrushKey, new SolidColorBrush(Color.FromRgb(50, 50, 55)));
+            listView.Resources.Add(SystemColors.InactiveSelectionHighlightTextBrushKey, new SolidColorBrush(Color.FromRgb(220, 220, 220)));
+
+            // Style the "filler" column header (the empty space after last column) to match background
+            var fillerHeaderStyle = new Style(typeof(GridViewColumnHeader));
+            fillerHeaderStyle.Setters.Add(new Setter(GridViewColumnHeader.BackgroundProperty, _headerBg));
+            fillerHeaderStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderBrushProperty, null));
+            fillerHeaderStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderThicknessProperty, new Thickness(0)));
+            // Create minimal template for filler
+            var fillerTemplate = new ControlTemplate(typeof(GridViewColumnHeader));
+            var fillerBorder = new FrameworkElementFactory(typeof(Border));
+            fillerBorder.SetValue(Border.BackgroundProperty, _headerBg);
+            fillerBorder.SetValue(Border.BorderThicknessProperty, new Thickness(0));
+            fillerTemplate.VisualTree = fillerBorder;
+            fillerHeaderStyle.Setters.Add(new Setter(GridViewColumnHeader.TemplateProperty, fillerTemplate));
+            listView.Resources.Add(typeof(GridViewColumnHeader), fillerHeaderStyle);
+
             _gridView = new GridView { AllowsColumnReorder = false };
 
-            // Apply dark header style
+            // Apply dark header style with custom template to remove phantom colors
             var headerStyle = new Style(typeof(GridViewColumnHeader));
             headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BackgroundProperty, _headerBg));
             headerStyle.Setters.Add(new Setter(GridViewColumnHeader.ForegroundProperty, _fgColor));
@@ -434,11 +562,27 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderThicknessProperty, new Thickness(0)));
             headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderBrushProperty, null));
             headerStyle.Setters.Add(new Setter(GridViewColumnHeader.HorizontalContentAlignmentProperty, HorizontalAlignment.Center));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.MarginProperty, new Thickness(0)));
 
-            // CE Side columns (Left) - Time, Status, LTP (histogram from right to left)
-            _gridView.Columns.Add(CreateColumn("Time", "CEUpdateTime", 65, HorizontalAlignment.Center, headerStyle));
-            _gridView.Columns.Add(CreateColumn("Status", "CEStatus", 70, HorizontalAlignment.Center, headerStyle));
-            _gridView.Columns.Add(CreateHistogramColumn("LTP", "CELast", "CEHistogramWidth", 100, true, headerStyle));
+            // Create a custom ControlTemplate to eliminate any default chrome/styling
+            var headerTemplate = new ControlTemplate(typeof(GridViewColumnHeader));
+            var headerBorder = new FrameworkElementFactory(typeof(Border));
+            headerBorder.SetValue(Border.BackgroundProperty, _headerBg);
+            headerBorder.SetValue(Border.BorderThicknessProperty, new Thickness(0, 0, 1, 1));
+            headerBorder.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(50, 50, 52)));
+            headerBorder.SetValue(Border.PaddingProperty, new Thickness(5, 4, 5, 4));
+            var headerContent = new FrameworkElementFactory(typeof(ContentPresenter));
+            headerContent.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            headerContent.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+            headerBorder.AppendChild(headerContent);
+            headerTemplate.VisualTree = headerBorder;
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.TemplateProperty, headerTemplate));
+
+            // CE Side columns (Left) - Time, Status, VWAP, LTP (histogram grows right toward strike)
+            _gridView.Columns.Add(CreateColumn("Time", "CEUpdateTime", 60, HorizontalAlignment.Center, headerStyle));
+            _gridView.Columns.Add(CreateColumn("Status", "CEStatus", 90, HorizontalAlignment.Center, headerStyle));  // Increased to 90 for "Cached (1125)"
+            _gridView.Columns.Add(CreateVWAPColumn("VWAP", "CEVWAPDisplay", "CEVWAPComparison", 55, true, headerStyle));  // Green/Red based on price vs VWAP
+            _gridView.Columns.Add(CreateHistogramColumn("LTP", "CELast", "CEHistogramWidth", 90, true, headerStyle));
 
             // Strike column (Center) - highlighted
             var strikeColumn = new GridViewColumn
@@ -461,32 +605,37 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             strikeColumn.CellTemplate = strikeTemplate;
             _gridView.Columns.Add(strikeColumn);
 
-            // PE Side columns (Right) - LTP (histogram left to right), Status, Time
-            _gridView.Columns.Add(CreateHistogramColumn("LTP", "PELast", "PEHistogramWidth", 100, false, headerStyle));
-            _gridView.Columns.Add(CreateColumn("Status", "PEStatus", 70, HorizontalAlignment.Center, headerStyle));
-            _gridView.Columns.Add(CreateColumn("Time", "PEUpdateTime", 65, HorizontalAlignment.Center, headerStyle));
+            // PE Side columns (Right) - LTP (histogram grows left toward strike), VWAP, Status, Time
+            _gridView.Columns.Add(CreateHistogramColumn("LTP", "PELast", "PEHistogramWidth", 90, false, headerStyle));
+            _gridView.Columns.Add(CreateVWAPColumn("VWAP", "PEVWAPDisplay", "PEVWAPComparison", 55, false, headerStyle));  // Green/Red based on price vs VWAP
+            _gridView.Columns.Add(CreateColumn("Status", "PEStatus", 90, HorizontalAlignment.Center, headerStyle));  // Increased to 90 for "Cached (1125)"
+            _gridView.Columns.Add(CreateColumn("Time", "PEUpdateTime", 60, HorizontalAlignment.Center, headerStyle));
 
-            // Straddle column
+            // Straddle column - white bold text
             var straddleColumn = new GridViewColumn
             {
                 Header = "Straddle",
-                Width = 85
+                Width = 75
             };
             straddleColumn.HeaderContainerStyle = headerStyle;
             var straddleTemplate = new DataTemplate();
             var straddleFactory = new FrameworkElementFactory(typeof(TextBlock));
             straddleFactory.SetBinding(TextBlock.TextProperty, new Binding("StraddlePrice"));
             straddleFactory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            straddleFactory.SetValue(TextBlock.PaddingProperty, new Thickness(0, 0, 5, 0));
-            straddleFactory.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
-            straddleFactory.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromRgb(255, 200, 100)));
+            straddleFactory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            straddleFactory.SetValue(TextBlock.PaddingProperty, new Thickness(2, 2, 2, 2));
+            straddleFactory.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold);
+            straddleFactory.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromRgb(255, 255, 255))); // White text
             straddleTemplate.VisualTree = straddleFactory;
             straddleColumn.CellTemplate = straddleTemplate;
             _gridView.Columns.Add(straddleColumn);
 
+            // Straddle VWAP column - Green/Red based on straddle price vs VWAP
+            _gridView.Columns.Add(CreateVWAPColumn("VWAP", "StraddleVWAPDisplay", "StraddleVWAPComparison", 60, false, headerStyle));
+
             listView.View = _gridView;
 
-            // Style for rows with ATM highlighting
+            // Style for rows with ATM highlighting and custom selection colors
             var style = new Style(typeof(ListViewItem));
             style.Setters.Add(new Setter(ListViewItem.BackgroundProperty, _bgColor));
             style.Setters.Add(new Setter(ListViewItem.ForegroundProperty, _fgColor));
@@ -494,12 +643,26 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             style.Setters.Add(new Setter(ListViewItem.BorderBrushProperty, null));
             style.Setters.Add(new Setter(ListViewItem.PaddingProperty, new Thickness(2)));
             style.Setters.Add(new Setter(ListViewItem.FontFamilyProperty, _ntFont));
+            style.Setters.Add(new Setter(ListViewItem.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch));
 
             // ATM row highlight trigger
             var atmTrigger = new DataTrigger { Binding = new Binding("IsATM"), Value = true };
             atmTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, _atmBg));
             atmTrigger.Setters.Add(new Setter(ListViewItem.FontWeightProperty, FontWeights.Bold));
             style.Triggers.Add(atmTrigger);
+
+            // Selection highlight - dark gray (triggers override default blue)
+            var selectedTrigger = new Trigger { Property = ListViewItem.IsSelectedProperty, Value = true };
+            selectedTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(60, 60, 65))));
+            selectedTrigger.Setters.Add(new Setter(ListViewItem.ForegroundProperty, new SolidColorBrush(Colors.White)));
+            selectedTrigger.Setters.Add(new Setter(ListViewItem.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(100, 100, 105))));
+            selectedTrigger.Setters.Add(new Setter(ListViewItem.BorderThicknessProperty, new Thickness(1)));
+            style.Triggers.Add(selectedTrigger);
+
+            // MouseOver highlight - subtle dark gray
+            var mouseOverTrigger = new Trigger { Property = ListViewItem.IsMouseOverProperty, Value = true };
+            mouseOverTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(50, 50, 55))));
+            style.Triggers.Add(mouseOverTrigger);
 
             listView.ItemContainerStyle = style;
 
@@ -520,19 +683,28 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 column.HeaderContainerStyle = headerStyle;
 
             var template = new DataTemplate();
+
+            // Wrap in a Grid to ensure proper centering within cell
+            var gridFactory = new FrameworkElementFactory(typeof(Grid));
+            gridFactory.SetValue(Grid.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
+
             var factory = new FrameworkElementFactory(typeof(TextBlock));
             factory.SetBinding(TextBlock.TextProperty, new Binding(binding));
             factory.SetValue(TextBlock.HorizontalAlignmentProperty, align);
-            factory.SetValue(TextBlock.PaddingProperty, new Thickness(5, 0, 5, 0));
-            template.VisualTree = factory;
+            factory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            factory.SetValue(TextBlock.TextAlignmentProperty, align == HorizontalAlignment.Center ? TextAlignment.Center : TextAlignment.Left);
+            factory.SetValue(TextBlock.PaddingProperty, new Thickness(3, 2, 3, 2));
+
+            gridFactory.AppendChild(factory);
+            template.VisualTree = gridFactory;
             column.CellTemplate = template;
             return column;
         }
 
         /// <summary>
         /// Creates a column with a histogram bar behind the price text
-        /// CE histogram: emanates from right edge toward left (toward strike column)
-        /// PE histogram: emanates from left edge toward right (away from strike column)
+        /// CE histogram: bar grows from RIGHT toward LEFT (anchored at right edge, grows toward strike column on right)
+        /// PE histogram: bar grows from LEFT toward RIGHT (anchored at left edge, grows toward strike column on left)
         /// </summary>
         private GridViewColumn CreateHistogramColumn(string header, string priceBinding, string widthBinding, double columnWidth, bool isCall, Style headerStyle = null)
         {
@@ -548,11 +720,12 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
             // Outer Grid to hold the histogram bar and text
             var gridFactory = new FrameworkElementFactory(typeof(Grid));
-            gridFactory.SetValue(Grid.HeightProperty, 20.0);
+            gridFactory.SetValue(Grid.HeightProperty, 22.0);
+            gridFactory.SetValue(Grid.VerticalAlignmentProperty, VerticalAlignment.Center);
 
             // Histogram bar (colored rectangle)
-            // CE: Right-aligned (bar grows from right edge toward left, emanating from strike)
-            // PE: Left-aligned (bar grows from left edge toward right, emanating from strike)
+            // CE LTP is left of Strike: bar should be anchored at RIGHT edge, growing LEFT toward the Strike column
+            // PE LTP is right of Strike: bar should be anchored at LEFT edge, growing RIGHT toward the Strike column
             var barFactory = new FrameworkElementFactory(typeof(Border));
             barFactory.SetValue(Border.BackgroundProperty, isCall ? _ceHistogramBrush : _peHistogramBrush);
             barFactory.SetValue(Border.HorizontalAlignmentProperty, isCall ? HorizontalAlignment.Right : HorizontalAlignment.Left);
@@ -561,13 +734,12 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             barFactory.SetValue(Border.MarginProperty, new Thickness(1));
 
             // Bind the width to percentage of column width
-            var widthMultiBinding = new MultiBinding
+            var widthBinding_ = new Binding(widthBinding)
             {
                 Converter = new PercentageToWidthConverter(),
-                ConverterParameter = columnWidth - 4 // Account for margins
+                ConverterParameter = (columnWidth - 4).ToString() // Account for margins, pass as string
             };
-            widthMultiBinding.Bindings.Add(new Binding(widthBinding));
-            barFactory.SetBinding(Border.WidthProperty, widthMultiBinding);
+            barFactory.SetBinding(Border.WidthProperty, widthBinding_);
 
             gridFactory.AppendChild(barFactory);
 
@@ -587,6 +759,55 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             return column;
         }
 
+        /// <summary>
+        /// Creates a VWAP column showing the VWAP value with conditional coloring based on price vs VWAP
+        /// Green if price > VWAP, Red if price < VWAP, Yellow if no data
+        /// </summary>
+        private GridViewColumn CreateVWAPColumn(string header, string vwapBinding, string comparisonBinding, double columnWidth, bool isCall, Style headerStyle = null)
+        {
+            var column = new GridViewColumn
+            {
+                Header = header,
+                Width = columnWidth
+            };
+            if (headerStyle != null)
+                column.HeaderContainerStyle = headerStyle;
+
+            var template = new DataTemplate();
+
+            // Wrap in a Grid to ensure proper centering within cell
+            var gridFactory = new FrameworkElementFactory(typeof(Grid));
+            gridFactory.SetValue(Grid.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
+
+            // Simple TextBlock for VWAP value - centered horizontally and vertically
+            var vwapText = new FrameworkElementFactory(typeof(TextBlock));
+            vwapText.SetBinding(TextBlock.TextProperty, new Binding(vwapBinding));
+            vwapText.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            vwapText.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            vwapText.SetValue(TextBlock.FontSizeProperty, 11.0);
+            vwapText.SetValue(TextBlock.TextAlignmentProperty, TextAlignment.Center);
+
+            // Bind foreground color to comparison value using converter
+            if (!string.IsNullOrEmpty(comparisonBinding))
+            {
+                var colorBinding = new Binding(comparisonBinding)
+                {
+                    Converter = new VWAPComparisonToColorConverter()
+                };
+                vwapText.SetBinding(TextBlock.ForegroundProperty, colorBinding);
+            }
+            else
+            {
+                // Default yellow for columns without comparison (e.g., straddle VWAP without price yet)
+                vwapText.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromRgb(255, 220, 100)));
+            }
+
+            gridFactory.AppendChild(vwapText);
+            template.VisualTree = gridFactory;
+            column.CellTemplate = template;
+            return column;
+        }
+
         private void OnTabPageLoaded(object sender, RoutedEventArgs e)
         {
             Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribing to events");
@@ -596,6 +817,10 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             SubscriptionManager.Instance.OptionStatusUpdated += OnOptionStatusUpdated;
             SubscriptionManager.Instance.SymbolResolved += OnSymbolResolved;
             MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
+
+            // Subscribe to VWAP updates
+            VWAPDataCache.Instance.VWAPUpdated += OnVWAPUpdated;
+            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribed to VWAPDataCache.VWAPUpdated");
 
             // Subscribe to synthetic straddle price events
             var adapter = Connector.Instance.GetAdapter() as QAAdapter;
@@ -620,6 +845,9 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;
             SubscriptionManager.Instance.SymbolResolved -= OnSymbolResolved;
             MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
+
+            // Unsubscribe from VWAP updates
+            VWAPDataCache.Instance.VWAPUpdated -= OnVWAPUpdated;
 
             // Unsubscribe from synthetic straddle price events
             var adapter = Connector.Instance.GetAdapter() as QAAdapter;
@@ -733,6 +961,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         private readonly Dictionary<string, (double price, DateTime timestamp)> _pendingPriceUpdates = new Dictionary<string, (double, DateTime)>();
         private readonly Dictionary<string, string> _pendingStatusUpdates = new Dictionary<string, string>();
         private readonly Dictionary<string, (double price, double ce, double pe)> _pendingStraddleUpdates = new Dictionary<string, (double, double, double)>();
+        private readonly Dictionary<string, VWAPData> _pendingVWAPUpdates = new Dictionary<string, VWAPData>();
         private readonly object _throttleLock = new object();
         private System.Windows.Threading.DispatcherTimer _uiUpdateTimer;
 
@@ -753,7 +982,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             {
                 lock (_throttleLock)
                 {
-                    if (_pendingPriceUpdates.Count == 0 && _pendingStatusUpdates.Count == 0 && _pendingStraddleUpdates.Count == 0)
+                    if (_pendingPriceUpdates.Count == 0 && _pendingStatusUpdates.Count == 0 && _pendingStraddleUpdates.Count == 0 && _pendingVWAPUpdates.Count == 0)
                         return;
 
                     // DEBUG: Log pending updates count periodically
@@ -812,6 +1041,40 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                         }
                     }
                     _pendingStraddleUpdates.Clear();
+
+                    // Process VWAP Updates
+                    foreach (var kvp in _pendingVWAPUpdates)
+                    {
+                        var vwapData = kvp.Value;
+
+                        // Check if it's a CE/PE option
+                        if (_symbolToRowMap.TryGetValue(kvp.Key, out var mapping))
+                        {
+                            var (row, optionType) = mapping;
+
+                            if (optionType == "CE")
+                            {
+                                row.CEVWAP = vwapData.VWAP;
+                                // Calculate position based on current price
+                                if (row.CEPrice > 0)
+                                    row.CEVWAPPosition = vwapData.GetPosition(row.CEPrice);
+                            }
+                            else
+                            {
+                                row.PEVWAP = vwapData.VWAP;
+                                if (row.PEPrice > 0)
+                                    row.PEVWAPPosition = vwapData.GetPosition(row.PEPrice);
+                            }
+                            needsRefresh = true;
+                        }
+                        // Check if it's a STRDL symbol
+                        else if (_straddleSymbolToRowMap.TryGetValue(kvp.Key, out var straddleRow))
+                        {
+                            straddleRow.StraddleVWAP = vwapData.VWAP;
+                            needsRefresh = true;
+                        }
+                    }
+                    _pendingVWAPUpdates.Clear();
                 }
 
                 if (needsRefresh)
@@ -889,6 +1152,17 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             }
         }
 
+        /// <summary>
+        /// Handles VWAP updates from VWAPCalculatorService via VWAPDataCache
+        /// </summary>
+        private void OnVWAPUpdated(string symbol, VWAPData vwapData)
+        {
+            lock (_throttleLock)
+            {
+                _pendingVWAPUpdates[symbol] = vwapData;
+            }
+        }
+
         private void UpdateATMStrike()
         {
             OptionChainRow atmRow = null;
@@ -896,8 +1170,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             double maxCE = 0;
             double maxPE = 0;
 
-            // OPTIMIZATION: Single pass to find ATM, max prices, and calculate histogram widths
-            // Store histogram updates to apply only if maxPrice changed
+            // First pass: Find max prices and ATM
             var rowCount = _rows.Count;
             for (int i = 0; i < rowCount; i++)
             {
@@ -922,8 +1195,9 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
             double newMaxPrice = Math.Max(maxCE, maxPE);
 
-            // Only recalculate histogram widths if max price changed significantly (avoids redundant updates)
-            if (newMaxPrice > 0 && Math.Abs(newMaxPrice - _maxOptionPrice) > 0.01)
+            // Always update histogram widths when we have valid prices
+            // This ensures all rows get histograms as they receive price data
+            if (newMaxPrice > 0)
             {
                 _maxOptionPrice = newMaxPrice;
                 double invMaxPrice = 100.0 / _maxOptionPrice; // Pre-calculate divisor once
@@ -931,8 +1205,15 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 for (int i = 0; i < rowCount; i++)
                 {
                     var row = _rows[i];
-                    row.CEHistogramWidth = row.CEPrice > 0 ? row.CEPrice * invMaxPrice : 0;
-                    row.PEHistogramWidth = row.PEPrice > 0 ? row.PEPrice * invMaxPrice : 0;
+                    // Calculate histogram width as percentage of max price
+                    double newCEWidth = row.CEPrice > 0 ? row.CEPrice * invMaxPrice : 0;
+                    double newPEWidth = row.PEPrice > 0 ? row.PEPrice * invMaxPrice : 0;
+
+                    // Only update if changed (to avoid unnecessary PropertyChanged events)
+                    if (Math.Abs(row.CEHistogramWidth - newCEWidth) > 0.1)
+                        row.CEHistogramWidth = newCEWidth;
+                    if (Math.Abs(row.PEHistogramWidth - newPEWidth) > 0.1)
+                        row.PEHistogramWidth = newPEWidth;
                 }
             }
 
@@ -940,7 +1221,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             {
                 atmRow.IsATM = true;
                 _lblATMStrike.Text = $"{atmRow.Strike:F0} ({minStraddle:F2})";
-                Logger.Debug($"[OptionChainTabPage] UpdateATMStrike: ATM={atmRow.Strike}, Straddle={minStraddle:F2}");
+                Logger.Debug($"[OptionChainTabPage] UpdateATMStrike: ATM={atmRow.Strike}, Straddle={minStraddle:F2}, MaxPrice={_maxOptionPrice:F2}");
             }
         }
 
@@ -1064,6 +1345,9 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;
             SubscriptionManager.Instance.SymbolResolved -= OnSymbolResolved;
             MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
+
+            // Unsubscribe from VWAP updates
+            VWAPDataCache.Instance.VWAPUpdated -= OnVWAPUpdated;
 
             // Unsubscribe from synthetic straddle price events
             var adapter = Connector.Instance.GetAdapter() as QAAdapter;
