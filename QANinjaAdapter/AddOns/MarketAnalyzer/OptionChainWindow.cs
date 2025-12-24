@@ -651,12 +651,12 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             atmTrigger.Setters.Add(new Setter(ListViewItem.FontWeightProperty, FontWeights.Bold));
             style.Triggers.Add(atmTrigger);
 
-            // Selection highlight - dark gray (triggers override default blue)
+            // Selection highlight - dark gray background, no border (triggers override default blue)
             var selectedTrigger = new Trigger { Property = ListViewItem.IsSelectedProperty, Value = true };
             selectedTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(60, 60, 65))));
             selectedTrigger.Setters.Add(new Setter(ListViewItem.ForegroundProperty, new SolidColorBrush(Colors.White)));
-            selectedTrigger.Setters.Add(new Setter(ListViewItem.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(100, 100, 105))));
-            selectedTrigger.Setters.Add(new Setter(ListViewItem.BorderThicknessProperty, new Thickness(1)));
+            selectedTrigger.Setters.Add(new Setter(ListViewItem.BorderBrushProperty, null));
+            selectedTrigger.Setters.Add(new Setter(ListViewItem.BorderThicknessProperty, new Thickness(0)));
             style.Triggers.Add(selectedTrigger);
 
             // MouseOver highlight - subtle dark gray
