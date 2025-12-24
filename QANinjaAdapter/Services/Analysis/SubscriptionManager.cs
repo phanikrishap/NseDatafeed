@@ -11,6 +11,7 @@ using QABrokerAPI.Common.Enums;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Services.Instruments;
 using QANinjaAdapter.Services.MarketData;
+using QANinjaAdapter.SyntheticInstruments;
 
 namespace QANinjaAdapter.Services.Analysis
 {
@@ -29,6 +30,13 @@ namespace QANinjaAdapter.Services.Analysis
         private bool _isProcessingHistorical = false;
         private int _processedCount = 0;
         private int _totalQueued = 0;
+
+        // Track processed instruments for BarsRequest after historical data is complete
+        private readonly ConcurrentBag<(string ntSymbol, Instrument ntInstrument)> _processedInstruments = new ConcurrentBag<(string, Instrument)>();
+        private readonly ConcurrentBag<string> _processedStraddleSymbols = new ConcurrentBag<string>();
+
+        // BarsRequest management
+        private readonly ConcurrentDictionary<string, BarsRequest> _activeBarsRequests = new ConcurrentDictionary<string, BarsRequest>();
 
         // Batching configuration for historical data requests
         // Zerodha allows ~3 requests/second for historical API, so 10 parallel with 4s delay = safe throughput
@@ -311,6 +319,10 @@ namespace QANinjaAdapter.Services.Analysis
 
             _isProcessingHistorical = false;
             Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Completed all batches. Total instruments processed: {totalProcessed}");
+
+            // After all historical data is fetched and cached, trigger BarsRequest to push to NinjaTrader DB
+            Logger.Info("[SubscriptionManager] ProcessHistoricalDataQueue(): Starting BarsRequest to push data to NinjaTrader...");
+            await TriggerBarsRequestForAllInstruments();
         }
 
         /// <summary>
@@ -346,8 +358,22 @@ namespace QANinjaAdapter.Services.Analysis
                 {
                     Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Received {records.Count} bars");
 
-                    // Notify UI of status with bar count (like indices show "Done (2713)")
-                    OptionStatusUpdated?.Invoke(ntSymbol, $"Done ({records.Count})");
+                    // Notify UI of status - "Cached" means data is in SQLite cache, ready for BarsRequest
+                    // "Done" will be shown after BarsRequest completes and data is in NinjaTrader DB
+                    OptionStatusUpdated?.Invoke(ntSymbol, $"Cached ({records.Count})");
+
+                    // Track this instrument for BarsRequest later
+                    _processedInstruments.Add((ntSymbol, instrument));
+
+                    // Cache bars for straddle computation if this is an option
+                    if (!string.IsNullOrEmpty(mappedInst.option_type) && mappedInst.strike.HasValue)
+                    {
+                        string straddleSymbol = CacheOptionBarsForStraddle(mappedInst, apiSymbol, records);
+                        if (!string.IsNullOrEmpty(straddleSymbol))
+                        {
+                            _processedStraddleSymbols.Add(straddleSymbol);
+                        }
+                    }
 
                     // Extract last price and update UI
                     var lastRecord = records.OrderByDescending(r => r.TimeStamp).FirstOrDefault();
@@ -367,6 +393,243 @@ namespace QANinjaAdapter.Services.Analysis
             {
                 Logger.Error($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Exception occurred - {ex.Message}", ex);
             }
+        }
+
+        /// <summary>
+        /// Caches option bar data for straddle computation.
+        /// When both CE and PE bars are cached, StraddleBarCache combines them into STRDL bars.
+        /// Returns the straddle symbol for tracking.
+        /// </summary>
+        private string CacheOptionBarsForStraddle(MappedInstrument mappedInst, string apiSymbol, List<Classes.Record> records)
+        {
+            try
+            {
+                // Build straddle symbol: {underlying}{expiry}{strike}_STRDL
+                // e.g., SENSEX25DEC85000_STRDL
+                string expiryStr = mappedInst.expiry?.ToString("yyMMM").ToUpper() ?? "";
+                string strikeStr = mappedInst.strike?.ToString("0") ?? "";
+                string straddleSymbol = $"{mappedInst.underlying}{expiryStr}{strikeStr}_STRDL";
+
+                Logger.Info($"[SubscriptionManager] CacheOptionBarsForStraddle: {apiSymbol} -> {straddleSymbol} ({mappedInst.option_type})");
+
+                if (mappedInst.option_type?.ToUpper() == "CE")
+                {
+                    StraddleBarCache.Instance.StoreCEBars(straddleSymbol, apiSymbol, records);
+                }
+                else if (mappedInst.option_type?.ToUpper() == "PE")
+                {
+                    StraddleBarCache.Instance.StorePEBars(straddleSymbol, apiSymbol, records);
+                }
+
+                return straddleSymbol;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SubscriptionManager] CacheOptionBarsForStraddle: Error caching bars - {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Triggers BarsRequest for all processed instruments to push data into NinjaTrader's database.
+        /// Called after all historical data has been fetched and cached.
+        /// </summary>
+        private async Task TriggerBarsRequestForAllInstruments()
+        {
+            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Starting - {_processedInstruments.Count} CE/PE instruments, {_processedStraddleSymbols.Distinct().Count()} STRDL symbols");
+
+            DateTime fromDate = DateTime.Now.AddDays(-3);
+            DateTime toDate = DateTime.Now;
+
+            int batchCount = 0;
+            int totalRequested = 0;
+
+            // Process CE/PE instruments in batches
+            var cepeInstruments = _processedInstruments.ToList();
+            for (int i = 0; i < cepeInstruments.Count; i += HISTORICAL_BATCH_SIZE)
+            {
+                var batch = cepeInstruments.Skip(i).Take(HISTORICAL_BATCH_SIZE).ToList();
+                batchCount++;
+
+                Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Processing CE/PE batch {batchCount} with {batch.Count} instruments");
+
+                foreach (var (ntSymbol, ntInstrument) in batch)
+                {
+                    await RequestBarsForInstrument(ntSymbol, ntInstrument, fromDate, toDate);
+                    totalRequested++;
+                }
+
+                // Delay between batches to avoid overwhelming NinjaTrader
+                if (i + HISTORICAL_BATCH_SIZE < cepeInstruments.Count)
+                {
+                    await Task.Delay(1000); // 1 second between batches for NT
+                }
+            }
+
+            // Process STRDL instruments
+            var straddleSymbols = _processedStraddleSymbols.Distinct().ToList();
+            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Processing {straddleSymbols.Count} STRDL instruments");
+
+            for (int i = 0; i < straddleSymbols.Count; i += HISTORICAL_BATCH_SIZE)
+            {
+                var batch = straddleSymbols.Skip(i).Take(HISTORICAL_BATCH_SIZE).ToList();
+                batchCount++;
+
+                Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Processing STRDL batch {batchCount} with {batch.Count} instruments");
+
+                foreach (var straddleSymbol in batch)
+                {
+                    await RequestBarsForStraddleSymbol(straddleSymbol, fromDate, toDate);
+                    totalRequested++;
+                }
+
+                // Delay between batches
+                if (i + HISTORICAL_BATCH_SIZE < straddleSymbols.Count)
+                {
+                    await Task.Delay(1000);
+                }
+            }
+
+            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Completed - {totalRequested} total BarsRequests sent");
+        }
+
+        /// <summary>
+        /// Requests bars for a CE/PE instrument to save to NinjaTrader database
+        /// </summary>
+        private async Task RequestBarsForInstrument(string ntSymbol, Instrument ntInstrument, DateTime fromDate, DateTime toDate)
+        {
+            try
+            {
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        // BarsRequest constructor: (Instrument, int barsBack)
+                        // Use a reasonable number of bars to cover 3 days of 1-minute data (~375 bars/day * 3 = ~1125)
+                        var barsRequest = new BarsRequest(ntInstrument, 1500);
+                        barsRequest.BarsPeriod = new BarsPeriod
+                        {
+                            BarsPeriodType = BarsPeriodType.Minute,
+                            Value = 1
+                        };
+                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                        barsRequest.Update += OnBarsRequestUpdate;
+
+                        string symbolForClosure = ntSymbol; // Capture for closure
+                        _activeBarsRequests.TryAdd(ntSymbol, barsRequest);
+                        barsRequest.Request((request, errorCode, errorMessage) =>
+                        {
+                            int barCount = request.Bars?.Count ?? 0;
+                            if (errorCode == ErrorCode.NoError)
+                            {
+                                Logger.Info($"[SubscriptionManager] BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
+                                // Update UI status to "Done" now that data is in NinjaTrader database
+                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
+                            }
+                            else
+                            {
+                                Logger.Warn($"[SubscriptionManager] BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
+                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
+                            }
+
+                            // Clean up
+                            if (_activeBarsRequests.TryRemove(symbolForClosure, out var req))
+                            {
+                                req.Update -= OnBarsRequestUpdate;
+                                req.Dispose();
+                            }
+                        });
+
+                        Logger.Debug($"[SubscriptionManager] BarsRequest sent for {ntSymbol}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[SubscriptionManager] RequestBarsForInstrument({ntSymbol}): Error - {ex.Message}", ex);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SubscriptionManager] RequestBarsForInstrument({ntSymbol}): Dispatcher error - {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Requests bars for a STRDL synthetic instrument to save to NinjaTrader database
+        /// </summary>
+        private async Task RequestBarsForStraddleSymbol(string straddleSymbol, DateTime fromDate, DateTime toDate)
+        {
+            try
+            {
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        // Get or create the STRDL instrument
+                        var ntInstrument = Instrument.GetInstrument(straddleSymbol);
+                        if (ntInstrument == null)
+                        {
+                            Logger.Warn($"[SubscriptionManager] RequestBarsForStraddleSymbol({straddleSymbol}): Instrument not found, skipping");
+                            return;
+                        }
+
+                        // BarsRequest constructor: (Instrument, int barsBack)
+                        var barsRequest = new BarsRequest(ntInstrument, 1500);
+                        barsRequest.BarsPeriod = new BarsPeriod
+                        {
+                            BarsPeriodType = BarsPeriodType.Minute,
+                            Value = 1
+                        };
+                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                        barsRequest.Update += OnBarsRequestUpdate;
+
+                        string symbolForClosure = straddleSymbol; // Capture for closure
+                        _activeBarsRequests.TryAdd(straddleSymbol, barsRequest);
+                        barsRequest.Request((request, errorCode, errorMessage) =>
+                        {
+                            int barCount = request.Bars?.Count ?? 0;
+                            if (errorCode == ErrorCode.NoError)
+                            {
+                                Logger.Info($"[SubscriptionManager] STRDL BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
+                                // Update UI status to "Done" now that data is in NinjaTrader database
+                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
+                            }
+                            else
+                            {
+                                Logger.Warn($"[SubscriptionManager] STRDL BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
+                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
+                            }
+
+                            // Clean up
+                            if (_activeBarsRequests.TryRemove(symbolForClosure, out var req))
+                            {
+                                req.Update -= OnBarsRequestUpdate;
+                                req.Dispose();
+                            }
+                        });
+
+                        Logger.Debug($"[SubscriptionManager] STRDL BarsRequest sent for {straddleSymbol}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[SubscriptionManager] RequestBarsForStraddleSymbol({straddleSymbol}): Error - {ex.Message}", ex);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SubscriptionManager] RequestBarsForStraddleSymbol({straddleSymbol}): Dispatcher error - {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Event handler for BarsRequest updates
+        /// </summary>
+        private void OnBarsRequestUpdate(object sender, BarsUpdateEventArgs e)
+        {
+            // Data is automatically cached by NinjaTrader
+            // e.BarsSeries provides the bars data
+            Logger.Debug($"[SubscriptionManager] BarsRequest update: MinIndex={e.MinIndex}, MaxIndex={e.MaxIndex}");
         }
     }
 }

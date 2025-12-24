@@ -211,6 +211,8 @@
     <Compile Include="Services\Zerodha\ZerodhaClient.cs" />
     <Compile Include="Services\Instruments\InstrumentManager.cs" />
     <Compile Include="Services\MarketData\HistoricalDataService.cs" />
+    <Compile Include="Services\MarketData\HistoricalBarCache.cs" />
+    <Compile Include="Services\MarketData\SubscriptionTrackingService.cs" />
     <Compile Include="Services\MarketData\MarketDataService.cs" />
     <Compile Include="Services\MarketData\OptimizedTickProcessor.cs" />
     <Compile Include="Services\MarketData\PerformanceMonitor.cs" />
@@ -230,6 +232,8 @@
     <Compile Include="SyntheticInstruments\StraddleCacheManager.cs" />
     <Compile Include="SyntheticInstruments\AsyncStraddleProcessor.cs" />
     <Compile Include="SyntheticInstruments\SyntheticStraddleService.cs" />
+    <Compile Include="SyntheticInstruments\SyntheticHistoricalDataService.cs" />
+    <Compile Include="SyntheticInstruments\StraddleBarCache.cs" />
   </ItemGroup>
   <ItemGroup>
     <Page Include="Controls\CircularProgressBar.xaml">

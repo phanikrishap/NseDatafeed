@@ -29,7 +29,12 @@ namespace QANinjaAdapter.Services.WebSocket
         private CancellationTokenSource _connectionCts;
         private Task _messageLoopTask;
         private bool _isConnected = false;
+        private volatile bool _isConnecting = false;
         private readonly object _connectionLock = new object();
+        private readonly SemaphoreSlim _connectionSemaphore = new SemaphoreSlim(1, 1);
+
+        // Semaphore to serialize WebSocket send operations (WebSocket only allows one outstanding SendAsync at a time)
+        private readonly SemaphoreSlim _sendSemaphore = new SemaphoreSlim(1, 1);
 
         // Subscription management
         private readonly ConcurrentDictionary<int, string> _tokenToSymbolMap = new ConcurrentDictionary<int, string>();
@@ -78,10 +83,23 @@ namespace QANinjaAdapter.Services.WebSocket
         /// </summary>
         public async Task<bool> EnsureConnectedAsync()
         {
-            lock (_connectionLock)
+            // Fast path - already connected
+            if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
+                return true;
+
+            // If already connecting, wait for it
+            if (_isConnecting)
             {
-                if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
-                    return true;
+                // Wait up to 10 seconds for connection to complete
+                for (int i = 0; i < 100; i++)
+                {
+                    await Task.Delay(100);
+                    if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
+                        return true;
+                    if (!_isConnecting)
+                        break;
+                }
+                return _isConnected && _sharedWebSocket?.State == WebSocketState.Open;
             }
 
             return await ConnectAsync();
@@ -92,8 +110,27 @@ namespace QANinjaAdapter.Services.WebSocket
         /// </summary>
         private async Task<bool> ConnectAsync()
         {
+            // Use semaphore to prevent concurrent connection attempts
+            bool acquired = await _connectionSemaphore.WaitAsync(0);
+            if (!acquired)
+            {
+                // Another thread is already connecting, wait for it
+                Logger.Debug("[SharedWS] Connection already in progress, waiting...");
+                await _connectionSemaphore.WaitAsync();
+                _connectionSemaphore.Release();
+                return _isConnected && _sharedWebSocket?.State == WebSocketState.Open;
+            }
+
             try
             {
+                // Double-check after acquiring semaphore
+                if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
+                {
+                    return true;
+                }
+
+                _isConnecting = true;
+
                 lock (_connectionLock)
                 {
                     // Cleanup existing connection
@@ -150,6 +187,11 @@ namespace QANinjaAdapter.Services.WebSocket
                     _isConnected = false;
                 }
                 return false;
+            }
+            finally
+            {
+                _isConnecting = false;
+                _connectionSemaphore.Release();
             }
         }
 
@@ -244,6 +286,39 @@ namespace QANinjaAdapter.Services.WebSocket
             {
                 Logger.Error($"[SharedWS] Batch subscribe failed: {ex.Message}", ex);
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Unsubscribes from a symbol
+        /// </summary>
+        public async Task UnsubscribeAsync(string symbol)
+        {
+            try
+            {
+                if (!_symbolToTokenMap.TryGetValue(symbol, out int token))
+                {
+                    Logger.Debug($"[SharedWS] UnsubscribeAsync: Symbol {symbol} not found in mappings");
+                    return;
+                }
+
+                Logger.Info($"[SharedWS] Unsubscribe request: symbol={symbol}, token={token}");
+
+                // Remove from mappings
+                _tokenToSymbolMap.TryRemove(token, out _);
+                _symbolToTokenMap.TryRemove(symbol, out _);
+                _subscriptions.TryRemove(symbol, out _);
+
+                // Send unsubscribe message if connected
+                if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
+                {
+                    await SendSubscriptionAsync(new List<int> { token }, "unsubscribe");
+                    Logger.Info($"[SharedWS] Unsubscribed from {symbol} (token={token})");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SharedWS] Unsubscribe failed for {symbol}: {ex.Message}", ex);
             }
         }
 
@@ -545,6 +620,7 @@ namespace QANinjaAdapter.Services.WebSocket
                 }
 
                 _connectionCts?.Dispose();
+                _connectionSemaphore?.Dispose();
                 Logger.Info("[SharedWS] Disposed");
             }
             catch (Exception ex)

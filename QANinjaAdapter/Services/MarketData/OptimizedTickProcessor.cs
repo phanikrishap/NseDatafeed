@@ -61,10 +61,12 @@ namespace QANinjaAdapter.Services.MarketData
         private readonly int _maxAcceptableQueueSize;
 
         // High-performance caches for O(1) lookups
+        // IMPORTANT: These are volatile references for atomic swap during updates
+        // This prevents race conditions where readers see partially cleared caches
         private readonly ConcurrentDictionary<string, string> _symbolMappingCache = new ConcurrentDictionary<string, string>();
-        private readonly ConcurrentDictionary<string, L1Subscription> _subscriptionCache = new ConcurrentDictionary<string, L1Subscription>();
-        private readonly ConcurrentDictionary<string, L2Subscription> _l2SubscriptionCache = new ConcurrentDictionary<string, L2Subscription>();
-        private readonly ConcurrentDictionary<string, List<SubscriptionCallback>> _callbackCache = new ConcurrentDictionary<string, List<SubscriptionCallback>>();
+        private volatile ConcurrentDictionary<string, L1Subscription> _subscriptionCache = new ConcurrentDictionary<string, L1Subscription>();
+        private volatile ConcurrentDictionary<string, L2Subscription> _l2SubscriptionCache = new ConcurrentDictionary<string, L2Subscription>();
+        private volatile ConcurrentDictionary<string, List<SubscriptionCallback>> _callbackCache = new ConcurrentDictionary<string, List<SubscriptionCallback>>();
         private readonly HashSet<string> _loggedMissedSymbols = new HashSet<string>(); // Track which symbols we've logged misses for
 
         // Performance monitoring
@@ -362,114 +364,131 @@ namespace QANinjaAdapter.Services.MarketData
         private const int MAX_UNINIT_RETRY_SECONDS = 30;
 
         /// <summary>
-        /// Updates subscription cache (thread-safe)
+        /// Updates subscription cache (thread-safe) using atomic swap pattern.
+        /// This prevents race conditions where readers see partially cleared caches.
         /// </summary>
         public void UpdateSubscriptionCache(ConcurrentDictionary<string, L1Subscription> subscriptions)
         {
+            // Check memory pressure before expensive cache update
+            CheckMemoryPressure();
+
+            // Build NEW caches without touching the current ones
+            // This ensures readers always see a complete, consistent view
+            var newSubscriptionCache = new ConcurrentDictionary<string, L1Subscription>();
+            var newCallbackCache = new ConcurrentDictionary<string, List<SubscriptionCallback>>();
+
+            // Limit cache size under memory pressure
+            int maxCacheSize = _isUnderMemoryPressure ? 500 : 2000;
+            int itemsProcessed = 0;
+            int skippedUninitializedCount = 0;
+
+            foreach (var kvp in subscriptions)
+            {
+                if (itemsProcessed >= maxCacheSize)
+                {
+                    Log($"MEMORY PRESSURE: Cache size limited to {maxCacheSize} items (total subscriptions: {subscriptions.Count})");
+                    break;
+                }
+
+                newSubscriptionCache[kvp.Key] = kvp.Value;
+
+                // Pre-build callback list for O(1) retrieval during tick processing
+                // Only add callbacks for fully initialized instruments
+                var callbacks = new List<SubscriptionCallback>();
+
+                // Use thread-safe snapshot from L1Subscription (no locking needed)
+                // This prevents "Collection was modified" exceptions
+                var callbackSnapshot = kvp.Value.GetCallbacksSnapshot();
+                foreach (var callbackPair in callbackSnapshot)
+                {
+                    var instrument = callbackPair.Key;
+
+                    // Check if NinjaTrader instrument is fully initialized
+                    if (instrument == null || instrument.MasterInstrument == null)
+                    {
+                        skippedUninitializedCount++;
+
+                        // Track for retry later
+                        if (!_uninitializedSymbols.ContainsKey(kvp.Key))
+                        {
+                            _uninitializedSymbols[kvp.Key] = DateTime.UtcNow;
+                            Logger.Warn($"[OTP] Skipping uninitialized instrument for {kvp.Key} - will retry later");
+                        }
+                        continue;
+                    }
+
+                    // Instrument is ready, add to callbacks
+                    callbacks.Add(new SubscriptionCallback
+                    {
+                        Instrument = instrument,
+                        Callback = callbackPair.Value
+                    });
+
+                    // Remove from uninitialized tracking if it was there
+                    _uninitializedSymbols.TryRemove(kvp.Key, out _);
+                }
+
+                if (callbacks.Count > 0)
+                {
+                    newCallbackCache[kvp.Key] = callbacks;
+                }
+                itemsProcessed++;
+            }
+
+            // Clean up old uninitialized entries (prevent memory leak)
+            var now = DateTime.UtcNow;
+            var expiredKeys = _uninitializedSymbols
+                .Where(kvp => (now - kvp.Value).TotalSeconds > MAX_UNINIT_RETRY_SECONDS)
+                .Select(kvp => kvp.Key)
+                .ToList();
+            foreach (var key in expiredKeys)
+            {
+                _uninitializedSymbols.TryRemove(key, out _);
+                Logger.Warn($"[OTP] Gave up waiting for instrument initialization: {key}");
+            }
+
+            if (skippedUninitializedCount > 0)
+            {
+                Logger.Warn($"[OTP] Skipped {skippedUninitializedCount} uninitialized instrument callbacks");
+            }
+
+            // ATOMIC SWAP: Replace old caches with new ones in a single operation
+            // Readers will either see the old complete cache or the new complete cache, never a partial one
             lock (_cacheUpdateLock)
             {
-                // Check memory pressure before expensive cache update
-                CheckMemoryPressure();
+                _subscriptionCache = newSubscriptionCache;
+                _callbackCache = newCallbackCache;
+            }
 
-                _subscriptionCache.Clear();
-                _callbackCache.Clear();
+            Log($"OptimizedTickProcessor: Updated caches - {newSubscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
+            Logger.Info($"[OTP] Updated caches - {newSubscriptionCache.Count} subscriptions, {newCallbackCache.Count} callback entries, {_uninitializedSymbols.Count} pending init");
 
-                // Limit cache size under memory pressure
-                int maxCacheSize = _isUnderMemoryPressure ? 500 : 2000;
-                int itemsProcessed = 0;
-                int skippedUninitializedCount = 0;
-
-                foreach (var kvp in subscriptions)
-                {
-                    if (itemsProcessed >= maxCacheSize)
-                    {
-                        Log($"MEMORY PRESSURE: Cache size limited to {maxCacheSize} items (total subscriptions: {subscriptions.Count})");
-                        break;
-                    }
-
-                    _subscriptionCache[kvp.Key] = kvp.Value;
-
-                    // Pre-build callback list for O(1) retrieval during tick processing
-                    // RACE CONDITION FIX: Only add callbacks for fully initialized instruments
-                    var callbacks = new List<SubscriptionCallback>();
-                    foreach (var callbackPair in kvp.Value.L1Callbacks)
-                    {
-                        var instrument = callbackPair.Key;
-
-                        // Check if NinjaTrader instrument is fully initialized
-                        if (instrument == null || instrument.MasterInstrument == null)
-                        {
-                            skippedUninitializedCount++;
-
-                            // Track for retry later
-                            if (!_uninitializedSymbols.ContainsKey(kvp.Key))
-                            {
-                                _uninitializedSymbols[kvp.Key] = DateTime.UtcNow;
-                                Logger.Warn($"[OTP] Skipping uninitialized instrument for {kvp.Key} - will retry later");
-                            }
-                            continue;
-                        }
-
-                        // Instrument is ready, add to callbacks
-                        callbacks.Add(new SubscriptionCallback
-                        {
-                            Instrument = instrument,
-                            Callback = callbackPair.Value
-                        });
-
-                        // Remove from uninitialized tracking if it was there
-                        _uninitializedSymbols.TryRemove(kvp.Key, out _);
-                    }
-
-                    if (callbacks.Count > 0)
-                    {
-                        _callbackCache[kvp.Key] = callbacks;
-                    }
-                    itemsProcessed++;
-                }
-
-                // Clean up old uninitialized entries (prevent memory leak)
-                var now = DateTime.UtcNow;
-                var expiredKeys = _uninitializedSymbols
-                    .Where(kvp => (now - kvp.Value).TotalSeconds > MAX_UNINIT_RETRY_SECONDS)
-                    .Select(kvp => kvp.Key)
-                    .ToList();
-                foreach (var key in expiredKeys)
-                {
-                    _uninitializedSymbols.TryRemove(key, out _);
-                    Logger.Warn($"[OTP] Gave up waiting for instrument initialization: {key}");
-                }
-
-                if (skippedUninitializedCount > 0)
-                {
-                    Logger.Warn($"[OTP] Skipped {skippedUninitializedCount} uninitialized instrument callbacks");
-                }
-
-                Log($"OptimizedTickProcessor: Updated caches - {_subscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
-                Logger.Info($"[OTP] Updated caches - {_subscriptionCache.Count} subscriptions, {_callbackCache.Count} callback entries, {_uninitializedSymbols.Count} pending init");
-
-                // Force GC if under pressure and cache is large
-                if (_isUnderMemoryPressure && _subscriptionCache.Count > 100)
-                {
-                    GC.Collect(0, GCCollectionMode.Optimized);
-                }
+            // Force GC if under pressure and cache is large
+            if (_isUnderMemoryPressure && newSubscriptionCache.Count > 100)
+            {
+                GC.Collect(0, GCCollectionMode.Optimized);
             }
         }
 
         /// <summary>
-        /// Updates L2 subscription cache (thread-safe)
+        /// Updates L2 subscription cache (thread-safe) using atomic swap pattern.
         /// </summary>
         public void UpdateL2SubscriptionCache(ConcurrentDictionary<string, L2Subscription> subscriptions)
         {
+            // Build new cache without touching current one
+            var newL2Cache = new ConcurrentDictionary<string, L2Subscription>();
+            foreach (var kvp in subscriptions)
+            {
+                newL2Cache[kvp.Key] = kvp.Value;
+            }
+
+            // Atomic swap
             lock (_cacheUpdateLock)
             {
-                _l2SubscriptionCache.Clear();
-                foreach (var kvp in subscriptions)
-                {
-                    _l2SubscriptionCache[kvp.Key] = kvp.Value;
-                }
-                Log($"OptimizedTickProcessor: Updated L2 caches - {_l2SubscriptionCache.Count} subscriptions");
+                _l2SubscriptionCache = newL2Cache;
             }
+
+            Log($"OptimizedTickProcessor: Updated L2 caches - {newL2Cache.Count} subscriptions");
         }
 
         /// <summary>

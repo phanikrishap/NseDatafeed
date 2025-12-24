@@ -610,6 +610,7 @@ namespace QANinjaAdapter.Services.MarketData
         /// <summary>
         /// Subscribes to ticks using the shared WebSocket connection.
         /// This is more efficient than creating one WebSocket per symbol.
+        /// Uses SubscriptionTrackingService to manage reference counting.
         /// </summary>
         public async Task SubscribeToTicksShared(
             string nativeSymbolName,
@@ -622,6 +623,9 @@ namespace QANinjaAdapter.Services.MarketData
 
             try
             {
+                // Generate a unique consumer ID for this subscription request
+                string consumerId = $"{nativeSymbolName}_{Guid.NewGuid():N}";
+
                 // Initialize shared WebSocket service if needed
                 await EnsureSharedWebSocketInitializedAsync(l1Subscriptions);
 
@@ -634,22 +638,38 @@ namespace QANinjaAdapter.Services.MarketData
                 if (l1Subscriptions.TryGetValue(nativeSymbolName, out var sub))
                     isIndex = sub.IsIndex;
 
-                // Subscribe via shared WebSocket
-                bool subscribed = await _sharedWebSocketService.SubscribeAsync(symbol, tokenInt, isIndex);
+                // Add reference using SubscriptionTrackingService
+                // STICKY=true: All subscriptions are sticky - once subscribed, stay subscribed for the session
+                // This prevents NinjaTrader's aggressive UnsubscribeMarketData calls from killing WebSocket connections
+                bool isNewSubscription = SubscriptionTrackingService.Instance.AddReference(symbol, consumerId, tokenInt, isIndex, isSticky: true);
 
-                if (subscribed)
+                if (isNewSubscription)
                 {
-                    Logger.Info($"[TICK-SHARED] Successfully subscribed to {symbol} (token={tokenInt}, isIndex={isIndex})");
+                    // This is the first reference - actually subscribe via WebSocket
+                    bool subscribed = await _sharedWebSocketService.SubscribeAsync(symbol, tokenInt, isIndex);
+
+                    if (subscribed)
+                    {
+                        Logger.Info($"[TICK-SHARED] Successfully subscribed to {symbol} (token={tokenInt}, isIndex={isIndex})");
+                    }
+                    else
+                    {
+                        Logger.Error($"[TICK-SHARED] Failed to subscribe to {symbol}");
+                        // Remove the reference since subscribe failed
+                        SubscriptionTrackingService.Instance.RemoveReference(symbol, consumerId);
+                    }
                 }
                 else
                 {
-                    Logger.Error($"[TICK-SHARED] Failed to subscribe to {symbol}");
+                    // Already subscribed by another consumer - just log
+                    int refCount = SubscriptionTrackingService.Instance.GetReferenceCount(symbol);
+                    Logger.Debug($"[TICK-SHARED] Already subscribed to {symbol}, refCount={refCount}");
                 }
 
                 // Start exit monitoring (to cleanup when chart closes)
                 if (webSocketConnectionFunc != null)
                 {
-                    StartExitMonitoringForSharedSubscription(symbol, webSocketConnectionFunc);
+                    StartExitMonitoringForSharedSubscription(symbol, consumerId, webSocketConnectionFunc);
                 }
             }
             catch (Exception ex)
@@ -700,44 +720,72 @@ namespace QANinjaAdapter.Services.MarketData
         {
             try
             {
-                if (tickData == null || tickData.LastTradePrice <= 0)
+                if (string.IsNullOrEmpty(symbol) || tickData == null || tickData.LastTradePrice <= 0)
                     return;
 
                 // Route to OptimizedTickProcessor
                 if (_useOptimizedProcessor)
                 {
-                    TickProcessor.QueueTick(symbol, tickData);
+                    TickProcessor?.QueueTick(symbol, tickData);
                 }
                 else
                 {
-                    QAAdapter adapter = Connector.Instance.GetAdapter() as QAAdapter;
-                    adapter?.ProcessParsedTick(symbol, tickData);
+                    var connector = Connector.Instance;
+                    if (connector != null)
+                    {
+                        QAAdapter adapter = connector.GetAdapter() as QAAdapter;
+                        adapter?.ProcessParsedTick(symbol, tickData);
+                    }
                 }
 
-                // Route to synthetic straddle service
-                QAAdapter qaAdapter = Connector.Instance.GetAdapter() as QAAdapter;
-                if (qaAdapter != null)
+                // Route to synthetic straddle service (only for options, not indices)
+                // Skip NIFTY, SENSEX, BANKNIFTY spot symbols as they are not option legs
+                if (!IsIndexSymbol(symbol))
                 {
-                    qaAdapter.ProcessSyntheticLegTick(
-                        symbol,
-                        tickData.LastTradePrice,
-                        tickData.LastTradeQty,
-                        tickData.ExchangeTimestamp,
-                        QANinjaAdapter.SyntheticInstruments.TickType.Last,
-                        tickData.BuyPrice,
-                        tickData.SellPrice);
+                    var connector = Connector.Instance;
+                    if (connector != null)
+                    {
+                        QAAdapter qaAdapter = connector.GetAdapter() as QAAdapter;
+                        qaAdapter?.ProcessSyntheticLegTick(
+                            symbol,
+                            tickData.LastTradePrice,
+                            tickData.LastTradeQty,
+                            tickData.ExchangeTimestamp != default ? tickData.ExchangeTimestamp : DateTime.Now,
+                            QANinjaAdapter.SyntheticInstruments.TickType.Last,
+                            tickData.BuyPrice,
+                            tickData.SellPrice);
+                    }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Error($"[TICK-SHARED] OnSharedWebSocketTickReceived error for {symbol}: {ex.Message}");
+                // Only log first occurrence per symbol to reduce spam
+                Logger.Debug($"[TICK-SHARED] OnSharedWebSocketTickReceived error for {symbol}: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Monitors for chart close and cleans up subscription
+        /// Checks if the symbol is an index symbol (NIFTY, SENSEX, BANKNIFTY, etc.)
+        /// Indices should not be processed as synthetic straddle legs.
         /// </summary>
-        private void StartExitMonitoringForSharedSubscription(string symbol, WebSocketConnectionFunc webSocketConnectionFunc)
+        private bool IsIndexSymbol(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol))
+                return false;
+
+            // Exact index symbol names (no strike/expiry suffix)
+            return symbol == "NIFTY" ||
+                   symbol == "SENSEX" ||
+                   symbol == "BANKNIFTY" ||
+                   symbol == "FINNIFTY" ||
+                   symbol == "MIDCPNIFTY" ||
+                   symbol.EndsWith("_SPOT"); // e.g., NIFTY_SPOT, SENSEX_SPOT
+        }
+
+        /// <summary>
+        /// Monitors for chart close and cleans up subscription using reference counting
+        /// </summary>
+        private void StartExitMonitoringForSharedSubscription(string symbol, string consumerId, WebSocketConnectionFunc webSocketConnectionFunc)
         {
             Task.Run(async () =>
             {
@@ -747,14 +795,28 @@ namespace QANinjaAdapter.Services.MarketData
                     {
                         if (webSocketConnectionFunc.ExitFunction())
                         {
-                            Logger.Info($"[TICK-SHARED] Exit detected for {symbol}, cleaning up");
-                            // Note: We don't unsubscribe from shared WebSocket as other charts may still need it
+                            // Remove reference using SubscriptionTrackingService
+                            bool shouldUnsubscribe = SubscriptionTrackingService.Instance.RemoveReference(symbol, consumerId);
+
+                            if (shouldUnsubscribe)
+                            {
+                                // This was the last reference - actually unsubscribe from WebSocket
+                                Logger.Info($"[TICK-SHARED] Exit detected for {symbol}, last reference removed - unsubscribing from WebSocket");
+                                _sharedWebSocketService?.UnsubscribeAsync(symbol);
+                            }
+                            else
+                            {
+                                int remainingRefs = SubscriptionTrackingService.Instance.GetReferenceCount(symbol);
+                                Logger.Debug($"[TICK-SHARED] Exit detected for {symbol}, consumer={consumerId} removed, {remainingRefs} references remaining");
+                            }
                             break;
                         }
                         await Task.Delay(500);
                     }
                     catch
                     {
+                        // On error, still try to remove reference
+                        SubscriptionTrackingService.Instance.RemoveReference(symbol, consumerId);
                         break;
                     }
                 }

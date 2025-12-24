@@ -466,12 +466,13 @@ namespace QANinjaAdapter.Services.Analysis
         
         private MappedInstrument CreateOption(string underlying, DateTime expiry, double strike, string type, int step)
         {
-            // Create Zerodha-style symbol: NIFTY2412524500CE (NIFTY + YYMMMDD + STRIKE + TYPE)
-            // Format: UNDERLYING + YY + MMM (3-letter month) + DD + STRIKE + CE/PE
+            // Create Zerodha-style symbol: SENSEX25DEC85500CE (UNDERLYING + YYMMM + STRIKE + TYPE)
+            // Format: UNDERLYING + YY + MMM (3-letter month) + STRIKE + CE/PE
+            // NOTE: Zerodha does NOT include day (DD) in option symbols - only YYMMM
             string monthAbbr = expiry.ToString("MMM").ToUpper();
-            string zerodhaSymbol = $"{underlying}{expiry:yy}{monthAbbr}{expiry:dd}{strike:F0}{type}";
+            string zerodhaSymbol = $"{underlying}{expiry:yy}{monthAbbr}{strike:F0}{type}";
 
-            // NT symbol can be the same or slightly different
+            // NT symbol uses the Zerodha symbol directly (no transformation needed)
             string ntSymbol = zerodhaSymbol;
 
             Logger.Debug($"[MarketAnalyzerLogic] CreateOption(): Created {ntSymbol} - {underlying} {expiry:yyyy-MM-dd} {strike} {type}");

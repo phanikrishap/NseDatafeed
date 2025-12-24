@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using NinjaTrader.Cbi;
@@ -15,13 +16,23 @@ using QANinjaAdapter.ViewModels;
 namespace QANinjaAdapter.Services.MarketData
 {
     /// <summary>
-    /// Service for retrieving historical market data from Zerodha
+    /// Service for retrieving historical market data from Zerodha.
+    /// Implements cache-first lookup and rate limiting to avoid API throttling.
     /// </summary>
     public class HistoricalDataService
     {
         private static HistoricalDataService _instance;
         private readonly ZerodhaClient _zerodhaClient;
         private readonly InstrumentManager _instrumentManager;
+        private readonly HistoricalBarCache _barCache;
+
+        // Rate limiting: Zerodha allows ~3 requests/second for historical API
+        // We use 6 concurrent requests with 3 second batch delays
+        private static readonly SemaphoreSlim _rateLimitSemaphore = new SemaphoreSlim(6, 6);
+        private static DateTime _lastBatchTime = DateTime.MinValue;
+        private static readonly object _batchLock = new object();
+        private const int BATCH_DELAY_MS = 3000; // 3 seconds between batches
+        private const int MAX_DAYS_PER_REQUEST = 60; // Zerodha's limit
 
         /// <summary>
         /// Gets the singleton instance of the HistoricalDataService
@@ -43,10 +54,12 @@ namespace QANinjaAdapter.Services.MarketData
         {
             _zerodhaClient = ZerodhaClient.Instance;
             _instrumentManager = InstrumentManager.Instance;
+            _barCache = HistoricalBarCache.Instance;
         }
 
         /// <summary>
-        /// Gets historical trades for a symbol
+        /// Gets historical trades for a symbol.
+        /// Checks SQLite cache first, then fetches from Zerodha API with rate limiting.
         /// </summary>
         /// <param name="barsPeriodType">The bars period type</param>
         /// <param name="symbol">The symbol</param>
@@ -66,6 +79,17 @@ namespace QANinjaAdapter.Services.MarketData
             // Log request parameters (to file only, not NinjaTrader control panel)
             Logger.Info($"Getting historical data for {symbol}, period: {barsPeriodType}, market type: {marketType}, dates: {fromDate} to {toDate}");
 
+            // Determine interval string based on BarsPeriodType
+            string interval = barsPeriodType == BarsPeriodType.Minute ? "minute" : "day";
+
+            // Enforce 60-day limit for Zerodha API
+            DateTime effectiveFromDate = fromDate;
+            if ((toDate - fromDate).TotalDays > MAX_DAYS_PER_REQUEST)
+            {
+                effectiveFromDate = toDate.AddDays(-MAX_DAYS_PER_REQUEST);
+                Logger.Warn($"[HistoricalDataService] Date range exceeds {MAX_DAYS_PER_REQUEST} days for {symbol}. Truncating from {fromDate} to {effectiveFromDate}");
+            }
+
             List<Record> records = new List<Record>();
 
             try
@@ -73,6 +97,16 @@ namespace QANinjaAdapter.Services.MarketData
                 // For Zerodha, we need to format the request correctly
                 if (barsPeriodType != BarsPeriodType.Tick)
                 {
+                    // CACHE-FIRST: Check SQLite cache before hitting Zerodha API
+                    var cachedRecords = _barCache.GetCachedBars(symbol, interval, effectiveFromDate, toDate);
+                    if (cachedRecords != null && cachedRecords.Count > 0)
+                    {
+                        Logger.Info($"[HistoricalDataService] CACHE HIT: {symbol} - {cachedRecords.Count} bars from cache");
+                        return cachedRecords;
+                    }
+
+                    Logger.Info($"[HistoricalDataService] CACHE MISS: {symbol} - fetching from Zerodha API");
+
                     // Get the instrument token
                     long instrumentToken = await _instrumentManager.GetInstrumentToken(symbol);
 
@@ -82,18 +116,21 @@ namespace QANinjaAdapter.Services.MarketData
                         return records;
                     }
 
-                    string fromDateStr = fromDate.ToString("yyyy-MM-dd HH:mm:ss");
+                    string fromDateStr = effectiveFromDate.ToString("yyyy-MM-dd HH:mm:ss");
                     string toDateStr = toDate.ToString("yyyy-MM-dd HH:mm:ss");
-                    
-                    // Determine interval string based on BarsPeriodType
-                    string interval = "day";
-                    if (barsPeriodType == BarsPeriodType.Minute)
-                    {
-                        interval = "minute";
-                    }
 
-                    // Get historical data
+                    // Apply rate limiting before making API call
+                    await ApplyRateLimiting(symbol);
+
+                    // Get historical data from Zerodha
                     records = await GetHistoricalDataChunk(instrumentToken, interval, fromDateStr, toDateStr);
+
+                    // Store in cache for future requests
+                    if (records.Count > 0)
+                    {
+                        _barCache.StoreBars(symbol, interval, records);
+                        Logger.Info($"[HistoricalDataService] Cached {records.Count} bars for {symbol}");
+                    }
                 }
                 else
                 {
@@ -108,6 +145,36 @@ namespace QANinjaAdapter.Services.MarketData
 
             Logger.Info($"Returning {records.Count} historical records for {symbol}");
             return records;
+        }
+
+        /// <summary>
+        /// Applies rate limiting to avoid Zerodha API throttling.
+        /// Uses semaphore for concurrent request limiting and batch delays.
+        /// </summary>
+        private async Task ApplyRateLimiting(string symbol)
+        {
+            // Wait for semaphore slot (max 6 concurrent requests)
+            await _rateLimitSemaphore.WaitAsync();
+
+            try
+            {
+                // Check if we need to wait for batch delay
+                lock (_batchLock)
+                {
+                    var timeSinceLastBatch = DateTime.Now - _lastBatchTime;
+                    if (timeSinceLastBatch.TotalMilliseconds < BATCH_DELAY_MS)
+                    {
+                        int delayMs = BATCH_DELAY_MS - (int)timeSinceLastBatch.TotalMilliseconds;
+                        Logger.Debug($"[HistoricalDataService] Rate limiting: waiting {delayMs}ms before request for {symbol}");
+                        Thread.Sleep(delayMs);
+                    }
+                    _lastBatchTime = DateTime.Now;
+                }
+            }
+            finally
+            {
+                _rateLimitSemaphore.Release();
+            }
         }
 
         /// <summary>

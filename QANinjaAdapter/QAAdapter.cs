@@ -193,16 +193,14 @@ namespace QANinjaAdapter
                         var sub = new L1Subscription
                         {
                             Instrument = instrument,
-                            L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>(),
                             IsIndex = false
                         };
-                        sub.L1Callbacks.Add(instrument, callback);
+                        sub.TryAddCallback(instrument, callback);
                         _l1Subscriptions.TryAdd(name, sub);
                     }
                     else
                     {
-                        if (!_l1Subscriptions[name].L1Callbacks.ContainsKey(instrument))
-                            _l1Subscriptions[name].L1Callbacks.Add(instrument, callback);
+                        _l1Subscriptions[name].TryAddCallback(instrument, callback);
                     }
 
                     // 2. Subscribe to legs
@@ -234,16 +232,15 @@ namespace QANinjaAdapter
                     // Check if this is an index symbol (no volume traded, price updates only)
                     bool isIndex = IsIndexSymbol(nativeSymbolName);
 
-                    // Create a new subscription
+                    // Create a new subscription with thread-safe callback management
                     l1Subscription = new L1Subscription
                     {
                         Instrument = instrument,
-                        L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>(),
                         IsIndex = isIndex
                     };
 
-                    // Add the callback
-                    l1Subscription.L1Callbacks.Add(instrument, callback);
+                    // Add the callback using thread-safe method
+                    l1Subscription.TryAddCallback(instrument, callback);
 
                     // Add to dictionary
                     this._l1Subscriptions.TryAdd(nativeSymbolName, l1Subscription);
@@ -253,21 +250,8 @@ namespace QANinjaAdapter
                 }
                 else
                 {
-                    // If the callbacks collection is null, initialize it
-                    if (l1Subscription.L1Callbacks == null)
-                    {
-                        l1Subscription.L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>();
-                    }
-
-                    // Update or add the callback
-                    if (l1Subscription.L1Callbacks.ContainsKey(instrument))
-                    {
-                        l1Subscription.L1Callbacks[instrument] = callback;
-                    }
-                    else
-                    {
-                        l1Subscription.L1Callbacks.Add(instrument, callback);
-                    }
+                    // Update or add the callback using thread-safe method
+                    l1Subscription.SetCallback(instrument, callback);
                 }
 
                 // Update OptimizedTickProcessor cache immediately so new subscriptions receive ticks
@@ -359,11 +343,39 @@ namespace QANinjaAdapter
         public void UnsubscribeMarketData(Instrument instrument)
         {
             string name = instrument.MasterInstrument.Name;
-            lock (QAAdapter._lockLiveSymbol)
+
+            // CRITICAL FIX: NinjaTrader aggressively calls UnsubscribeMarketData during BarsRequest
+            // historical data operations. If we actually remove callbacks, charts and Option Chain
+            // stop receiving live ticks.
+            //
+            // SOLUTION: Make subscriptions "sticky" - once subscribed, keep receiving data.
+            // We only log the unsubscribe attempt but DO NOT remove the callback.
+            // This ensures continuous tick flow even during historical backfills.
+            //
+            // The WebSocket subscription is managed by SubscriptionTrackingService with reference
+            // counting, so we don't need to worry about resource cleanup here.
+
+            if (_l1Subscriptions.TryGetValue(name, out var subscription))
             {
-                this._marketLiveDataSymbols.Remove(name);
-                this._l1Subscriptions.TryRemove(name, out L1Subscription _);
+                // Thread-safe check using new L1Subscription methods
+                if (subscription.ContainsCallback(instrument))
+                {
+                    // STICKY SUBSCRIPTION: Log but DO NOT remove the callback
+                    Logger.Debug($"[UNSUBSCRIBE] IGNORED unsubscribe request for {name} (keeping callback alive), total callbacks: {subscription.CallbackCount}");
+
+                    // NOTE: We intentionally DO NOT call:
+                    // subscription.TryRemoveCallback(instrument);
+                    // MarketDataService.Instance.UpdateProcessorSubscriptionCache(this._l1Subscriptions);
+                }
+                else
+                {
+                    Logger.Debug($"[UNSUBSCRIBE] No callback found for {name} (instrument={instrument.FullName}), total callbacks: {subscription.CallbackCount}");
+                }
             }
+
+            // NOTE: We intentionally do NOT remove from _marketLiveDataSymbols or callbacks.
+            // The WebSocket subscription is managed by SubscriptionTrackingService.
+            // Subscriptions are "sticky" - they stay active until the adapter disconnects.
         }
 
         public void SubscribeMarketDepth(
@@ -487,15 +499,17 @@ namespace QANinjaAdapter
                 bool priceChanged = Math.Abs(lastPrice - l1Subscription.PreviousPrice) > 0.0001;
                 l1Subscription.PreviousPrice = lastPrice;
 
-                // Update all callbacks with the comprehensive market data
-                int callbackCount = l1Subscription.L1Callbacks?.Count ?? 0;
+                // Update all callbacks with the comprehensive market data (using thread-safe snapshot)
+                var callbackSnapshot = l1Subscription.GetCallbacksSnapshot();
+                int callbackCount = callbackSnapshot.Count;
 
                 // Debug logging for index symbols to trace callback flow
                 if (l1Subscription.IsIndex)
                     Logger.Debug($"[QAAdapter] ProcessTick({nativeSymbolName}): IsIndex=true, priceChanged={priceChanged}, volumeDelta={volumeDelta}, callbackCount={callbackCount}, lastPrice={lastPrice}");
 
-                foreach (var cb in l1Subscription.L1Callbacks.Values)
+                foreach (var callbackPair in callbackSnapshot)
                 {
+                    var cb = callbackPair.Value;
                     try
                     {
                         // Update Last price: for regular instruments when volume changes, for indices when price changes
@@ -607,7 +621,7 @@ namespace QANinjaAdapter
 
                 List<Record> source = null;
 
-                    
+
                 try
                 {
                     //NinjaTrader.NinjaScript.NinjaScript.Log($"Requesting bars: Type={barsRequest.Bars.BarsPeriod.BarsPeriodType}, From={barsRequest.Bars.FromDate}, To={barsRequest.Bars.ToDate}", NinjaTrader.Cbi.LogLevel.Information);
@@ -617,14 +631,48 @@ namespace QANinjaAdapter
                         barsRequest.Bars.FromDate.Year,
                         barsRequest.Bars.FromDate.Month,
                         barsRequest.Bars.FromDate.Day,
-                        9, 15, 0);  // 9:30:00 AM
+                        9, 15, 0);  // 9:15:00 AM IST
                     DateTime toDateWithTime = new DateTime(
                            barsRequest.Bars.ToDate.Year,
                            barsRequest.Bars.ToDate.Month,
                            barsRequest.Bars.ToDate.Day,
-                           15, 30, 0);  // 3:30:00 PM
+                           15, 30, 0);  // 3:30:00 PM IST
 
-                        if (barsRequest.Bars.BarsPeriod.BarsPeriodType == BarsPeriodType.Day && this.HowManyBarsFromDays(barsRequest.Bars.FromDate) > 0)
+                    // Check if this is a synthetic straddle symbol
+                    if (SyntheticHistoricalDataService.IsSyntheticSymbol(name))
+                    {
+                        // Get straddle definition to find CE/PE symbols
+                        var straddleDef = _syntheticStraddleService?.GetDefinition(name);
+                        if (straddleDef != null)
+                        {
+                            Logger.Info($"[SYNTH-HIST] Processing synthetic straddle: {name} (CE={straddleDef.CESymbol}, PE={straddleDef.PESymbol})");
+
+                            if (barsRequest.Bars.BarsPeriod.BarsPeriodType == BarsPeriodType.Tick)
+                            {
+                                // Tick data not supported - return empty list for live accumulation
+                                source = new List<Record>();
+                                Logger.Info("[SYNTH-HIST] Tick data not supported for synthetic straddles. Using empty history with real-time tick subscription.");
+                            }
+                            else
+                            {
+                                // Fetch combined historical data from both legs
+                                task = SyntheticHistoricalDataService.Instance.GetSyntheticHistoricalData(
+                                    barsRequest.Bars.BarsPeriod.BarsPeriodType,
+                                    name,
+                                    straddleDef.CESymbol,
+                                    straddleDef.PESymbol,
+                                    fromDateWithTime,
+                                    toDateWithTime,
+                                    (ViewModelBase)loadViewModel);
+                            }
+                        }
+                        else
+                        {
+                            Logger.Warn($"[SYNTH-HIST] No straddle definition found for {name}. Returning empty data.");
+                            source = new List<Record>();
+                        }
+                    }
+                    else if (barsRequest.Bars.BarsPeriod.BarsPeriodType == BarsPeriodType.Day && this.HowManyBarsFromDays(barsRequest.Bars.FromDate) > 0)
                     {
                         task = Connector.Instance.GetHistoricalTrades(barsRequest.Bars.BarsPeriod.BarsPeriodType, symbolName, fromDateWithTime, toDateWithTime,marketType, (ViewModelBase)loadViewModel);
                     }
@@ -658,7 +706,7 @@ namespace QANinjaAdapter
                             flag = true;
                         }
                     }
-                    else
+                    else if (source == null)
                     {
                         Logger.Info("No historical data request was made");
                     }
@@ -854,8 +902,7 @@ namespace QANinjaAdapter
                     Logger.Info($"[SYNTH-LEG] Adding local subscription entry for {legSymbol}");
                     var sub = new L1Subscription
                     {
-                        IsIndex = false,
-                        L1Callbacks = new SortedList<Instrument, Action<MarketDataType, double, long, DateTime, long>>()
+                        IsIndex = false
                     };
                     _l1Subscriptions.TryAdd(legSymbol, sub);
 
@@ -963,9 +1010,12 @@ namespace QANinjaAdapter
                     if (this._l1Subscriptions.ContainsKey(syntheticSymbol))
                     {
                         var subscription = this._l1Subscriptions[syntheticSymbol];
-                       
-                        foreach (var callback in subscription.L1Callbacks.Values)
+
+                        // Use thread-safe snapshot for iteration
+                        var callbackSnapshot = subscription.GetCallbacksSnapshot();
+                        foreach (var callbackPair in callbackSnapshot)
                         {
+                            var callback = callbackPair.Value;
                             try
                             {
                                 // Convert TickType to MarketDataType
