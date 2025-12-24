@@ -25,10 +25,16 @@ namespace QANinjaAdapter.Models.MarketData
 
         /// <summary>
         /// Reset the item for object pool reuse
-        /// Clears all references to enable GC of referenced objects
+        /// Returns ZerodhaTickData to pool and clears all references
         /// </summary>
         public void Reset()
         {
+            // Return tick data to pool before clearing reference
+            if (TickData != null)
+            {
+                ZerodhaTickDataPool.Return(TickData);
+            }
+
             NativeSymbolName = null;
             TickData = null;
             QueueTime = default(DateTime);

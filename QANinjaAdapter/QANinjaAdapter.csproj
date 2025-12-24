@@ -189,6 +189,7 @@
     <Compile Include="Models\DepthEntry.cs" />
     <Compile Include="Models\MappedInstrument.cs" />
     <Compile Include="Models\MarketData\ZerodhaTickData.cs" />
+    <Compile Include="Models\MarketData\ZerodhaTickDataPool.cs" />
     <Compile Include="Models\MarketData\TickProcessingItem.cs" />
     <Compile Include="Controls\CircularProgressBar.xaml.cs">
       <DependentUpon>CircularProgressBar.xaml</DependentUpon>

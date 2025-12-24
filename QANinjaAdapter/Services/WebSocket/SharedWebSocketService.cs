@@ -513,8 +513,18 @@ namespace QANinjaAdapter.Services.WebSocket
                         var tickData = ParseTickPacket(data, offset, packetLength, symbol, isIndex);
                         if (tickData != null)
                         {
-                            // Fire tick event
-                            TickReceived?.Invoke(symbol, tickData);
+                            // POOL FIX: Check if there are any listeners before invoking
+                            // If no listeners, return tickData to pool immediately
+                            var handler = TickReceived;
+                            if (handler != null)
+                            {
+                                handler.Invoke(symbol, tickData);
+                            }
+                            else
+                            {
+                                // No listeners - return to pool to prevent leak
+                                ZerodhaTickDataPool.Return(tickData);
+                            }
                         }
                     }
                     else
@@ -540,14 +550,13 @@ namespace QANinjaAdapter.Services.WebSocket
         {
             try
             {
-                var tickData = new ZerodhaTickData
-                {
-                    InstrumentToken = ReadInt32BE(data, offset),
-                    InstrumentIdentifier = symbol,
-                    IsIndex = isIndex,
-                    LastTradeTime = DateTime.Now,
-                    ExchangeTimestamp = DateTime.Now
-                };
+                // OPTIMIZATION: Use object pool to reduce GC pressure in hot path
+                var tickData = ZerodhaTickDataPool.Rent();
+                tickData.InstrumentToken = ReadInt32BE(data, offset);
+                tickData.InstrumentIdentifier = symbol;
+                tickData.IsIndex = isIndex;
+                tickData.LastTradeTime = DateTime.Now;
+                tickData.ExchangeTimestamp = DateTime.Now;
 
                 // Determine packet type by length
                 // Index packets: 8 (LTP), 28 (Quote), 32 (Full)

@@ -285,15 +285,14 @@ namespace QANinjaAdapter.Services.WebSocket
 
         private ZerodhaTickData ParseSinglePacket(byte[] data, int offset, int packetLength, string symbol, bool isIndex, bool isMcxSegment, bool isLtpMode, bool isQuoteMode, bool isFullMode)
         {
-            var tickData = new ZerodhaTickData
-            {
-                InstrumentToken = ZerodhaBinaryReader.ReadInt32BE(data, offset),
-                InstrumentIdentifier = symbol,
-                HasMarketDepth = false, // Quote mode doesn't include market depth
-                IsIndex = isIndex,
-                LastTradeTime = DateTime.Now,
-                ExchangeTimestamp = DateTime.Now
-            };
+            // OPTIMIZATION: Use object pool to reduce GC pressure in hot path
+            var tickData = ZerodhaTickDataPool.Rent();
+            tickData.InstrumentToken = ZerodhaBinaryReader.ReadInt32BE(data, offset);
+            tickData.InstrumentIdentifier = symbol;
+            tickData.HasMarketDepth = false; // Quote mode doesn't include market depth
+            tickData.IsIndex = isIndex;
+            tickData.LastTradeTime = DateTime.Now;
+            tickData.ExchangeTimestamp = DateTime.Now;
 
             if (isLtpMode)
             {
@@ -409,13 +408,13 @@ namespace QANinjaAdapter.Services.WebSocket
 
         private ZerodhaTickData CreateDefaultTick(int token, string symbol)
         {
-            return new ZerodhaTickData
-            {
-                InstrumentToken = token,
-                InstrumentIdentifier = symbol,
-                LastTradeTime = DateTime.Now,
-                ExchangeTimestamp = DateTime.Now
-            };
+            // OPTIMIZATION: Use object pool to reduce GC pressure
+            var tickData = ZerodhaTickDataPool.Rent();
+            tickData.InstrumentToken = token;
+            tickData.InstrumentIdentifier = symbol;
+            tickData.LastTradeTime = DateTime.Now;
+            tickData.ExchangeTimestamp = DateTime.Now;
+            return tickData;
         }
     }
 }

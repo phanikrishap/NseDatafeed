@@ -89,6 +89,13 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
         public string PESymbol { get; set; }
 
+        // Update times from websocket
+        private string _ceUpdateTime = "---";
+        public string CEUpdateTime { get => _ceUpdateTime; set { if (_ceUpdateTime != value) { _ceUpdateTime = value; OnPropertyChanged(nameof(CEUpdateTime)); } } }
+
+        private string _peUpdateTime = "---";
+        public string PEUpdateTime { get => _peUpdateTime; set { if (_peUpdateTime != value) { _peUpdateTime = value; OnPropertyChanged(nameof(PEUpdateTime)); } } }
+
         // Synthetic Straddle price from SyntheticStraddleService (live calculated)
         private double _syntheticStraddlePrice;
         public double SyntheticStraddlePrice { get => _syntheticStraddlePrice; set { if (_syntheticStraddlePrice != value) { _syntheticStraddlePrice = value; OnPropertyChanged(nameof(SyntheticStraddlePrice)); NotifyStraddleChanged(); } } }
@@ -135,7 +142,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             Logger.Info("[OptionChainWindow] Constructor: Creating window");
 
             Caption = "Option Chain";
-            Width = 700;
+            Width = 800;  // Wider to accommodate CE/PE time columns
             Height = 600;
 
             // Create the tab control (required by NTWindow for proper instrument linking)
@@ -408,6 +415,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 Background = _bgColor,
                 Foreground = _fgColor,
                 BorderThickness = new Thickness(0),
+                BorderBrush = null, // Remove any border
                 FontFamily = _ntFont,
                 FontSize = 12,
                 ItemsSource = _rows
@@ -415,9 +423,22 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
             _gridView = new GridView { AllowsColumnReorder = false };
 
-            // CE Side columns (Left)
-            _gridView.Columns.Add(CreateColumn("CE Status", "CEStatus", 80, HorizontalAlignment.Center));
-            _gridView.Columns.Add(CreateHistogramColumn("CE Last", "CELast", "CEHistogramWidth", 100, true));
+            // Apply dark header style
+            var headerStyle = new Style(typeof(GridViewColumnHeader));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BackgroundProperty, _headerBg));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.ForegroundProperty, _fgColor));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.FontWeightProperty, FontWeights.Bold));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.FontFamilyProperty, _ntFont));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.FontSizeProperty, 12.0));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.PaddingProperty, new Thickness(5, 4, 5, 4)));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderThicknessProperty, new Thickness(0)));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderBrushProperty, null));
+            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.HorizontalContentAlignmentProperty, HorizontalAlignment.Center));
+
+            // CE Side columns (Left) - Time, Status, LTP (histogram from right to left)
+            _gridView.Columns.Add(CreateColumn("Time", "CEUpdateTime", 65, HorizontalAlignment.Center, headerStyle));
+            _gridView.Columns.Add(CreateColumn("Status", "CEStatus", 70, HorizontalAlignment.Center, headerStyle));
+            _gridView.Columns.Add(CreateHistogramColumn("LTP", "CELast", "CEHistogramWidth", 100, true, headerStyle));
 
             // Strike column (Center) - highlighted
             var strikeColumn = new GridViewColumn
@@ -425,6 +446,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 Header = "Strike",
                 Width = 80
             };
+            strikeColumn.HeaderContainerStyle = headerStyle;
             var strikeTemplate = new DataTemplate();
             var strikeFactory = new FrameworkElementFactory(typeof(Border));
             strikeFactory.SetValue(Border.BackgroundProperty, _strikeBg);
@@ -439,20 +461,22 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             strikeColumn.CellTemplate = strikeTemplate;
             _gridView.Columns.Add(strikeColumn);
 
-            // PE Side columns (Right)
-            _gridView.Columns.Add(CreateHistogramColumn("PE Last", "PELast", "PEHistogramWidth", 100, false));
-            _gridView.Columns.Add(CreateColumn("PE Status", "PEStatus", 80, HorizontalAlignment.Center));
+            // PE Side columns (Right) - LTP (histogram left to right), Status, Time
+            _gridView.Columns.Add(CreateHistogramColumn("LTP", "PELast", "PEHistogramWidth", 100, false, headerStyle));
+            _gridView.Columns.Add(CreateColumn("Status", "PEStatus", 70, HorizontalAlignment.Center, headerStyle));
+            _gridView.Columns.Add(CreateColumn("Time", "PEUpdateTime", 65, HorizontalAlignment.Center, headerStyle));
 
             // Straddle column
             var straddleColumn = new GridViewColumn
             {
                 Header = "Straddle",
-                Width = 90
+                Width = 85
             };
+            straddleColumn.HeaderContainerStyle = headerStyle;
             var straddleTemplate = new DataTemplate();
             var straddleFactory = new FrameworkElementFactory(typeof(TextBlock));
             straddleFactory.SetBinding(TextBlock.TextProperty, new Binding("StraddlePrice"));
-            straddleFactory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Right);
+            straddleFactory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
             straddleFactory.SetValue(TextBlock.PaddingProperty, new Thickness(0, 0, 5, 0));
             straddleFactory.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
             straddleFactory.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromRgb(255, 200, 100)));
@@ -467,6 +491,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             style.Setters.Add(new Setter(ListViewItem.BackgroundProperty, _bgColor));
             style.Setters.Add(new Setter(ListViewItem.ForegroundProperty, _fgColor));
             style.Setters.Add(new Setter(ListViewItem.BorderThicknessProperty, new Thickness(0)));
+            style.Setters.Add(new Setter(ListViewItem.BorderBrushProperty, null));
             style.Setters.Add(new Setter(ListViewItem.PaddingProperty, new Thickness(2)));
             style.Setters.Add(new Setter(ListViewItem.FontFamilyProperty, _ntFont));
 
@@ -484,13 +509,16 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             return listView;
         }
 
-        private GridViewColumn CreateColumn(string header, string binding, double width, HorizontalAlignment align)
+        private GridViewColumn CreateColumn(string header, string binding, double width, HorizontalAlignment align, Style headerStyle = null)
         {
             var column = new GridViewColumn
             {
                 Header = header,
                 Width = width
             };
+            if (headerStyle != null)
+                column.HeaderContainerStyle = headerStyle;
+
             var template = new DataTemplate();
             var factory = new FrameworkElementFactory(typeof(TextBlock));
             factory.SetBinding(TextBlock.TextProperty, new Binding(binding));
@@ -503,14 +531,18 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
         /// <summary>
         /// Creates a column with a histogram bar behind the price text
+        /// CE histogram: emanates from right edge toward left (toward strike column)
+        /// PE histogram: emanates from left edge toward right (away from strike column)
         /// </summary>
-        private GridViewColumn CreateHistogramColumn(string header, string priceBinding, string widthBinding, double columnWidth, bool isCall)
+        private GridViewColumn CreateHistogramColumn(string header, string priceBinding, string widthBinding, double columnWidth, bool isCall, Style headerStyle = null)
         {
             var column = new GridViewColumn
             {
                 Header = header,
                 Width = columnWidth
             };
+            if (headerStyle != null)
+                column.HeaderContainerStyle = headerStyle;
 
             var template = new DataTemplate();
 
@@ -519,6 +551,8 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
             gridFactory.SetValue(Grid.HeightProperty, 20.0);
 
             // Histogram bar (colored rectangle)
+            // CE: Right-aligned (bar grows from right edge toward left, emanating from strike)
+            // PE: Left-aligned (bar grows from left edge toward right, emanating from strike)
             var barFactory = new FrameworkElementFactory(typeof(Border));
             barFactory.SetValue(Border.BackgroundProperty, isCall ? _ceHistogramBrush : _peHistogramBrush);
             barFactory.SetValue(Border.HorizontalAlignmentProperty, isCall ? HorizontalAlignment.Right : HorizontalAlignment.Left);
@@ -537,10 +571,10 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
             gridFactory.AppendChild(barFactory);
 
-            // Price text overlay
+            // Price text overlay - centered for both CE and PE
             var textFactory = new FrameworkElementFactory(typeof(TextBlock));
             textFactory.SetBinding(TextBlock.TextProperty, new Binding(priceBinding));
-            textFactory.SetValue(TextBlock.HorizontalAlignmentProperty, isCall ? HorizontalAlignment.Right : HorizontalAlignment.Left);
+            textFactory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
             textFactory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
             textFactory.SetValue(TextBlock.PaddingProperty, new Thickness(5, 0, 5, 0));
             textFactory.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Colors.White));
@@ -696,7 +730,7 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         }
 
         // Throttling for UI updates (Decoupling backend high-frequency ticks from UI rendering)
-        private readonly Dictionary<string, double> _pendingPriceUpdates = new Dictionary<string, double>();
+        private readonly Dictionary<string, (double price, DateTime timestamp)> _pendingPriceUpdates = new Dictionary<string, (double, DateTime)>();
         private readonly Dictionary<string, string> _pendingStatusUpdates = new Dictionary<string, string>();
         private readonly Dictionary<string, (double price, double ce, double pe)> _pendingStraddleUpdates = new Dictionary<string, (double, double, double)>();
         private readonly object _throttleLock = new object();
@@ -734,15 +768,20 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                         if (_symbolToRowMap.TryGetValue(kvp.Key, out var mapping))
                         {
                             var (row, optionType) = mapping;
+                            var (price, timestamp) = kvp.Value;
+                            string timeStr = timestamp.ToString("HH:mm:ss");
+
                             if (optionType == "CE")
                             {
-                                row.CELast = kvp.Value.ToString("F2");
-                                row.CEPrice = kvp.Value;
+                                row.CELast = price.ToString("F2");
+                                row.CEPrice = price;
+                                row.CEUpdateTime = timeStr;
                             }
                             else
                             {
-                                row.PELast = kvp.Value.ToString("F2");
-                                row.PEPrice = kvp.Value;
+                                row.PELast = price.ToString("F2");
+                                row.PEPrice = price;
+                                row.PEUpdateTime = timeStr;
                             }
                             needsRefresh = true;
                         }
@@ -795,9 +834,36 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 Logger.Debug($"[OptionChainTabPage] OnOptionPriceUpdated RECEIVED: {symbol} = {price}");
             }
 
+            DateTime now = DateTime.Now;
+
+            // Market hours filtering for NSE/BSE instruments (9:15 AM - 3:30 PM)
+            // Skip updates outside market hours EXCEPT for GIFT NIFTY and MCX which have extended hours
+            bool isExtendedHours = symbol.Contains("GIFT") || symbol.Contains("MCX");
+            if (!isExtendedHours)
+            {
+                TimeSpan marketOpen = new TimeSpan(9, 15, 0);
+                TimeSpan marketClose = new TimeSpan(15, 30, 0);
+                TimeSpan currentTime = now.TimeOfDay;
+
+                if (currentTime < marketOpen || currentTime > marketClose)
+                {
+                    // Outside market hours - don't update timestamp (use cached price without new time)
+                    lock (_throttleLock)
+                    {
+                        if (!_pendingPriceUpdates.ContainsKey(symbol))
+                        {
+                            // First update - allow it but with last known market time
+                            _pendingPriceUpdates[symbol] = (price, now);
+                        }
+                        // If already has a price, keep existing timestamp
+                    }
+                    return;
+                }
+            }
+
             lock (_throttleLock)
             {
-                _pendingPriceUpdates[symbol] = price;
+                _pendingPriceUpdates[symbol] = (price, now);
             }
         }
 
@@ -827,12 +893,15 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
         {
             OptionChainRow atmRow = null;
             double minStraddle = double.MaxValue;
-
             double maxCE = 0;
             double maxPE = 0;
 
-            foreach (var row in _rows)
+            // OPTIMIZATION: Single pass to find ATM, max prices, and calculate histogram widths
+            // Store histogram updates to apply only if maxPrice changed
+            var rowCount = _rows.Count;
+            for (int i = 0; i < rowCount; i++)
             {
+                var row = _rows[i];
                 row.IsATM = false;
 
                 if (row.CEPrice > 0)
@@ -851,13 +920,19 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 }
             }
 
-            _maxOptionPrice = Math.Max(maxCE, maxPE);
-            if (_maxOptionPrice > 0)
+            double newMaxPrice = Math.Max(maxCE, maxPE);
+
+            // Only recalculate histogram widths if max price changed significantly (avoids redundant updates)
+            if (newMaxPrice > 0 && Math.Abs(newMaxPrice - _maxOptionPrice) > 0.01)
             {
-                foreach (var row in _rows)
+                _maxOptionPrice = newMaxPrice;
+                double invMaxPrice = 100.0 / _maxOptionPrice; // Pre-calculate divisor once
+
+                for (int i = 0; i < rowCount; i++)
                 {
-                    row.CEHistogramWidth = row.CEPrice > 0 ? (row.CEPrice / _maxOptionPrice) * 100.0 : 0;
-                    row.PEHistogramWidth = row.PEPrice > 0 ? (row.PEPrice / _maxOptionPrice) * 100.0 : 0;
+                    var row = _rows[i];
+                    row.CEHistogramWidth = row.CEPrice > 0 ? row.CEPrice * invMaxPrice : 0;
+                    row.PEHistogramWidth = row.PEPrice > 0 ? row.PEPrice * invMaxPrice : 0;
                 }
             }
 
@@ -926,11 +1001,11 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
                 var itemPos = e.GetPosition(listViewItem);
 
                 // Calculate column boundaries
-                // CE Status (80) + CE Last (100) = 180 for CE side
-                // Strike (80) = 260
-                // PE Last (100) + PE Status (80) = 440 for PE side
-                double ceEndX = 180;
-                double strikeEndX = 260;
+                // CE Time (65) + CE Status (70) + CE Last (100) = 235 for CE side
+                // Strike (80) = 315
+                // PE Last (100) + PE Status (70) + PE Time (65) for PE side
+                double ceEndX = 235;
+                double strikeEndX = 315;
 
                 string symbolToLink = null;
                 string optionType = null;

@@ -138,6 +138,12 @@ namespace QANinjaAdapter
 
         #region Log methods
 
+        /// <summary>
+        /// Gets whether debug logging is enabled.
+        /// Use this to guard expensive string interpolation in hot paths.
+        /// </summary>
+        public static bool IsDebugEnabled => _initialized && _log != null && _log.IsDebugEnabled;
+
         public static void Debug(string message)
         {
             if (_initialized && _log.IsDebugEnabled)

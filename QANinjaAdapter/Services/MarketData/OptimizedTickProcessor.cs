@@ -656,7 +656,7 @@ namespace QANinjaAdapter.Services.MarketData
                 int volumeDelta = CalculateVolumeDelta(subscription, item.TickData);
 
                 // Debug logging for index symbols
-                if (subscription.IsIndex)
+                if (subscription.IsIndex && Logger.IsDebugEnabled)
                 {
                     Logger.Debug($"[OTP] ProcessSingleTick INDEX: symbol={ntSymbolName}, price={item.TickData.LastTradePrice}, volumeDelta={volumeDelta}, callbacks={callbacks?.Count}");
                 }
@@ -775,11 +775,18 @@ namespace QANinjaAdapter.Services.MarketData
             bool priceChanged = isIndex && Math.Abs(lastPrice - prevPrice) > 0.0001;
 
             // Debug logging for indices
-            if (isIndex)
+            if (isIndex && Logger.IsDebugEnabled)
             {
                 Logger.Debug($"[OTP] ProcessCallbacks INDEX: lastPrice={lastPrice}, prevPrice={prevPrice}, priceChanged={priceChanged}, volumeDelta={volumeDelta}, callbackCount={callbacks?.Count}");
                 subscription.PreviousPrice = lastPrice;
             }
+            else if (isIndex)
+            {
+                subscription.PreviousPrice = lastPrice;
+            }
+
+            // OPTIMIZATION: Get current time once before the callback loop (same timestamp for all callbacks)
+            DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, IstTimeZone);
 
             foreach (var callbackInfo in callbacks)
             {
@@ -823,27 +830,23 @@ namespace QANinjaAdapter.Services.MarketData
                     // Use the already validated variables from above
                     var callback = callbackInfo.Callback;
 
-                    // Get current time in IST
-                    DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
-
                     // Process last trade with timing
                     // For indices: fire callback when price changes (no volume requirement)
                     // For regular instruments: fire callback when volume changes
                     bool shouldFireCallback = (volumeDelta > 0) || (isIndex && priceChanged);
 
                     // Debug logging for indices
-                    if (isIndex)
+                    if (isIndex && Logger.IsDebugEnabled)
                     {
                         Logger.Debug($"[OTP] INDEX callback check: shouldFire={shouldFireCallback}, lastPrice={tickData.LastTradePrice}, volumeDelta={volumeDelta}, isIndex={isIndex}, priceChanged={priceChanged}");
                     }
 
                     if (tickData.LastTradePrice > 0 && shouldFireCallback)
                     {
-                        // Use cached masterInstrument (already null-checked above)
-                        double roundedPrice = masterInstrument.RoundToTickSize(tickData.LastTradePrice);
-
+                        // OPTIMIZATION: Prices from Zerodha are already at valid tick sizes (exchange-traded)
+                        // No need to call RoundToTickSize - removing unnecessary method calls in hot path
                         var callbackTimer = Stopwatch.StartNew();
-                        callback(MarketDataType.Last, roundedPrice, Math.Max(1, volumeDelta), now, 0L);
+                        callback(MarketDataType.Last, tickData.LastTradePrice, Math.Max(1, volumeDelta), now, 0L);
                         callbackTimer.Stop();
 
                         TrackCallbackTiming(callbackTimer.ElapsedMilliseconds);
@@ -851,14 +854,12 @@ namespace QANinjaAdapter.Services.MarketData
                         // Process bid/ask only when there's a trade (or price change for indices)
                         if (tickData.BuyPrice > 0)
                         {
-                            double bidPrice = masterInstrument.RoundToTickSize(tickData.BuyPrice);
-                            callback(MarketDataType.Bid, bidPrice, tickData.BuyQty, now, 0L);
+                            callback(MarketDataType.Bid, tickData.BuyPrice, tickData.BuyQty, now, 0L);
                         }
 
                         if (tickData.SellPrice > 0)
                         {
-                            double askPrice = masterInstrument.RoundToTickSize(tickData.SellPrice);
-                            callback(MarketDataType.Ask, askPrice, tickData.SellQty, now, 0L);
+                            callback(MarketDataType.Ask, tickData.SellPrice, tickData.SellQty, now, 0L);
                         }
                     }
 
@@ -909,6 +910,7 @@ namespace QANinjaAdapter.Services.MarketData
 
         /// <summary>
         /// Process additional market data types efficiently
+        /// OPTIMIZATION: Removed RoundToTickSize calls - prices from Zerodha are already at valid tick sizes
         /// </summary>
         private void ProcessAdditionalMarketData(Action<MarketDataType, double, long, DateTime, long> callback,
                                                 Instrument instrument, ZerodhaTickData tickData, DateTime now)
@@ -920,26 +922,22 @@ namespace QANinjaAdapter.Services.MarketData
 
             if (tickData.High > 0)
             {
-                double highPrice = instrument.MasterInstrument.RoundToTickSize(tickData.High);
-                callback(MarketDataType.DailyHigh, highPrice, 0L, now, 0L);
+                callback(MarketDataType.DailyHigh, tickData.High, 0L, now, 0L);
             }
 
             if (tickData.Low > 0)
             {
-                double lowPrice = instrument.MasterInstrument.RoundToTickSize(tickData.Low);
-                callback(MarketDataType.DailyLow, lowPrice, 0L, now, 0L);
+                callback(MarketDataType.DailyLow, tickData.Low, 0L, now, 0L);
             }
 
             if (tickData.Open > 0)
             {
-                double openPrice = instrument.MasterInstrument.RoundToTickSize(tickData.Open);
-                callback(MarketDataType.Opening, openPrice, 0L, now, 0L);
+                callback(MarketDataType.Opening, tickData.Open, 0L, now, 0L);
             }
 
             if (tickData.Close > 0)
             {
-                double closePrice = instrument.MasterInstrument.RoundToTickSize(tickData.Close);
-                callback(MarketDataType.LastClose, closePrice, 0L, now, 0L);
+                callback(MarketDataType.LastClose, tickData.Close, 0L, now, 0L);
             }
 
             if (tickData.OpenInterest > 0)

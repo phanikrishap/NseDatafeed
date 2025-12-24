@@ -494,22 +494,24 @@ namespace QANinjaAdapter
                     return; // No subscription - skip silently (common during startup/shutdown)
                 }
 
-                // Round the price to the instrument's tick size
-                double lastPrice = l1Subscription.Instrument.MasterInstrument.RoundToTickSize(tickData.LastTradePrice);
+                // OPTIMIZATION: Prices from Zerodha are already at valid tick sizes (exchange-traded)
+                // No need to call RoundToTickSize - removing unnecessary method calls in hot path
+                double lastPrice = tickData.LastTradePrice;
 
                 // Calculate volume delta
                 int volumeDelta = Math.Max(0, l1Subscription.PreviousVolume == 0 ? 0 : tickData.TotalQtyTraded - l1Subscription.PreviousVolume);
                 l1Subscription.PreviousVolume = tickData.TotalQtyTraded;
 
-                // OPTIMIZATION: Get IST time once, reuse for all callbacks
-                DateTime now = DateTime.Now;
+                // OPTIMIZATION: Get IST time once using cached timezone, reuse for all callbacks
+                DateTime now;
                 try
                 {
-                    now = TimeZoneInfo.ConvertTime(now, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
+                    now = TimeZoneInfo.ConvertTime(DateTime.Now, Constants.IndianTimeZone);
                 }
                 catch
                 {
                     // If timezone conversion fails, use local time
+                    now = DateTime.Now;
                 }
 
                 // For indices (cached flag), check if price changed to trigger update
@@ -538,12 +540,12 @@ namespace QANinjaAdapter
 
                             if (tickData.BuyPrice > 0)
                             {
-                                cb(MarketDataType.Bid, l1Subscription.Instrument.MasterInstrument.RoundToTickSize(tickData.BuyPrice), tickData.BuyQty, now, 0L);
+                                cb(MarketDataType.Bid, tickData.BuyPrice, tickData.BuyQty, now, 0L);
                             }
 
                             if (tickData.SellPrice > 0)
                             {
-                                cb(MarketDataType.Ask, l1Subscription.Instrument.MasterInstrument.RoundToTickSize(tickData.SellPrice), tickData.SellQty, now, 0L);
+                                cb(MarketDataType.Ask, tickData.SellPrice, tickData.SellQty, now, 0L);
                             }
                         }
 
@@ -551,16 +553,16 @@ namespace QANinjaAdapter
                         cb(MarketDataType.DailyVolume, tickData.TotalQtyTraded, tickData.TotalQtyTraded, now, 0L);
 
                         if (tickData.High > 0)
-                            cb(MarketDataType.DailyHigh, l1Subscription.Instrument.MasterInstrument.RoundToTickSize(tickData.High), 0L, now, 0L);
+                            cb(MarketDataType.DailyHigh, tickData.High, 0L, now, 0L);
 
                         if (tickData.Low > 0)
-                            cb(MarketDataType.DailyLow, l1Subscription.Instrument.MasterInstrument.RoundToTickSize(tickData.Low), 0L, now, 0L);
+                            cb(MarketDataType.DailyLow, tickData.Low, 0L, now, 0L);
 
                         if (tickData.Open > 0)
-                            cb(MarketDataType.Opening, l1Subscription.Instrument.MasterInstrument.RoundToTickSize(tickData.Open), 0L, now, 0L);
+                            cb(MarketDataType.Opening, tickData.Open, 0L, now, 0L);
 
                         if (tickData.Close > 0)
-                            cb(MarketDataType.LastClose, l1Subscription.Instrument.MasterInstrument.RoundToTickSize(tickData.Close), 0L, now, 0L);
+                            cb(MarketDataType.LastClose, tickData.Close, 0L, now, 0L);
 
                         // Update open interest if available
                         if (tickData.OpenInterest > 0)

@@ -5,7 +5,13 @@ namespace QANinjaAdapter.Classes
     public static class Constants
     {
         public const string IndianTimeZoneId = "India Standard Time";
-        
+
+        // Cached TimeZone to avoid repeated FindSystemTimeZoneById calls in hot paths
+        public static readonly TimeZoneInfo IndianTimeZone = TimeZoneInfo.FindSystemTimeZoneById(IndianTimeZoneId);
+
+        // Cached Unix epoch for timestamp conversions
+        public static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
         public static readonly TimeSpan MarketOpenTime = new TimeSpan(9, 15, 0);
         public static readonly TimeSpan MarketCloseTime = new TimeSpan(15, 30, 0);
         

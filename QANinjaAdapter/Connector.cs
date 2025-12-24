@@ -308,25 +308,12 @@ namespace QANinjaAdapter
             WebSocketConnectionFunc webSocketConnectionFunc)
         {
             // Use shared WebSocket for efficiency (single connection for all symbols)
-            if (_marketDataService.UseSharedWebSocket)
-            {
-                await _marketDataService.SubscribeToTicksShared(
-                    nativeSymbolName,
-                    marketType,
-                    symbol,
-                    l1Subscriptions,
-                    webSocketConnectionFunc);
-            }
-            else
-            {
-                // Legacy: one WebSocket per symbol (inefficient, hits Zerodha connection limits)
-                await _marketDataService.SubscribeToTicks(
-                    nativeSymbolName,
-                    marketType,
-                    symbol,
-                    l1Subscriptions,
-                    webSocketConnectionFunc);
-            }
+            await _marketDataService.SubscribeToTicksShared(
+                nativeSymbolName,
+                marketType,
+                symbol,
+                l1Subscriptions,
+                webSocketConnectionFunc);
         }
 
         /// <summary>

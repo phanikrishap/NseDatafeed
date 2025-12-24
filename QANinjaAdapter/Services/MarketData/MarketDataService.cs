@@ -129,175 +129,9 @@ namespace QANinjaAdapter.Services.MarketData
             return null;
         }
 
-        /// <summary>
-        /// Subscribes to real-time ticks for a symbol
-        /// </summary>
-        /// <param name="nativeSymbolName">The native symbol name</param>
-        /// <param name="marketType">The market type</param>
-        /// <param name="symbol">The symbol</param>
-        /// <param name="l1Subscriptions">The L1 subscriptions dictionary</param>
-        /// <param name="webSocketConnectionFunc">The WebSocket connection function</param>
-        /// <returns>A task representing the asynchronous operation</returns>
-        public async Task SubscribeToTicks(
-            string nativeSymbolName,
-            MarketType marketType,
-            string symbol,
-            ConcurrentDictionary<string, L1Subscription> l1Subscriptions,
-            WebSocketConnectionFunc webSocketConnectionFunc)
-        {
-            Logger.Info($"[TICK-SUBSCRIBE] SubscribeToTicks called: nativeSymbol='{nativeSymbolName}', symbol='{symbol}', marketType={marketType}");
-
-            if (string.IsNullOrEmpty(symbol) || webSocketConnectionFunc == null)
-            {
-                Logger.Error($"[TICK-SUBSCRIBE] Invalid parameters for {symbol} - symbol empty or webSocketFunc null");
-                NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-SUBSCRIBE] Invalid parameters for {symbol}", NinjaTrader.Cbi.LogLevel.Error);
-                return;
-            }
-
-            int retryCount = 0;
-            const int maxRetries = 10;
-            var cts = new CancellationTokenSource();
-
-            // Start monitoring chart-close in separate task
-            StartExitMonitoringTask(webSocketConnectionFunc, cts);
-            Logger.Debug($"[TICK-SUBSCRIBE] Exit monitoring task started for {nativeSymbolName}");
-
-            while (!cts.Token.IsCancellationRequested && retryCount < maxRetries)
-            {
-                ClientWebSocket ws = null;
-                byte[] buffer = null;
-
-                try
-                {
-                    // Exponential backoff for reconnection
-                    if (retryCount > 0)
-                    {
-                        int delay = Math.Min(10000, (int)Math.Pow(2, retryCount) * 500);
-                        await Task.Delay(delay, cts.Token);
-                        Logger.Info($"[TICK-RECONNECT] Reconnecting {nativeSymbolName} (Attempt {retryCount}/{maxRetries}) after {delay}ms");
-                        NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-RECONNECT] Reconnecting {nativeSymbolName} (Attempt {retryCount}/{maxRetries}) after {delay}ms", NinjaTrader.Cbi.LogLevel.Information);
-                    }
-
-                    Logger.Debug($"[TICK-SUBSCRIBE] Creating WebSocket client for {nativeSymbolName}...");
-                    ws = _webSocketManager.CreateWebSocketClient();
-
-                    Logger.Debug($"[TICK-SUBSCRIBE] Connecting WebSocket for {nativeSymbolName}...");
-                    await _webSocketManager.ConnectAsync(ws);
-                    Logger.Info($"[TICK-SUBSCRIBE] WebSocket connected for {nativeSymbolName}, state={ws.State}");
-
-                    Logger.Debug($"[TICK-SUBSCRIBE] Getting instrument token for symbol='{symbol}'...");
-                    int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
-                    Logger.Info($"[TICK-SUBSCRIBE] Got token {tokenInt} for symbol='{symbol}'");
-
-                    Logger.Debug($"[TICK-SUBSCRIBE] Subscribing to token {tokenInt} in 'quote' mode...");
-                    await _webSocketManager.SubscribeAsync(ws, tokenInt, "quote");
-                    Logger.Info($"[TICK-SUBSCRIBE] Subscribed to token {tokenInt} for {nativeSymbolName}");
-
-                    // Get segment and index info
-                    string segment = _instrumentManager.GetSegmentForToken(tokenInt);
-                    // Relaxed check: match "MCX" or "MCX-OPT" or "MCX-FUT"
-                    bool isMcxSegment = !string.IsNullOrEmpty(segment) && segment.ToUpperInvariant().Contains("MCX");
-
-                    bool isIndex = false;
-                    if (l1Subscriptions.TryGetValue(nativeSymbolName, out var sub))
-                        isIndex = sub.IsIndex;
-
-                    Logger.Info($"[TICK-SUBSCRIBE] {nativeSymbolName}: segment={segment}, isMcx={isMcxSegment}, isIndex={isIndex}, l1Subscriptions.Count={l1Subscriptions.Count}");
-
-                    // Use ArrayPool for network buffer
-                    buffer = ArrayPool<byte>.Shared.Rent(16384);
-                    Logger.Debug($"[TICK-SUBSCRIBE] Entering receive loop for {nativeSymbolName}...");
-
-                    int tickCount = 0;
-                    while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
-                    {
-                        WebSocketReceiveResult result = await _webSocketManager.ReceiveMessageAsync(ws, buffer, cts.Token);
-
-                        if (result.MessageType == WebSocketMessageType.Close)
-                        {
-                            Logger.Warn($"[TICK-SUBSCRIBE] WebSocket closed by server for {nativeSymbolName}");
-                            break;
-                        }
-                        if (result.MessageType == WebSocketMessageType.Text || result.Count < 2)
-                        {
-                            Logger.Debug($"[TICK-SUBSCRIBE] Skipping message for {nativeSymbolName}: type={result.MessageType}, bytes={result.Count}");
-                            continue;
-                        }
-
-                        var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, isMcxSegment, isIndex);
-
-                        if (tickData != null)
-                        {
-                            tickCount++;
-                            // Log first 5 ticks and then every 100th tick
-                            if (tickCount <= 5 || tickCount % 100 == 0)
-                            {
-                                Logger.Info($"[TICK-SUBSCRIBE] {nativeSymbolName}: Tick #{tickCount} - LTP={tickData.LastTradePrice}, isIndex={isIndex}, useOptimized={_useOptimizedProcessor}");
-                            }
-
-                            if (_useOptimizedProcessor)
-                            {
-                                TickProcessor.QueueTick(nativeSymbolName, tickData);
-                                // Note: Subscription cache update is handled by the caller or periodically
-                            }
-                            else
-                            {
-                                QAAdapter adapter = Connector.Instance.GetAdapter() as QAAdapter;
-                                adapter?.ProcessParsedTick(nativeSymbolName, tickData);
-                            }
-
-                            // SYNTHETIC STRADDLE INTEGRATION:
-                            // Always route ticks to the synthetic service if the adapter is available.
-                            // The service will filter out non-leg instruments internally for performance.
-                            QAAdapter qaAdapter = Connector.Instance.GetAdapter() as QAAdapter;
-                            if (qaAdapter != null)
-                            {
-                                qaAdapter.ProcessSyntheticLegTick(
-                                    nativeSymbolName,
-                                    tickData.LastTradePrice,
-                                    tickData.LastTradeQty,
-                                    tickData.ExchangeTimestamp,
-                                    QANinjaAdapter.SyntheticInstruments.TickType.Last,
-                                    tickData.BuyPrice,
-                                    tickData.SellPrice);
-                            }
-                        }
-                        else
-                        {
-                            Logger.Debug($"[TICK-SUBSCRIBE] {nativeSymbolName}: ParseBinaryMessage returned null (bytes={result.Count})");
-                        }
-                    }
-
-                    Logger.Info($"[TICK-SUBSCRIBE] Exited receive loop for {nativeSymbolName}: wsState={ws.State}, cancelled={cts.Token.IsCancellationRequested}, totalTicks={tickCount}");
-
-                    // If we reach here, the connection was closed normally or a break occurred
-                    retryCount = 0; // Reset retry count if we had a successful session
-                }
-                catch (OperationCanceledException)
-                {
-                    Logger.Info($"[TICK-SUBSCRIBE] Cancelled for {nativeSymbolName}");
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    retryCount++;
-                    Logger.Error($"[TICK-SUBSCRIBE] Exception for {nativeSymbolName}: {ex.Message}", ex);
-                    NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-SUBSCRIBE] Error for {nativeSymbolName}: {ex.Message}. Retry {retryCount}/{maxRetries}", NinjaTrader.Cbi.LogLevel.Warning);
-                }
-                finally
-                {
-                    if (buffer != null) ArrayPool<byte>.Shared.Return(buffer);
-                    if (ws != null)
-                    {
-                        try { await _webSocketManager.CloseAsync(ws); } catch { }
-                        ws.Dispose();
-                    }
-                }
-            }
-
-            cts.Cancel();
-            cts.Dispose();
-        }
+        // NOTE: Legacy per-symbol SubscribeToTicks method removed.
+        // All tick subscriptions now use the shared WebSocket via SubscribeToTicksShared.
+        // This avoids hitting Zerodha's connection limits and reduces thread overhead.
 
         /// <summary>
         /// Subscribes to market depth for a symbol
@@ -350,19 +184,32 @@ namespace QANinjaAdapter.Services.MarketData
                         if (result.MessageType == WebSocketMessageType.Close) break;
                         if (result.MessageType == WebSocketMessageType.Text || result.Count < 2) continue;
 
-                        // Parse and queue depth data
-                        var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, false, false);
-                        if (tickData != null && tickData.HasMarketDepth)
+                        // Parse and queue depth data (ONLY if using optimized processor)
+                        if (_useOptimizedProcessor)
                         {
-                            if (_useOptimizedProcessor)
+                            var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, false, false);
+                            if (tickData != null)
                             {
-                                TickProcessor.UpdateL2SubscriptionCache(l2Subscriptions);
-                                TickProcessor.QueueTick(nativeSymbolName, tickData);
+                                if (tickData.HasMarketDepth)
+                                {
+                                    TickProcessor.UpdateL2SubscriptionCache(l2Subscriptions);
+                                    bool queued = TickProcessor.QueueTick(nativeSymbolName, tickData);
+                                    if (!queued)
+                                    {
+                                        ZerodhaTickDataPool.Return(tickData);
+                                    }
+                                }
+                                else
+                                {
+                                    // Not a depth packet or no depth data - return to pool
+                                    ZerodhaTickDataPool.Return(tickData);
+                                }
                             }
-                            else
-                            {
-                                ProcessDepthData(buffer, tokenInt, nativeSymbolName, l2Subscriptions);
-                            }
+                        }
+                        else
+                        {
+                            // Legacy path handles its own parsing and cleanup (via ProcessDepthPacket)
+                            ProcessDepthData(buffer, tokenInt, nativeSymbolName, l2Subscriptions);
                         }
                     }
                     retryCount = 0;
@@ -466,44 +313,52 @@ namespace QANinjaAdapter.Services.MarketData
                 // Parse the binary message into a rich data structure
                 // Note: Market depth packets are only for tradeable instruments (not indices), so isIndex is always false here
                 var tickData = _webSocketManager.ParseBinaryMessage(data, iToken, nativeSymbolName, isMcxSegment, isIndex: false);
-                
+
                 if (tickData == null || !tickData.HasMarketDepth)
                 {
+                    // POOL FIX: Return tickData to pool if we're not using it
+                    if (tickData != null)
+                        ZerodhaTickDataPool.Return(tickData);
                     return;
                 }
 
-                // Get the current time in Indian Standard Time
-                DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
-
-                //NinjaTrader.NinjaScript.NinjaScript.Log(
-                //    $"[DEPTH-TIME] Using time {now:HH:mm:ss.fff} with Kind={now.Kind} for market depth updates",
-                //    NinjaTrader.Cbi.LogLevel.Information);
-
-                // Update market depth in NinjaTrader
-                if (l2Subscriptions.TryGetValue(nativeSymbolName, out var l2Subscription))
+                try
                 {
-                    for (int index = 0; index < l2Subscription.L2Callbacks.Count; ++index)
-                    {
-                        // Process asks (offers)
-                        foreach (var ask in tickData.AskDepth)
-                        {
-                            if (ask != null && ask.Quantity > 0)
-                            {
-                                l2Subscription.L2Callbacks.Keys[index].UpdateMarketDepth(
-                                    MarketDataType.Ask, ask.Price, ask.Quantity, Operation.Update, now, l2Subscription.L2Callbacks.Values[index]);
-                            }
-                        }
+                    // Get the current time in Indian Standard Time
+                    // OPTIMIZATION: Use cached TimeZone to avoid FindSystemTimeZoneById in hot path
+                    DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, Constants.IndianTimeZone);
 
-                        // Process bids
-                        foreach (var bid in tickData.BidDepth)
+                    // Update market depth in NinjaTrader
+                    if (l2Subscriptions.TryGetValue(nativeSymbolName, out var l2Subscription))
+                    {
+                        for (int index = 0; index < l2Subscription.L2Callbacks.Count; ++index)
                         {
-                            if (bid != null && bid.Quantity > 0)
+                            // Process asks (offers)
+                            foreach (var ask in tickData.AskDepth)
                             {
-                                l2Subscription.L2Callbacks.Keys[index].UpdateMarketDepth(
-                                    MarketDataType.Bid, bid.Price, bid.Quantity, Operation.Update, now, l2Subscription.L2Callbacks.Values[index]);
+                                if (ask != null && ask.Quantity > 0)
+                                {
+                                    l2Subscription.L2Callbacks.Keys[index].UpdateMarketDepth(
+                                        MarketDataType.Ask, ask.Price, ask.Quantity, Operation.Update, now, l2Subscription.L2Callbacks.Values[index]);
+                                }
+                            }
+
+                            // Process bids
+                            foreach (var bid in tickData.BidDepth)
+                            {
+                                if (bid != null && bid.Quantity > 0)
+                                {
+                                    l2Subscription.L2Callbacks.Keys[index].UpdateMarketDepth(
+                                        MarketDataType.Bid, bid.Price, bid.Quantity, Operation.Update, now, l2Subscription.L2Callbacks.Values[index]);
+                                }
                             }
                         }
                     }
+                }
+                finally
+                {
+                    // POOL FIX: Always return tickData to pool after processing depth data
+                    ZerodhaTickDataPool.Return(tickData);
                 }
             }
             catch (Exception ex)
@@ -583,7 +438,8 @@ namespace QANinjaAdapter.Services.MarketData
         /// <returns>The date time in Indian Standard Time</returns>
         private DateTime GetIndianTime(DateTime dateTime)
         {
-            return TimeZoneInfo.ConvertTime(dateTime, TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId));
+            // OPTIMIZATION: Use cached TimeZone to avoid FindSystemTimeZoneById
+            return TimeZoneInfo.ConvertTime(dateTime, Constants.IndianTimeZone);
         }
 
         /// <summary>
@@ -593,14 +449,11 @@ namespace QANinjaAdapter.Services.MarketData
         /// <returns>The local DateTime</returns>
         private DateTime UnixSecondsToLocalTime(int unixTimestamp)
         {
-            var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            return epoch.AddSeconds(unixTimestamp).ToLocalTime();
+            // OPTIMIZATION: Use cached epoch to avoid repeated allocations
+            return Constants.UnixEpoch.AddSeconds(unixTimestamp).ToLocalTime();
         }
 
-        #region Shared WebSocket Subscription (NEW - uses single connection)
-
-        // Feature flag to switch between legacy (per-symbol) and shared WebSocket
-        private bool _useSharedWebSocket = true;
+        #region Shared WebSocket Subscription
 
         // Shared WebSocket service instance
         private SharedWebSocketService _sharedWebSocketService;
@@ -721,12 +574,24 @@ namespace QANinjaAdapter.Services.MarketData
             try
             {
                 if (string.IsNullOrEmpty(symbol) || tickData == null || tickData.LastTradePrice <= 0)
+                {
+                    // POOL FIX: Return tickData to pool if we're discarding it early
+                    if (tickData != null)
+                        ZerodhaTickDataPool.Return(tickData);
                     return;
+                }
 
                 // Route to OptimizedTickProcessor
+                bool queued = false;
                 if (_useOptimizedProcessor)
                 {
-                    TickProcessor?.QueueTick(symbol, tickData);
+                    queued = TickProcessor?.QueueTick(symbol, tickData) ?? false;
+                    // POOL FIX: If QueueTick returned false (backpressure), return to pool
+                    if (!queued)
+                    {
+                        ZerodhaTickDataPool.Return(tickData);
+                        return; // Don't process synthetic straddle if tick was rejected
+                    }
                 }
                 else
                 {
@@ -736,6 +601,7 @@ namespace QANinjaAdapter.Services.MarketData
                         QAAdapter adapter = connector.GetAdapter() as QAAdapter;
                         adapter?.ProcessParsedTick(symbol, tickData);
                     }
+                    // Note: Legacy path - tickData ownership transfers to adapter
                 }
 
                 // Route to synthetic straddle service (only for options, not indices)
@@ -821,15 +687,6 @@ namespace QANinjaAdapter.Services.MarketData
                     }
                 }
             });
-        }
-
-        /// <summary>
-        /// Gets whether shared WebSocket mode is enabled
-        /// </summary>
-        public bool UseSharedWebSocket
-        {
-            get => _useSharedWebSocket;
-            set => _useSharedWebSocket = value;
         }
 
         /// <summary>

@@ -25,13 +25,15 @@ namespace QABrokerAPI.Zerodha.Utility
             return (buffer[offset] << 24) | (buffer[offset + 1] << 16) | (buffer[offset + 2] << 8) | buffer[offset + 3];
         }
 
+        // Cached Unix epoch to avoid repeated allocations in hot path
+        private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
         /// <summary>
         /// Converts a Zerodha/Unix timestamp to local DateTime
         /// </summary>
         public static DateTime UnixSecondsToLocalTime(int unixTimestamp)
         {
-            var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            DateTime utcTime = epoch.AddSeconds(unixTimestamp);
+            DateTime utcTime = UnixEpoch.AddSeconds(unixTimestamp);
             return utcTime.ToLocalTime();
         }
     }

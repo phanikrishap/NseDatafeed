@@ -121,5 +121,46 @@ namespace QANinjaAdapter.Models.MarketData
         /// Flag indicating if this is an index
         /// </summary>
         public bool IsIndex { get; set; }
+
+        /// <summary>
+        /// Resets all fields to default values for object pooling reuse.
+        /// Call this before returning the object to the pool.
+        /// </summary>
+        public void Reset()
+        {
+            InstrumentToken = 0;
+            LastTradePrice = 0;
+            LastTradeQty = 0;
+            AverageTradePrice = 0;
+            TotalQtyTraded = 0;
+            BuyQty = 0;
+            SellQty = 0;
+            Open = 0;
+            High = 0;
+            Low = 0;
+            Close = 0;
+            LastTradeTime = default;
+            OpenInterest = 0;
+            OpenInterestDayHigh = 0;
+            OpenInterestDayLow = 0;
+            ExchangeTimestamp = default;
+            InstrumentIdentifier = null;
+            HasMarketDepth = false;
+            IsIndex = false;
+
+            // Reset depth arrays (reuse existing arrays, just clear values)
+            for (int i = 0; i < BidDepth.Length; i++)
+            {
+                BidDepth[i].Price = 0;
+                BidDepth[i].Quantity = 0;
+                BidDepth[i].Orders = 0;
+            }
+            for (int i = 0; i < AskDepth.Length; i++)
+            {
+                AskDepth[i].Price = 0;
+                AskDepth[i].Quantity = 0;
+                AskDepth[i].Orders = 0;
+            }
+        }
     }
 }
