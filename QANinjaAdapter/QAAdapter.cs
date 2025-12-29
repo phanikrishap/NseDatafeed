@@ -3,6 +3,7 @@ using QABrokerAPI.Common.Enums;
 using QABrokerAPI.Zerodha.Websockets;
 using QANinjaAdapter.Classes;
 using QANinjaAdapter.Controls;
+using QANinjaAdapter.Helpers;
 using QANinjaAdapter.Models;
 using QANinjaAdapter.Models.MarketData;
 using QANinjaAdapter.Services.MarketData;
@@ -925,7 +926,7 @@ namespace QANinjaAdapter
             try
             {
                 // CRITICAL FIX: Ensure timestamp has proper DateTimeKind for NinjaTrader compatibility
-                var ninjaTraderTimestamp = EnsureProperDateTime(timestamp);
+                var ninjaTraderTimestamp = DateTimeHelper.EnsureProperDateTime(timestamp);
                 
                 lock (this._marketDataLock)
                 {
@@ -994,55 +995,7 @@ namespace QANinjaAdapter
             }
         }
 
-        private DateTime EnsureProperDateTime(DateTime dateTime)
-        {
-            try
-            {
-                DateTime resultTime;
-                
-                if (dateTime.Kind == DateTimeKind.Utc)
-                {
-                    try
-                    {
-                        // Convert UTC to local IST time
-                        TimeZoneInfo istTimeZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-                        DateTime istTime = TimeZoneInfo.ConvertTimeFromUtc(dateTime, istTimeZone);
-                        resultTime = new DateTime(istTime.Year, istTime.Month, istTime.Day, 
-                                                istTime.Hour, istTime.Minute, istTime.Second, 
-                                                istTime.Millisecond, DateTimeKind.Local);
-                    }
-                    catch
-                    {
-                        // Fallback: Use system local time conversion
-                        DateTime localTime = dateTime.ToLocalTime();
-                        resultTime = new DateTime(localTime.Year, localTime.Month, localTime.Day, 
-                                                localTime.Hour, localTime.Minute, localTime.Second, 
-                                                localTime.Millisecond, DateTimeKind.Local);
-                    }
-                }
-                else if (dateTime.Kind == DateTimeKind.Unspecified)
-                {
-                    resultTime = new DateTime(dateTime.Year, dateTime.Month, dateTime.Day, 
-                                            dateTime.Hour, dateTime.Minute, dateTime.Second, 
-                                            dateTime.Millisecond, DateTimeKind.Local);
-                }
-                else
-                {
-                    resultTime = new DateTime(dateTime.Year, dateTime.Month, dateTime.Day, 
-                                            dateTime.Hour, dateTime.Minute, dateTime.Second, 
-                                            dateTime.Millisecond, DateTimeKind.Local);
-                }
-                
-                return resultTime;
-            }
-            catch
-            {
-                var now = DateTime.Now;
-                return new DateTime(now.Year, now.Month, now.Day, 
-                                  now.Hour, now.Minute, now.Second, 
-                                  now.Millisecond, DateTimeKind.Local);
-            }
-        }
+        // Note: EnsureProperDateTime has been extracted to DateTimeHelper class
 
         private class BarsRequest
         {

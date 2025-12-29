@@ -191,6 +191,12 @@
     <Compile Include="Models\MarketData\ZerodhaTickData.cs" />
     <Compile Include="Models\MarketData\ZerodhaTickDataPool.cs" />
     <Compile Include="Models\MarketData\TickProcessingItem.cs" />
+    <Compile Include="Models\MarketData\SubscriptionCallback.cs" />
+    <Compile Include="Models\MarketData\BackpressureState.cs" />
+    <Compile Include="Models\MarketData\TickProcessorMetrics.cs" />
+    <Compile Include="Models\WebSocketConnectionState.cs" />
+    <Compile Include="Helpers\DateTimeHelper.cs" />
+    <Compile Include="Helpers\BinaryHelper.cs" />
     <Compile Include="Controls\CircularProgressBar.xaml.cs">
       <DependentUpon>CircularProgressBar.xaml</DependentUpon>
     </Compile>

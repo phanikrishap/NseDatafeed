@@ -9,6 +9,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using QANinjaAdapter.Models.MarketData;
 using QANinjaAdapter.Classes;
+using QANinjaAdapter.Helpers;
 using System.Buffers;
 
 namespace QANinjaAdapter.Services.MarketData
@@ -794,32 +795,7 @@ namespace QANinjaAdapter.Services.MarketData
             }
         }
 
-        private DateTime EnsureNinjaTraderDateTime(DateTime dateTime)
-        {
-            try
-            {
-                // Optimization: Case-by-case handling without expensive TimeZoneInfo.FindSystemTimeZoneById calls
-                if (dateTime.Kind == DateTimeKind.Local)
-                {
-                    return dateTime; // Already local
-                }
-
-                // Handle UTC DateTime - convert to cached IST
-                if (dateTime.Kind == DateTimeKind.Utc)
-                {
-                    var istTime = TimeZoneInfo.ConvertTimeFromUtc(dateTime, IstTimeZone);
-                    return DateTime.SpecifyKind(istTime, DateTimeKind.Local);
-                }
-
-                // Handle Unspecified DateTime - assume it's local IST
-                return DateTime.SpecifyKind(dateTime, DateTimeKind.Local);
-            }
-            catch
-            {
-                // Fallback: Create DateTime with current time
-                return DateTime.Now;
-            }
-        }
+        // Note: EnsureNinjaTraderDateTime has been extracted to DateTimeHelper class
 
         /// <summary>
         /// Process callbacks for the subscription with performance tracking.
@@ -1332,51 +1308,6 @@ namespace QANinjaAdapter.Services.MarketData
         }
     }
 
-    /// <summary>
-    /// Cached subscription callback information for O(1) lookup
-    /// </summary>
-    public class SubscriptionCallback
-    {
-        public Instrument Instrument { get; set; }
-        public Action<MarketDataType, double, long, DateTime, long> Callback { get; set; }
-    }
-
-    /// <summary>
-    /// Performance metrics for the tick processor
-    /// </summary>
-    public class TickProcessorMetrics
-    {
-        public long TicksQueued { get; set; }
-        public long TicksProcessed { get; set; }
-        public long PendingTicks { get; set; }
-        public int SubscriptionCount { get; set; }
-        public int SymbolMappingCount { get; set; }
-        public bool IsHealthy { get; set; }
-        public long CurrentTicksPerSecond { get; set; }
-        public long PeakTicksPerSecond { get; set; }
-        public double AverageProcessingTimeMs { get; set; }
-        public double ProcessingEfficiency { get; set; }
-        public long TotalTicksDropped { get; set; }
-    }
-
-    /// <summary>
-    /// Backpressure management states for intelligent queue control
-    /// </summary>
-    public enum BackpressureState
-    {
-        /// <summary>Normal operation - all ticks accepted</summary>
-        Normal = 0,
-
-        /// <summary>Warning level - selective dropping of low-priority symbols</summary>
-        Warning = 1,
-
-        /// <summary>Critical level - aggressive dropping and oldest tick removal</summary>
-        Critical = 2,
-
-        /// <summary>Emergency level - only essential symbols accepted</summary>
-        Emergency = 3,
-
-        /// <summary>Maximum capacity - reject all new ticks</summary>
-        Maximum = 4
-    }
+    // Note: SubscriptionCallback, TickProcessorMetrics, and BackpressureState
+    // have been extracted to QANinjaAdapter.Models.MarketData namespace
 }

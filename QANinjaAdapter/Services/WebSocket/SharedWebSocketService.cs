@@ -7,6 +7,8 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using QANinjaAdapter.Helpers;
+using QANinjaAdapter.Models;
 using QANinjaAdapter.Models.MarketData;
 using QANinjaAdapter.Services.Configuration;
 using QANinjaAdapter.Services.Instruments;
@@ -14,23 +16,7 @@ using QANinjaAdapter.Services.Zerodha;
 
 namespace QANinjaAdapter.Services.WebSocket
 {
-    /// <summary>
-    /// Connection state machine for SharedWebSocketService.
-    /// Provides atomic state transitions to prevent race conditions.
-    /// </summary>
-    public enum WebSocketConnectionState
-    {
-        /// <summary>Initial state - never connected</summary>
-        Disconnected = 0,
-        /// <summary>Connection attempt in progress</summary>
-        Connecting = 1,
-        /// <summary>Connected and ready for operations</summary>
-        Connected = 2,
-        /// <summary>Reconnecting after disconnect</summary>
-        Reconnecting = 3,
-        /// <summary>Shutting down - reject all operations</summary>
-        Disposing = 4
-    }
+    // Note: WebSocketConnectionState enum has been extracted to QANinjaAdapter.Models namespace
 
     /// <summary>
     /// Manages a single shared WebSocket connection for all symbol subscriptions.
@@ -568,20 +554,20 @@ namespace QANinjaAdapter.Services.WebSocket
             try
             {
                 int offset = 0;
-                int packetCount = ReadInt16BE(data, offset);
+                int packetCount = BinaryHelper.ReadInt16BE(data, offset);
                 offset += 2;
 
                 for (int i = 0; i < packetCount; i++)
                 {
                     if (offset + 2 > length) break;
 
-                    int packetLength = ReadInt16BE(data, offset);
+                    int packetLength = BinaryHelper.ReadInt16BE(data, offset);
                     offset += 2;
 
                     if (offset + packetLength > length) break;
 
                     // Get instrument token
-                    int instrumentToken = ReadInt32BE(data, offset);
+                    int instrumentToken = BinaryHelper.ReadInt32BE(data, offset);
 
                     // Find the symbol for this token
                     if (_tokenToSymbolMap.TryGetValue(instrumentToken, out string symbol))
@@ -638,7 +624,7 @@ namespace QANinjaAdapter.Services.WebSocket
             {
                 // OPTIMIZATION: Use object pool to reduce GC pressure in hot path
                 var tickData = ZerodhaTickDataPool.Rent();
-                tickData.InstrumentToken = ReadInt32BE(data, offset);
+                tickData.InstrumentToken = BinaryHelper.ReadInt32BE(data, offset);
                 tickData.InstrumentIdentifier = symbol;
                 tickData.IsIndex = isIndex;
                 tickData.LastTradeTime = DateTime.Now;
@@ -651,30 +637,30 @@ namespace QANinjaAdapter.Services.WebSocket
                 if (packetLength == 8)
                 {
                     // LTP packet
-                    tickData.LastTradePrice = ReadInt32BE(data, offset + 4) / 100.0;
+                    tickData.LastTradePrice = BinaryHelper.ReadInt32BE(data, offset + 4) / 100.0;
                 }
                 else if (isIndex && (packetLength == 28 || packetLength == 32))
                 {
                     // Index quote/full packet
-                    tickData.LastTradePrice = ReadInt32BE(data, offset + 4) / 100.0;
-                    if (offset + 12 <= data.Length) tickData.High = ReadInt32BE(data, offset + 8) / 100.0;
-                    if (offset + 16 <= data.Length) tickData.Low = ReadInt32BE(data, offset + 12) / 100.0;
-                    if (offset + 20 <= data.Length) tickData.Open = ReadInt32BE(data, offset + 16) / 100.0;
-                    if (offset + 24 <= data.Length) tickData.Close = ReadInt32BE(data, offset + 20) / 100.0;
+                    tickData.LastTradePrice = BinaryHelper.ReadInt32BE(data, offset + 4) / 100.0;
+                    if (offset + 12 <= data.Length) tickData.High = BinaryHelper.ReadInt32BE(data, offset + 8) / 100.0;
+                    if (offset + 16 <= data.Length) tickData.Low = BinaryHelper.ReadInt32BE(data, offset + 12) / 100.0;
+                    if (offset + 20 <= data.Length) tickData.Open = BinaryHelper.ReadInt32BE(data, offset + 16) / 100.0;
+                    if (offset + 24 <= data.Length) tickData.Close = BinaryHelper.ReadInt32BE(data, offset + 20) / 100.0;
                 }
                 else if (packetLength >= 44)
                 {
                     // Quote or full packet for tradeable instruments
-                    tickData.LastTradePrice = ReadInt32BE(data, offset + 4) / 100.0;
-                    if (offset + 12 <= data.Length) tickData.LastTradeQty = ReadInt32BE(data, offset + 8);
-                    if (offset + 16 <= data.Length) tickData.AverageTradePrice = ReadInt32BE(data, offset + 12) / 100.0;
-                    if (offset + 20 <= data.Length) tickData.TotalQtyTraded = ReadInt32BE(data, offset + 16);
-                    if (offset + 24 <= data.Length) tickData.BuyQty = ReadInt32BE(data, offset + 20);
-                    if (offset + 28 <= data.Length) tickData.SellQty = ReadInt32BE(data, offset + 24);
-                    if (offset + 32 <= data.Length) tickData.Open = ReadInt32BE(data, offset + 28) / 100.0;
-                    if (offset + 36 <= data.Length) tickData.High = ReadInt32BE(data, offset + 32) / 100.0;
-                    if (offset + 40 <= data.Length) tickData.Low = ReadInt32BE(data, offset + 36) / 100.0;
-                    if (offset + 44 <= data.Length) tickData.Close = ReadInt32BE(data, offset + 40) / 100.0;
+                    tickData.LastTradePrice = BinaryHelper.ReadInt32BE(data, offset + 4) / 100.0;
+                    if (offset + 12 <= data.Length) tickData.LastTradeQty = BinaryHelper.ReadInt32BE(data, offset + 8);
+                    if (offset + 16 <= data.Length) tickData.AverageTradePrice = BinaryHelper.ReadInt32BE(data, offset + 12) / 100.0;
+                    if (offset + 20 <= data.Length) tickData.TotalQtyTraded = BinaryHelper.ReadInt32BE(data, offset + 16);
+                    if (offset + 24 <= data.Length) tickData.BuyQty = BinaryHelper.ReadInt32BE(data, offset + 20);
+                    if (offset + 28 <= data.Length) tickData.SellQty = BinaryHelper.ReadInt32BE(data, offset + 24);
+                    if (offset + 32 <= data.Length) tickData.Open = BinaryHelper.ReadInt32BE(data, offset + 28) / 100.0;
+                    if (offset + 36 <= data.Length) tickData.High = BinaryHelper.ReadInt32BE(data, offset + 32) / 100.0;
+                    if (offset + 40 <= data.Length) tickData.Low = BinaryHelper.ReadInt32BE(data, offset + 36) / 100.0;
+                    if (offset + 44 <= data.Length) tickData.Close = BinaryHelper.ReadInt32BE(data, offset + 40) / 100.0;
                 }
 
                 return tickData;
@@ -686,21 +672,7 @@ namespace QANinjaAdapter.Services.WebSocket
             }
         }
 
-        /// <summary>
-        /// Reads a 16-bit integer in big-endian format
-        /// </summary>
-        private static int ReadInt16BE(byte[] data, int offset)
-        {
-            return (data[offset] << 8) | data[offset + 1];
-        }
-
-        /// <summary>
-        /// Reads a 32-bit integer in big-endian format
-        /// </summary>
-        private static int ReadInt32BE(byte[] data, int offset)
-        {
-            return (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
-        }
+        // Note: ReadInt16BE and ReadInt32BE have been extracted to BinaryHelper class
 
         /// <summary>
         /// Gets the current connection status
