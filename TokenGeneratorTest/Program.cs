@@ -3,7 +3,7 @@ using System.IO;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using QANinjaAdapter.Services.Auth;
+using ZerodhaDatafeedAdapter.Services.Auth;
 
 namespace TokenGeneratorTest
 {
@@ -17,17 +17,17 @@ namespace TokenGeneratorTest
         // Config file path (same as NinjaTrader adapter uses)
         private static readonly string CONFIG_PATH = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "NinjaTrader 8", "QAAdapter", "config.json");
+            "NinjaTrader 8", "ZerodhaAdapter", "config.json");
 
         // Instruments file path
         private static readonly string INSTRUMENTS_PATH = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "NinjaTrader 8", "QAAdapter", "mapped_instruments.json");
+            "NinjaTrader 8", "ZerodhaAdapter", "mapped_instruments.json");
 
         // SQLite database path
         private static readonly string DB_PATH = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "NinjaTrader 8", "QAAdapter", "InstrumentMasters.db");
+            "NinjaTrader 8", "ZerodhaAdapter", "InstrumentMasters.db");
 
         static async Task Main(string[] args)
         {

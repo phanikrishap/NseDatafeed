@@ -1,14 +1,16 @@
-# Build and Deploy QANinjaAdapter to NinjaTrader
+# Build and Deploy ZerodhaDatafeedAdapter to NinjaTrader
 # Run this script from PowerShell
 
 $ErrorActionPreference = "Stop"
 
-$ProjectPath = "d:\CascadeProjects\NseDatafeed_new\QANinjaAdapter\QANinjaAdapter.csproj"
-$SourceDll = "d:\CascadeProjects\NseDatafeed_new\QANinjaAdapter\bin\Debug\QANinjaAdapter.dll"
-$DestDll = "C:\Users\Phani Krishna\Documents\NinjaTrader 8\bin\Custom\QANinjaAdapter.dll"
+$ProjectPath = "d:\CascadeProjects\NseDatafeed_new\ZerodhaDatafeedAdapter\ZerodhaDatafeedAdapter.csproj"
+$SourceDll = "d:\CascadeProjects\NseDatafeed_new\ZerodhaDatafeedAdapter\bin\Debug\ZerodhaDatafeedAdapter.dll"
+$SourceApiDll = "d:\CascadeProjects\NseDatafeed_new\ZerodhaAPI\bin\Debug\ZerodhaAPI.dll"
+$DestDll = "C:\Users\Phani Krishna\Documents\NinjaTrader 8\bin\Custom\ZerodhaDatafeedAdapter.dll"
+$DestApiDll = "C:\Users\Phani Krishna\Documents\NinjaTrader 8\bin\Custom\ZerodhaAPI.dll"
 $MSBuild = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
 
-Write-Host "=== QANinjaAdapter Build & Deploy ===" -ForegroundColor Cyan
+Write-Host "=== ZerodhaDatafeedAdapter Build & Deploy ===" -ForegroundColor Cyan
 Write-Host ""
 
 # Step 1: Build
@@ -37,14 +39,19 @@ Write-Host ""
 # Step 3: Copy to NinjaTrader
 Write-Host "[3/3] Copying to NinjaTrader..." -ForegroundColor Yellow
 try {
+    # Copy ZerodhaDatafeedAdapter.dll
     Copy-Item -Path $SourceDll -Destination $DestDll -Force
-    Write-Host "Copied successfully!" -ForegroundColor Green
-
-    # Verify copy
+    Write-Host "Copied ZerodhaDatafeedAdapter.dll successfully!" -ForegroundColor Green
     $destInfo = Get-Item $DestDll
-    Write-Host "Destination DLL: $DestDll" -ForegroundColor Gray
+    Write-Host "  Destination: $DestDll" -ForegroundColor Gray
     Write-Host "  Size: $($destInfo.Length) bytes" -ForegroundColor Gray
-    Write-Host "  Modified: $($destInfo.LastWriteTime)" -ForegroundColor Gray
+
+    # Copy ZerodhaAPI.dll
+    Copy-Item -Path $SourceApiDll -Destination $DestApiDll -Force
+    Write-Host "Copied ZerodhaAPI.dll successfully!" -ForegroundColor Green
+    $destApiInfo = Get-Item $DestApiDll
+    Write-Host "  Destination: $DestApiDll" -ForegroundColor Gray
+    Write-Host "  Size: $($destApiInfo.Length) bytes" -ForegroundColor Gray
 } catch {
     Write-Host "ERROR: Failed to copy DLL. Is NinjaTrader running?" -ForegroundColor Red
     Write-Host "Close NinjaTrader and try again." -ForegroundColor Yellow

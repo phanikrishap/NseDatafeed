@@ -62,9 +62,9 @@ Desktop.ini
 # Project specific ignores
 mapped_instruments.json
 InstrumentMasters.db
-QAAdapter.log
-QANinjaAdapter.dll
-QABrokerAPI.dll
+ZerodhaAdapter.log
+ZerodhaDatafeedAdapter.dll
+ZerodhaAPI.dll
 *.log
 *.sqlite
 *.db

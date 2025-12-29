@@ -1,4 +1,4 @@
-﻿namespace QA.Tests
+﻿namespace Zerodha.Tests
 {
     [TestClass]
     public sealed class Test1

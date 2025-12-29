@@ -1,10 +1,10 @@
-# QA NinjaAdapter
+# Zerodha NinjaAdapter
 
 A high-performance adapter for connecting NinjaTrader 8 to Indian trading platforms, primarily Zerodha, with support for real-time market data, synthetic straddles, and option chain analysis.
 
 ## Overview
 
-QA NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader 8 to seamlessly connect with Zerodha and other Indian brokers. The adapter provides real-time market data integration, historical data access, synthetic straddle instruments, and a Market Analyzer for option chain visualization.
+Zerodha NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader 8 to seamlessly connect with Zerodha and other Indian brokers. The adapter provides real-time market data integration, historical data access, synthetic straddle instruments, and a Market Analyzer for option chain visualization.
 
 ## Key Features
 
@@ -29,10 +29,10 @@ QA NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader 8 to
           │                │                │                   │
           ▼                ▼                ▼                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           QANinjaAdapter                                    │
+│                           ZerodhaDatafeedAdapter                                    │
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         QAAdapter (Main Entry)                      │    │
+│  │                         ZerodhaAdapter (Main Entry)                      │    │
 │  │  • SubscribeMarketData()  • SubscribeMarketDepth()                  │    │
 │  │  • ProcessSyntheticLegTick()  • Historical Data Requests            │    │
 │  └──────────────────────────────────┬──────────────────────────────────┘    │
@@ -105,7 +105,7 @@ QA NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader 8 to
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              QABrokerAPI                                    │
+│                              ZerodhaAPI                                    │
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                            Common                                   │    │
@@ -259,13 +259,13 @@ WebSocket Binary Message
 ## Installation
 
 1. Build the solution in Visual Studio (Debug or Release)
-2. Copy `QANinjaAdapter.dll` to:
+2. Copy `ZerodhaDatafeedAdapter.dll` to:
    ```
    %UserProfile%\Documents\NinjaTrader 8\bin\Custom
    ```
 3. Create the configuration folder:
    ```
-   %UserProfile%\Documents\NinjaTrader 8\QAAdapter
+   %UserProfile%\Documents\NinjaTrader 8\ZerodhaAdapter
    ```
 4. Create `config.json` with your Zerodha credentials
 5. Restart NinjaTrader 8
@@ -320,7 +320,7 @@ The Market Analyzer provides real-time visualization of:
    - ATM strike highlighting
    - Premium histograms
 
-Access via: NinjaTrader → New → Market Analyzer (QA)
+Access via: NinjaTrader → New → Market Analyzer (Zerodha)
 
 ## Synthetic Straddles
 
@@ -338,7 +338,7 @@ These appear as regular instruments in NinjaTrader and receive real-time price u
 
 Logs are written to:
 ```
-%UserProfile%\Documents\NinjaTrader 8\QAAdapter\Logs\QAAdapter_YYYY-MM-DD.log
+%UserProfile%\Documents\NinjaTrader 8\ZerodhaAdapter\Logs\ZerodhaAdapter_YYYY-MM-DD.log
 ```
 
 Key log prefixes:
@@ -376,12 +376,12 @@ Key log prefixes:
 
 ### Build
 ```bash
-MSBuild QANinjaAdapter.csproj /t:Build /p:Configuration=Debug
+MSBuild ZerodhaDatafeedAdapter.csproj /t:Build /p:Configuration=Debug
 ```
 
 ### Deploy
 ```bash
-copy /Y "bin\Debug\QANinjaAdapter.dll" "%UserProfile%\Documents\NinjaTrader 8\bin\Custom\"
+copy /Y "bin\Debug\ZerodhaDatafeedAdapter.dll" "%UserProfile%\Documents\NinjaTrader 8\bin\Custom\"
 ```
 
 ## License

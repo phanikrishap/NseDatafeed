@@ -1,0 +1,12 @@
+
+using System.Runtime.Serialization;
+namespace ZerodhaAPI.Common.Enums;
+
+public enum BrokerOrderType
+{
+  [EnumMember(Value = "LIMIT")] Limit,
+  [EnumMember(Value = "MARKET")] Market,
+  [EnumMember(Value = "LIMIT_MAKER")] LimitMaker,
+  [EnumMember(Value = "STOP_LOSS_LIMIT")] StopLossLimit,
+  [EnumMember(Value = "TAKE_PROFIT_LIMIT")] TakeProfitLimit,
+}

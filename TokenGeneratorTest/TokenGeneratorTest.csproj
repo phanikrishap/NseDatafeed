@@ -48,14 +48,14 @@
       <HintPath>..\References\Newtonsoft.Json.dll</HintPath>
     </Reference>
     <Reference Include="System.Data.SQLite">
-      <HintPath>..\QANinjaAdapter\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\lib\net46\System.Data.SQLite.dll</HintPath>
+      <HintPath>..\ZerodhaDatafeedAdapter\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\lib\net46\System.Data.SQLite.dll</HintPath>
     </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="InstrumentDownloader.cs" />
     <!-- Include the ZerodhaTokenGenerator from the main project -->
-    <Compile Include="..\QANinjaAdapter\Services\Auth\ZerodhaTokenGenerator.cs">
+    <Compile Include="..\ZerodhaDatafeedAdapter\Services\Auth\ZerodhaTokenGenerator.cs">
       <Link>ZerodhaTokenGenerator.cs</Link>
     </Compile>
   </ItemGroup>
