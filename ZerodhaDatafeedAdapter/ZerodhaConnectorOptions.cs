@@ -25,9 +25,9 @@ namespace ZerodhaDatafeedAdapter
             set => this._version = value;
         }
 
-        // Comment out the BrandName override to use the default naming from base class
+        // Comment out BrandName - let it use the Provider's default name
         //[Browsable(false)]
-        //public override string BrandName => "Zerodha Adapter";
+        //public override string BrandName => "Zerodha";
 
         [Browsable(false)]
         public override Type AdapterClassType => typeof(ZerodhaAdapter);
@@ -68,7 +68,7 @@ namespace ZerodhaDatafeedAdapter
             this.Provider = Provider.Custom19;
             int num = this.IsDataProviderOnly ? 1 : 0;
             // Set the name consistently with what NinjaTrader expects
-            this.Name = "Zerodha Adapter";
+            this.Name = "Zerodha";
             this.ServerAddress = "kite.zerodha.com";
             }
             catch (Exception ex)

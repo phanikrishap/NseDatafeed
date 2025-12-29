@@ -33,7 +33,7 @@ namespace ZerodhaDatafeedAdapter
 {
     public class ZerodhaAdapter : AdapterBase, IAdapter, IDisposable
     {
-        private IConnection _ninjaConnection;
+        private IConnection _zerodhaConncetion;
         private ZerodhaConnectorOptions _options;
         private readonly ConcurrentDictionary<string, L1Subscription> _l1Subscriptions = new ConcurrentDictionary<string, L1Subscription>();
         private readonly ConcurrentDictionary<string, L2Subscription> _l2Subscriptions = new ConcurrentDictionary<string, L2Subscription>();
@@ -70,8 +70,8 @@ namespace ZerodhaDatafeedAdapter
         public void Connect(IConnection connection)
         {
             Logger.Info("ZerodhaAdapter: Initializing and connecting adapter...");
-            this._ninjaConnection = connection;
-            this._options = (ZerodhaConnectorOptions)this._ninjaConnection.Options;
+            this._zerodhaConncetion = connection;
+            this._options = (ZerodhaConnectorOptions)this._zerodhaConncetion.Options;
             
             // Set the adapter instance in the Connector class
             Connector.SetAdapter(this);
@@ -79,20 +79,20 @@ namespace ZerodhaDatafeedAdapter
             // Initialize the SyntheticStraddleService
             _syntheticStraddleService = new SyntheticInstruments.SyntheticStraddleService(this);
             
-            this._ninjaConnection.OrderTypes = new NinjaTrader.Cbi.OrderType[4]
+            this._zerodhaConncetion.OrderTypes = new NinjaTrader.Cbi.OrderType[4]
             {
                 NinjaTrader.Cbi.OrderType.Market,
                 NinjaTrader.Cbi.OrderType.Limit,
                 NinjaTrader.Cbi.OrderType.StopMarket,
                 NinjaTrader.Cbi.OrderType.StopLimit
             };
-            this._ninjaConnection.TimeInForces = new NinjaTrader.Cbi.TimeInForce[3]
+            this._zerodhaConncetion.TimeInForces = new NinjaTrader.Cbi.TimeInForce[3]
             {
                 NinjaTrader.Cbi.TimeInForce.Day,
                 NinjaTrader.Cbi.TimeInForce.Gtc,
                 NinjaTrader.Cbi.TimeInForce.Gtd
             };
-            this._ninjaConnection.Features = new NinjaTrader.Cbi.Feature[10]
+            this._zerodhaConncetion.Features = new NinjaTrader.Cbi.Feature[10]
             {
                 NinjaTrader.Cbi.Feature.Bars1Minute,
                 NinjaTrader.Cbi.Feature.BarsDaily,
@@ -105,13 +105,13 @@ namespace ZerodhaDatafeedAdapter
                 NinjaTrader.Cbi.Feature.CustomOrders,
                 NinjaTrader.Cbi.Feature.MarketDepth
             };
-            this._ninjaConnection.InstrumentTypes = new InstrumentType[3]
+            this._zerodhaConncetion.InstrumentTypes = new InstrumentType[3]
             {
                 InstrumentType.Stock,
                 InstrumentType.Future,
                 InstrumentType.Option
             };
-            this._ninjaConnection.MarketDataTypes = new MarketDataType[1]
+            this._zerodhaConncetion.MarketDataTypes = new MarketDataType[1]
             {
                 MarketDataType.Last
             };
@@ -120,13 +120,13 @@ namespace ZerodhaDatafeedAdapter
 
         private async void Connect()
         {
-            if (this._ninjaConnection.Status == ConnectionStatus.Connecting)
+            if (this._zerodhaConncetion.Status == ConnectionStatus.Connecting)
             {
                 if (Connector.Instance.CheckConnection())
                 {
                     Logger.Info("ZerodhaAdapter: Connection to provider (Zerodha) successful.");
                     this.SetInstruments();
-                    this._ninjaConnection.ConnectionStatusCallback(ConnectionStatus.Connected, ConnectionStatus.Connected, ErrorCode.NoError, "");
+                    this._zerodhaConncetion.ConnectionStatusCallback(ConnectionStatus.Connected, ConnectionStatus.Connected, ErrorCode.NoError, "");
 
                     // Start the cleanup timer to remove stale callbacks periodically
                     StartCleanupTimer();
@@ -134,7 +134,7 @@ namespace ZerodhaDatafeedAdapter
                     await Connector.Instance.RegisterInstruments();
                 }
                 else
-                    this._ninjaConnection.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.LogOnFailed, "Unable to connect to provider Zerodha.");
+                    this._zerodhaConncetion.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.LogOnFailed, "Unable to connect to provider Zerodha.");
             }
             else
                 this.Disconnect();
@@ -159,10 +159,7 @@ namespace ZerodhaDatafeedAdapter
         {
             if (this.State == State.SetDefaults)
             {
-
-                this.Name = "QA Adapter";
-                //this.DisplayName = "ZerodhaDatafeedAdapter";
-                //this.DisplayName = "ZerodhaDatafeedAdapter";
+                this.Name = "Zerodha";
             }
             if (this.State != State.Configure)
                 return;
@@ -182,9 +179,9 @@ namespace ZerodhaDatafeedAdapter
                 this._marketLiveDataSymbols?.Clear();
             lock (ZerodhaAdapter._lockDepthSymbol)
                 this._marketDepthDataSymbols?.Clear();
-            if (this._ninjaConnection.Status == ConnectionStatus.Disconnected)
+            if (this._zerodhaConncetion.Status == ConnectionStatus.Disconnected)
                 return;
-            this._ninjaConnection.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.NoError, string.Empty);
+            this._zerodhaConncetion.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.NoError, string.Empty);
         }
 
         public void ResolveInstrument(Instrument instrument, Action<Instrument, ErrorCode, string> callback) { }
@@ -199,12 +196,12 @@ namespace ZerodhaDatafeedAdapter
         {
             try
             {
-                if (this._ninjaConnection.Trace.MarketData)
-                    this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
+                if (this._zerodhaConncetion.Trace.MarketData)
+                    this._zerodhaConncetion.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
                         $"({this._options.Name}) ZerodhaAdapter.SubscribeMarketData: instrument='{instrument.FullName}'"));
 
-                if (this._ninjaConnection.Status == ConnectionStatus.Disconnecting ||
-                    this._ninjaConnection.Status == ConnectionStatus.Disconnected)
+                if (this._zerodhaConncetion.Status == ConnectionStatus.Disconnecting ||
+                    this._zerodhaConncetion.Status == ConnectionStatus.Disconnected)
                     return;
 
                 string name = instrument.MasterInstrument.Name;
@@ -355,8 +352,8 @@ namespace ZerodhaDatafeedAdapter
                             }
                             Logger.Error($"[SUBSCRIBE] Error subscribing to {capturedName}: {ex.Message}");
 
-                            if (this._ninjaConnection.Trace.Connect)
-                                this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
+                            if (this._zerodhaConncetion.Trace.Connect)
+                                this._zerodhaConncetion.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
                                     $"({this._options.Name}) ZerodhaAdapter.SubscribeToTicks Exception={ex}"));
                         }
                     });
@@ -368,8 +365,8 @@ namespace ZerodhaDatafeedAdapter
             }
             catch (Exception ex)
             {
-                if (this._ninjaConnection.Trace.Connect)
-                    this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
+                if (this._zerodhaConncetion.Trace.Connect)
+                    this._zerodhaConncetion.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
                         $"({this._options.Name}) ZerodhaAdapter.SubscribeMarketData Exception={ex}"));
             }
         }
@@ -419,9 +416,9 @@ namespace ZerodhaDatafeedAdapter
             //NinjaTrader.NinjaScript.NinjaScript.Log($"DEBUG-CALL: SubscribeMarketData called for {instrument.FullName}", NinjaTrader.Cbi.LogLevel.Error); // Use Error level to make it stand out
             try
             {
-                if (this._ninjaConnection.Trace.MarketDepth)
-                    this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture, $"({this._options.Name}) ZerodhaAdapter.SubscribeMarketDepth: instrument='{instrument.FullName}'"));
-                if (this._ninjaConnection.Status == ConnectionStatus.Disconnecting || this._ninjaConnection.Status == ConnectionStatus.Disconnected)
+                if (this._zerodhaConncetion.Trace.MarketDepth)
+                    this._zerodhaConncetion.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture, $"({this._options.Name}) ZerodhaAdapter.SubscribeMarketDepth: instrument='{instrument.FullName}'"));
+                if (this._zerodhaConncetion.Status == ConnectionStatus.Disconnecting || this._zerodhaConncetion.Status == ConnectionStatus.Disconnected)
                     return;
                 string name = instrument.MasterInstrument.Name;
                 MarketType mt = MarketType.Spot;
@@ -459,13 +456,13 @@ namespace ZerodhaDatafeedAdapter
                         callback
                     }
                 };
-                int status = (int)this._ninjaConnection.Status;
+                int status = (int)this._zerodhaConncetion.Status;
             }
             catch (Exception ex)
             {
-                if (!this._ninjaConnection.Trace.Connect)
+                if (!this._zerodhaConncetion.Trace.Connect)
                     return;
-                this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture, $"({this._options.Name}) ZerodhaAdapter.SubscribeMarketDepth Exception={ex.ToString()}"));
+                this._zerodhaConncetion.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture, $"({this._options.Name}) ZerodhaAdapter.SubscribeMarketDepth Exception={ex.ToString()}"));
             }
         }
 
@@ -500,8 +497,8 @@ namespace ZerodhaDatafeedAdapter
 
         private void BarsWorker(ZerodhaAdapter.BarsRequest barsRequest)
         {
-            if (this._ninjaConnection.Trace.Bars)
-                this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture, $"({this._options.Name}) ZerodhaAdapter.BarsWorker"));
+            if (this._zerodhaConncetion.Trace.Bars)
+                this._zerodhaConncetion.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture, $"({this._options.Name}) ZerodhaAdapter.BarsWorker"));
 
             EventHandler eventHandler = (EventHandler)((s, e) => { });
 
@@ -652,9 +649,9 @@ namespace ZerodhaDatafeedAdapter
                             break;
                         }
 
-                        if (this._ninjaConnection.Status != ConnectionStatus.Disconnecting)
+                        if (this._zerodhaConncetion.Status != ConnectionStatus.Disconnecting)
                         {
-                            if (this._ninjaConnection.Status != ConnectionStatus.Disconnected)
+                            if (this._zerodhaConncetion.Status != ConnectionStatus.Disconnected)
                             {
                                 double open = record.Open;
                                 double high = record.High;
@@ -716,8 +713,8 @@ namespace ZerodhaDatafeedAdapter
                 NinjaTrader.NinjaScript.NinjaScript.Log(errorMessage, NinjaTrader.Cbi.LogLevel.Error);
                 NinjaTrader.NinjaScript.NinjaScript.Log($"Stack trace: {ex.StackTrace}", NinjaTrader.Cbi.LogLevel.Error);
 
-                if (this._ninjaConnection.Trace.Bars)
-                    this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture, $"({this._options.Name}) ZerodhaAdapter.BarsWorker Exception='{ex.ToString()}'"));
+                if (this._zerodhaConncetion.Trace.Bars)
+                    this._zerodhaConncetion.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture, $"({this._options.Name}) ZerodhaAdapter.BarsWorker Exception='{ex.ToString()}'"));
 
                 if (barsRequest == null)
                     return;

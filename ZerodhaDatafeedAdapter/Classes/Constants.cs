@@ -16,7 +16,7 @@ namespace ZerodhaDatafeedAdapter.Classes
         public static readonly TimeSpan MarketCloseTime = new TimeSpan(15, 30, 0);
         
         public const string ProviderName = "Zerodha";
-        public const int ProviderId = 1019;
+        public const int ProviderId = 1019;  // Custom19 provider
 
         // File and Directory Paths
         public const string BaseDataFolder = "NinjaTrader 8\\ZerodhaAdapter\\";

@@ -57,7 +57,12 @@
       "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\TimeInForce.cs\")",
       "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\WithdrawHistoryStatus.cs\")",
       "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\ZerodhaAPI.csproj\" -t:Rebuild -p:Configuration=Debug -verbosity:minimal)",
-      "Bash(copy /Y \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\bin\\\\Debug\\\\ZerodhaDatafeedAdapter.dll\" \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\bin\\\\Custom\\\\ZerodhaDatafeedAdapter.dll\")"
+      "Bash(copy /Y \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\bin\\\\Debug\\\\ZerodhaDatafeedAdapter.dll\" \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\bin\\\\Custom\\\\ZerodhaDatafeedAdapter.dll\")",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show d04d1f8717bf2486920a3affcf55cb0a7c4533f6 --name-only)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show d04d1f8717bf2486920a3affcf55cb0a7c4533f6:QANinjaAdapter/Connector.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show d04d1f8717bf2486920a3affcf55cb0a7c4533f6:QANinjaAdapter/QAAdapter.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" ls-tree:*)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show d04d1f8717bf2486920a3affcf55cb0a7c4533f6:QANinjaAdapter/QAConnectorOptions.cs)"
     ]
   }
 }
