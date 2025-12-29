@@ -39,7 +39,25 @@
       "Bash(ls:*)",
       "Bash(xargs:*)",
       "Bash(grep:*)",
-      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\ZerodhaAPI.csproj\" -t:Build -p:Configuration=Debug -verbosity:minimal)"
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\ZerodhaAPI.csproj\" -t:Build -p:Configuration=Debug -verbosity:minimal)",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\BrokerOrderType.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\BrokerSymbolFilterType.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\DepositHistoryStatus.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\EndpointSecurityType.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\ExecutionType.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\HttpVerb.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\KlineInterval.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\NewOrderResponseType.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\OrderRejectReason.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\OrderSide.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\OrderStatus.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\OrderType.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\PartialDepthLevels.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\SystemStatus.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\TimeInForce.cs\")",
+      "Bash(del \"D:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\Common\\\\Enums\\\\WithdrawHistoryStatus.cs\")",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\ZerodhaAPI.csproj\" -t:Rebuild -p:Configuration=Debug -verbosity:minimal)",
+      "Bash(copy /Y \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\bin\\\\Debug\\\\ZerodhaDatafeedAdapter.dll\" \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\bin\\\\Custom\\\\ZerodhaDatafeedAdapter.dll\")"
     ]
   }
 }

@@ -37,202 +37,21 @@
     <Reference Include="log4net">
       <HintPath>..\References\log4net.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.Caching.Abstractions">
-      <HintPath>..\References\Microsoft.Extensions.Caching.Abstractions.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Caching.Memory">
-      <HintPath>..\References\Microsoft.Extensions.Caching.Memory.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Logging.Abstractions, Version=8.0.0.0, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\References\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Options, Version=8.0.0.0, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\References\Microsoft.Extensions.Options.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Primitives, Version=8.0.0.0, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\References\Microsoft.Extensions.Primitives.dll</HintPath>
-    </Reference>
-    <Reference Include="Newtonsoft.Json, Version=13.0.1.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\References\Newtonsoft.Json.dll</HintPath>
-    </Reference>
     <Reference Include="System" />
-    <Reference Include="System.ComponentModel.DataAnnotations" />
     <Reference Include="System.Core" />
-    <Reference Include="System.Memory, Version=4.0.1.2, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\References\System.Memory.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\ZerodhaDatafeedAdapter\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Runtime.Serialization" />
-    <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.0.1, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\References\System.Threading.Tasks.Extensions.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Xml.Linq" />
-    <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data" />
     <Reference Include="System.Net.Http" />
-    <Reference Include="System.Xml" />
-    <Reference Include="websocket-sharp">
-      <HintPath>..\References\websocket_sharp.dll</HintPath>
-      <SpecificVersion>False</SpecificVersion>
-      <Private>True</Private>
-    </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Common\Caching\APICacheManager.cs" />
-    <Compile Include="Common\Caching\Interfaces\IAPICacheManager.cs" />
-    <Compile Include="Common\Caching\SingletonCacheManager.cs" />
-    <Compile Include="Common\Converter\EpochTimeConverter.cs" />
-    <Compile Include="Common\Converter\BrokerSymbolFilterConverter.cs" />
-    <Compile Include="Common\Converter\KlineCandleSticksConverter.cs" />
-    <Compile Include="Common\Converter\StringDecimalConverter.cs" />
-    <Compile Include="Common\Converter\TimeSpanConverter.cs" />
-    <Compile Include="Common\Converter\TraderPriceConverter.cs" />
-    <Compile Include="Common\Enums\DepositHistoryStatus.cs" />
-    <Compile Include="Common\Enums\EndpointSecurityType.cs" />
-    <Compile Include="Common\Enums\BrokerOrderType.cs" />
-    <Compile Include="Common\Enums\BrokerSymbolFilterType.cs" />
-    <Compile Include="Common\Enums\ExecutionType.cs" />
-    <Compile Include="Common\Enums\HttpVerb.cs" />
-    <Compile Include="Common\Enums\KlineInterval.cs" />
+    <!-- Minimal set of files actually used by ZerodhaDatafeedAdapter -->
     <Compile Include="Common\Enums\MarketType.cs" />
-    <Compile Include="Common\Enums\NewOrderResponseType.cs" />
-    <Compile Include="Common\Enums\OrderRejectReason.cs" />
-    <Compile Include="Common\Enums\OrderSide.cs" />
-    <Compile Include="Common\Enums\OrderStatus.cs" />
-    <Compile Include="Common\Enums\OrderType.cs" />
-    <Compile Include="Common\Enums\PartialDepthLevels.cs" />
-    <Compile Include="Common\Enums\SystemStatus.cs" />
-    <Compile Include="Common\Enums\TimeInForce.cs" />
-    <Compile Include="Common\Enums\WithdrawHistoryStatus.cs" />
-    <Compile Include="Common\Extensions\DateTimeExtensions.cs" />
-    <Compile Include="Common\Extensions\EnumExtensions.cs" />
-    <Compile Include="Common\Interfaces\IBrokerClient.cs" />
-    <Compile Include="Common\Market\TradingPairSymbols.cs" />
-    <Compile Include="Common\Models\Request\AccountRequest.cs" />
-    <Compile Include="Common\Models\Request\AllOrdersRequest.cs" />
-    <Compile Include="Common\Models\Request\AllTradesRequest.cs" />
-    <Compile Include="Common\Models\Request\CancelOrderRequest.cs" />
-    <Compile Include="Common\Models\Request\CreateOrderRequest.cs" />
-    <Compile Include="Common\Models\Request\CurrentOpenOrdersRequest.cs" />
-    <Compile Include="Common\Models\Request\DepositAddressRequest.cs" />
-    <Compile Include="Common\Models\Request\Broker.cs" />
-    <Compile Include="Common\Models\Request\FundHistoryRequest.cs" />
-    <Compile Include="Common\Models\Request\GetCompressedAggregateTradesRequest.cs" />
-    <Compile Include="Common\Models\Request\GetKlinesCandlesticksRequest.cs" />
-    <Compile Include="Common\Models\Request\Interfaces\IRequest.cs" />
-    <Compile Include="Common\Models\Request\QueryOrderRequest.cs" />
-    <Compile Include="Common\Models\Request\WithdrawRequest.cs" />
-    <Compile Include="Common\Models\Response\Abstract\BaseCreateOrderResponse.cs" />
-    <Compile Include="Common\Models\Response\AccountInformationResponse.cs" />
-    <Compile Include="Common\Models\Response\AccountTradeReponse.cs" />
-    <Compile Include="Common\Models\Response\AcknowledgeCreateOrderResponse.cs" />
-    <Compile Include="Common\Models\Response\BalanceResponse.cs" />
-    <Compile Include="Common\Models\Response\CancelOrderResponse.cs" />
-    <Compile Include="Common\Models\Response\CompressedAggregateTradeResponse.cs" />
-    <Compile Include="Common\Models\Response\DepositAddressResponse.cs" />
-    <Compile Include="Common\Models\Response\DepositListItem.cs" />
-    <Compile Include="Common\Models\Response\DepositListResponse.cs" />
-    <Compile Include="Common\Models\Response\EmptyResponse.cs" />
-    <Compile Include="Common\Models\Response\Error\BrokerBadRequestException.cs" />
-    <Compile Include="Common\Models\Response\Error\BrokerError.cs" />
-    <Compile Include="Common\Models\Response\Error\BrokerException.cs" />
-    <Compile Include="Common\Models\Response\Error\BrokerServerException.cs" />
-    <Compile Include="Common\Models\Response\Error\BrokerTimeoutException.cs" />
-    <Compile Include="Common\Models\Response\BrokerRateLimit.cs" />
-    <Compile Include="Common\Models\Response\BrokerResponse.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbol.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilter.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterExchangeMaxNumAlgoOrders.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterExchangeMaxNumOrders.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterIcebergParts.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterLotSize.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterMarketLotSize.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterMaxNumAlgoOrders.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterMaxNumIcebergOrders.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterMaxNumOrders.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterMaxPosition.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterMinNotional.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterPercentagePrice.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterPercentPrice.cs" />
-    <Compile Include="Common\Models\Response\BrokerSymbolFilterPrice.cs" />
-    <Compile Include="Common\Models\Response\Fill.cs" />
-    <Compile Include="Common\Models\Response\FullCreateOrderResponse.cs" />
-    <Compile Include="Common\Models\Response\Interfaces\IBalanceResponse.cs" />
-    <Compile Include="Common\Models\Response\Interfaces\IConfirmationResponse.cs" />
-    <Compile Include="Common\Models\Response\Interfaces\IResponse.cs" />
-    <Compile Include="Common\Models\Response\KlineCandleStickResponse.cs" />
-    <Compile Include="Common\Models\Response\OrderBookResponse.cs" />
-    <Compile Include="Common\Models\Response\OrderResponse.cs" />
-    <Compile Include="Common\Models\Response\ResultCreateOrderResponse.cs" />
-    <Compile Include="Common\Models\Response\ServerTimeResponse.cs" />
-    <Compile Include="Common\Models\Response\SymbolOrderBookResponse.cs" />
-    <Compile Include="Common\Models\Response\SymbolPriceChangeTickerResponse.cs" />
-    <Compile Include="Common\Models\Response\SymbolPriceResponse.cs" />
-    <Compile Include="Common\Models\Response\SystemStatusResponse.cs" />
-    <Compile Include="Common\Models\Response\TradeResponse.cs" />
-    <Compile Include="Common\Models\Response\UserDataStreamResponse.cs" />
-    <Compile Include="Common\Models\Response\WithdrawListItem.cs" />
-    <Compile Include="Common\Models\Response\WithdrawListResponse.cs" />
-    <Compile Include="Common\Models\Response\WithdrawResponse.cs" />
-    <Compile Include="Common\Models\ResultSets\BuySellDepthVolume.cs" />
-    <Compile Include="Common\Models\WebSocket\BalanceResponseData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerAccountUpdateData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerAggregateTradeData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerCombinedDepthData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerDataCombined.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerDepthData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerKline.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerKlineData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerPartialData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerPartialDepthData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerTickerData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerTradeData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerTradeOrderData.cs" />
-    <Compile Include="Common\Models\WebSocket\BrokerWebSocketResponse.cs" />
-    <Compile Include="Common\Models\WebSocket\DepthCacheObject.cs" />
-    <Compile Include="Common\Models\WebSocket\Interfaces\ISymbolWebSocketResponse.cs" />
-    <Compile Include="Common\Models\WebSocket\Interfaces\IWebSocketResponse.cs" />
-    <Compile Include="Common\Models\WebSocket\KlineCacheObject.cs" />
-    <Compile Include="Common\Models\WebSocket\KlineCandleStick.cs" />
-    <Compile Include="Common\Models\WebSocket\KlineIntervalCacheObject.cs" />
-    <Compile Include="Common\Models\WebSocket\TradeDepthDelta.cs" />
     <Compile Include="Common\Utility\Guard.cs" />
-    <Compile Include="Common\Utility\PrepareCombinedSymbols.cs" />
-    <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="RequestClient.cs" />
-    <Compile Include="ResultTransformations.cs" />
-    <Compile Include="Zerodha\APIProcessor.cs" />
-    <Compile Include="Zerodha\BrokerClient.cs" />
-    <Compile Include="Zerodha\BrokerEndpointData.cs" />
-    <Compile Include="Zerodha\ClientConfiguration.cs" />
-    <Compile Include="Zerodha\Endpoints.cs" />
-    <Compile Include="Zerodha\IAPIProcessor.cs" />
-    <Compile Include="Zerodha\Websockets\AbstractBrokerWebSocketClient.cs" />
-    <Compile Include="Zerodha\Websockets\BrokerWebSocket.cs" />
-    <Compile Include="Zerodha\Websockets\BrokerWebSocketMessageHandler`1.cs" />
-    <Compile Include="Zerodha\Websockets\DisposableBrokerWebSocketClient.cs" />
-    <Compile Include="Zerodha\Websockets\IBrokerWebSocketClient.cs" />
-    <Compile Include="Zerodha\Websockets\InstanceBrokerWebSocketClient.cs" />
-    <Compile Include="Zerodha\Websockets\UserDataWebSocketMessages.cs" />
     <Compile Include="Zerodha\Websockets\WebSocketConnectionFunc.cs" />
-    <Compile Include="Zerodha\ZerodhaRequestClient.cs" />
     <Compile Include="Zerodha\Utility\ZerodhaBinaryReader.cs" />
-  </ItemGroup>
-  <ItemGroup>
-    <Folder Include="Upstox\" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
-    <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

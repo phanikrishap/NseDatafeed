@@ -1,6 +1,4 @@
 using ZerodhaAPI.Common.Enums;
-using ZerodhaAPI.Common.Utility;
-using ZerodhaAPI.Zerodha;
 using ZerodhaAPI.Zerodha.Websockets;
 using ZerodhaDatafeedAdapter.Annotations;
 using ZerodhaDatafeedAdapter.Classes;
@@ -36,7 +34,6 @@ namespace ZerodhaDatafeedAdapter
     public class Connector : INotifyPropertyChanged
     {
         private bool _connected;
-        private static BrokerClient _client;
         private static Connector _instance;
 
         private readonly ConfigurationManager _configManager;
@@ -65,32 +62,6 @@ namespace ZerodhaDatafeedAdapter
                     return;
                 this._connected = value;
                 this.OnPropertyChanged(nameof(IsConnected));
-            }
-        }
-
-        /// <summary>
-        /// Gets the broker client
-        /// </summary>
-        public static BrokerClient Client
-        {
-            get
-            {
-                if (Connector._client == null)
-                {
-                    ILog logger = LogManager.GetLogger(typeof(Connector));
-                    logger.Debug((object)"Connector Debug");
-
-                    // Initialize Zerodha client with access token
-                    var configManager = ConfigurationManager.Instance;
-                    Connector._client = new BrokerClient(new ClientConfiguration()
-                    {
-                        ApiKey = configManager.ApiKey,
-                        SecretKey = configManager.SecretKey,
-                        AccessToken = configManager.AccessToken,
-                        Logger = logger
-                    });
-                }
-                return Connector._client;
             }
         }
 
