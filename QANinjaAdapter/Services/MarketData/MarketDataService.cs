@@ -43,7 +43,6 @@ namespace QANinjaAdapter.Services.MarketData
         // OPTIMIZATION: Centralized tick processor for high-performance processing
         private OptimizedTickProcessor _tickProcessor;
         private readonly object _tickProcessorLock = new object();
-        private bool _useOptimizedProcessor = true; // Feature flag for easy rollback
 
         /// <summary>
         /// Gets the singleton instance of the MarketDataService
@@ -98,11 +97,8 @@ namespace QANinjaAdapter.Services.MarketData
         /// </summary>
         public void UpdateProcessorSubscriptionCache(ConcurrentDictionary<string, L1Subscription> subscriptions)
         {
-            if (_useOptimizedProcessor)
-            {
-                // Use TickProcessor property to ensure it's initialized before updating cache
-                TickProcessor.UpdateSubscriptionCache(subscriptions);
-            }
+            // Use TickProcessor property to ensure it's initialized before updating cache
+            TickProcessor.UpdateSubscriptionCache(subscriptions);
         }
 
         /// <summary>
@@ -184,32 +180,24 @@ namespace QANinjaAdapter.Services.MarketData
                         if (result.MessageType == WebSocketMessageType.Close) break;
                         if (result.MessageType == WebSocketMessageType.Text || result.Count < 2) continue;
 
-                        // Parse and queue depth data (ONLY if using optimized processor)
-                        if (_useOptimizedProcessor)
+                        // Parse and queue depth data
+                        var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, false, false);
+                        if (tickData != null)
                         {
-                            var tickData = _webSocketManager.ParseBinaryMessage(buffer, tokenInt, nativeSymbolName, false, false);
-                            if (tickData != null)
+                            if (tickData.HasMarketDepth)
                             {
-                                if (tickData.HasMarketDepth)
+                                TickProcessor.UpdateL2SubscriptionCache(l2Subscriptions);
+                                bool queued = TickProcessor.QueueTick(nativeSymbolName, tickData);
+                                if (!queued)
                                 {
-                                    TickProcessor.UpdateL2SubscriptionCache(l2Subscriptions);
-                                    bool queued = TickProcessor.QueueTick(nativeSymbolName, tickData);
-                                    if (!queued)
-                                    {
-                                        ZerodhaTickDataPool.Return(tickData);
-                                    }
-                                }
-                                else
-                                {
-                                    // Not a depth packet or no depth data - return to pool
                                     ZerodhaTickDataPool.Return(tickData);
                                 }
                             }
-                        }
-                        else
-                        {
-                            // Legacy path handles its own parsing and cleanup (via ProcessDepthPacket)
-                            ProcessDepthData(buffer, tokenInt, nativeSymbolName, l2Subscriptions);
+                            else
+                            {
+                                // Not a depth packet or no depth data - return to pool
+                                ZerodhaTickDataPool.Return(tickData);
+                            }
                         }
                     }
                     retryCount = 0;
@@ -569,10 +557,20 @@ namespace QANinjaAdapter.Services.MarketData
         /// <summary>
         /// Handles ticks received from the shared WebSocket service
         /// </summary>
+        private long _optionTickReceiveCounter = 0; // Diagnostic counter
         private void OnSharedWebSocketTickReceived(string symbol, ZerodhaTickData tickData)
         {
             try
             {
+                // DIAGNOSTIC: Log option ticks at entry point
+                if ((symbol?.Contains("CE") == true || symbol?.Contains("PE") == true) && !symbol.Contains("SENSEX") && !symbol.Contains("BANKNIFTY"))
+                {
+                    if (Interlocked.Increment(ref _optionTickReceiveCounter) % 100 == 1)
+                    {
+                        Logger.Info($"[MDS-DIAG] Option tick RECEIVED: symbol={symbol}, ltp={tickData?.LastTradePrice}, vol={tickData?.TotalQtyTraded}");
+                    }
+                }
+
                 if (string.IsNullOrEmpty(symbol) || tickData == null || tickData.LastTradePrice <= 0)
                 {
                     // POOL FIX: Return tickData to pool if we're discarding it early
@@ -581,27 +579,13 @@ namespace QANinjaAdapter.Services.MarketData
                     return;
                 }
 
-                // Route to OptimizedTickProcessor
-                bool queued = false;
-                if (_useOptimizedProcessor)
+                // Route to OptimizedTickProcessor (single processing path - no legacy fallback)
+                bool queued = TickProcessor?.QueueTick(symbol, tickData) ?? false;
+                if (!queued)
                 {
-                    queued = TickProcessor?.QueueTick(symbol, tickData) ?? false;
-                    // POOL FIX: If QueueTick returned false (backpressure), return to pool
-                    if (!queued)
-                    {
-                        ZerodhaTickDataPool.Return(tickData);
-                        return; // Don't process synthetic straddle if tick was rejected
-                    }
-                }
-                else
-                {
-                    var connector = Connector.Instance;
-                    if (connector != null)
-                    {
-                        QAAdapter adapter = connector.GetAdapter() as QAAdapter;
-                        adapter?.ProcessParsedTick(symbol, tickData);
-                    }
-                    // Note: Legacy path - tickData ownership transfers to adapter
+                    // Backpressure - return to pool and skip synthetic straddle processing
+                    ZerodhaTickDataPool.Return(tickData);
+                    return;
                 }
 
                 // Route to synthetic straddle service (only for options, not indices)

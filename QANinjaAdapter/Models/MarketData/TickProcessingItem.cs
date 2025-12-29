@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 
 namespace QANinjaAdapter.Models.MarketData
 {
@@ -24,11 +25,33 @@ namespace QANinjaAdapter.Models.MarketData
         public DateTime QueueTime { get; set; }
 
         /// <summary>
+        /// Ready flag for producer-consumer synchronization.
+        /// Producer sets to 1 after writing data, consumer sets to 0 after reading.
+        /// </summary>
+        private int _isReady;
+
+        /// <summary>
+        /// Check if the item is ready for processing
+        /// </summary>
+        public bool IsReady => Volatile.Read(ref _isReady) == 1;
+
+        /// <summary>
+        /// Mark the item as ready for processing (called by producer after writing)
+        /// </summary>
+        public void MarkReady()
+        {
+            Volatile.Write(ref _isReady, 1);
+        }
+
+        /// <summary>
         /// Reset the item for object pool reuse
         /// Returns ZerodhaTickData to pool and clears all references
         /// </summary>
         public void Reset()
         {
+            // Clear ready flag first
+            Volatile.Write(ref _isReady, 0);
+
             // Return tick data to pool before clearing reference
             if (TickData != null)
             {

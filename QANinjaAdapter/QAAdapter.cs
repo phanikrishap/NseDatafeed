@@ -468,120 +468,22 @@ namespace QANinjaAdapter
         /// NOTE: This is the fallback synchronous path. The optimized path uses
         /// OptimizedTickProcessor which handles tick processing asynchronously with
         /// object pooling, backpressure management, and batch processing.
+        ///
+        /// DEPRECATED: This method is no longer used. All tick processing now goes through
+        /// OptimizedTickProcessor which maintains its own shard-local state for thread-safe
+        /// volume/price tracking. Kept for API compatibility only.
         /// </summary>
         /// <param name="nativeSymbolName">The native symbol name</param>
         /// <param name="tickData">The parsed tick data</param>
+        [Obsolete("Use OptimizedTickProcessor.QueueTick instead. This method is kept for API compatibility only.")]
         public void ProcessParsedTick(string nativeSymbolName, ZerodhaTickData tickData)
         {
-            try
-            {
-                // OPTIMIZATION: Removed verbose per-tick logging from hot path
-                // Health monitoring is now handled by OptimizedTickProcessor's 30-second reports
-
-                if (this._ninjaConnection.Trace.MarketData)
-                    this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
-                        $"({this._options.Name}) QAAdapter.ProcessParsedTick: instrument='{nativeSymbolName}'"));
-
-                if (this._ninjaConnection.Status == ConnectionStatus.Disconnecting ||
-                    this._ninjaConnection.Status == ConnectionStatus.Disconnected)
-                {
-                    return; // Skip silently - connection state changes are logged elsewhere
-                }
-
-                // Check if we have a valid subscription
-                if (!this._l1Subscriptions.TryGetValue(nativeSymbolName, out var l1Subscription))
-                {
-                    return; // No subscription - skip silently (common during startup/shutdown)
-                }
-
-                // OPTIMIZATION: Prices from Zerodha are already at valid tick sizes (exchange-traded)
-                // No need to call RoundToTickSize - removing unnecessary method calls in hot path
-                double lastPrice = tickData.LastTradePrice;
-
-                // Calculate volume delta
-                int volumeDelta = Math.Max(0, l1Subscription.PreviousVolume == 0 ? 0 : tickData.TotalQtyTraded - l1Subscription.PreviousVolume);
-                l1Subscription.PreviousVolume = tickData.TotalQtyTraded;
-
-                // OPTIMIZATION: Get IST time once using cached timezone, reuse for all callbacks
-                DateTime now;
-                try
-                {
-                    now = TimeZoneInfo.ConvertTime(DateTime.Now, Constants.IndianTimeZone);
-                }
-                catch
-                {
-                    // If timezone conversion fails, use local time
-                    now = DateTime.Now;
-                }
-
-                // For indices (cached flag), check if price changed to trigger update
-                bool priceChanged = Math.Abs(lastPrice - l1Subscription.PreviousPrice) > 0.0001;
-                l1Subscription.PreviousPrice = lastPrice;
-
-                // Update all callbacks with the comprehensive market data (using thread-safe snapshot)
-                var callbackSnapshot = l1Subscription.GetCallbacksSnapshot();
-                int callbackCount = callbackSnapshot.Count;
-
-                // Debug logging for index symbols to trace callback flow
-                if (l1Subscription.IsIndex)
-                    Logger.Debug($"[QAAdapter] ProcessTick({nativeSymbolName}): IsIndex=true, priceChanged={priceChanged}, volumeDelta={volumeDelta}, callbackCount={callbackCount}, lastPrice={lastPrice}");
-
-                foreach (var callbackPair in callbackSnapshot)
-                {
-                    var cb = callbackPair.Value;
-                    try
-                    {
-                        // Update Last price: for regular instruments when volume changes, for indices when price changes
-                        if (volumeDelta > 0 || (l1Subscription.IsIndex && priceChanged))
-                        {
-                            if (l1Subscription.IsIndex)
-                                Logger.Debug($"[QAAdapter] ProcessTick({nativeSymbolName}): Invoking callback with Last={lastPrice}");
-                            cb(MarketDataType.Last, lastPrice, Math.Max(1, volumeDelta), now, 0L);
-
-                            if (tickData.BuyPrice > 0)
-                            {
-                                cb(MarketDataType.Bid, tickData.BuyPrice, tickData.BuyQty, now, 0L);
-                            }
-
-                            if (tickData.SellPrice > 0)
-                            {
-                                cb(MarketDataType.Ask, tickData.SellPrice, tickData.SellQty, now, 0L);
-                            }
-                        }
-
-                        // Update daily statistics
-                        cb(MarketDataType.DailyVolume, tickData.TotalQtyTraded, tickData.TotalQtyTraded, now, 0L);
-
-                        if (tickData.High > 0)
-                            cb(MarketDataType.DailyHigh, tickData.High, 0L, now, 0L);
-
-                        if (tickData.Low > 0)
-                            cb(MarketDataType.DailyLow, tickData.Low, 0L, now, 0L);
-
-                        if (tickData.Open > 0)
-                            cb(MarketDataType.Opening, tickData.Open, 0L, now, 0L);
-
-                        if (tickData.Close > 0)
-                            cb(MarketDataType.LastClose, tickData.Close, 0L, now, 0L);
-
-                        // Update open interest if available
-                        if (tickData.OpenInterest > 0)
-                            cb(MarketDataType.OpenInterest, tickData.OpenInterest, tickData.OpenInterest, now, 0L);
-                    }
-                    catch
-                    {
-                        // OPTIMIZATION: Silent error handling in hot path
-                        // Errors are tracked by OptimizedTickProcessor's health monitoring
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                // Only log critical errors
-                if (this._ninjaConnection.Trace.Connect)
-                    this._ninjaConnection.TraceCallback(string.Format((IFormatProvider)CultureInfo.InvariantCulture,
-                        $"({this._options.Name}) QAAdapter.ProcessParsedTick Exception={ex}"));
-            }
+            // DEPRECATED: All tick processing now goes through OptimizedTickProcessor
+            // This method is kept only for API compatibility
+            // The OptimizedTickProcessor maintains shard-local SymbolState for thread-safe
+            // volume delta and price change tracking, eliminating the race conditions that
+            // occurred when L1Subscription.PreviousVolume/PreviousPrice were shared state.
+            Logger.Warn($"[QAAdapter] ProcessParsedTick called for {nativeSymbolName} - this is deprecated, use OptimizedTickProcessor instead");
         }
 
         // Trading methods - implement these if Zerodha trading is needed

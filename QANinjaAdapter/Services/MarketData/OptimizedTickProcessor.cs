@@ -33,6 +33,17 @@ namespace QANinjaAdapter.Services.MarketData
         private const int RING_BUFFER_SIZE = 16384; // Must be power of 2 for fast masking
         private const int RING_BUFFER_MASK = RING_BUFFER_SIZE - 1;
 
+        /// <summary>
+        /// Per-symbol state owned exclusively by a shard worker.
+        /// No locks needed - single-writer guarantee.
+        /// </summary>
+        private class SymbolState
+        {
+            public int PreviousVolume;
+            public double PreviousPrice;
+            public DateTime LastTickTime;
+        }
+
         private class Shard
         {
             public readonly TickProcessingItem[] RingBuffer = new TickProcessingItem[RING_BUFFER_SIZE];
@@ -40,11 +51,31 @@ namespace QANinjaAdapter.Services.MarketData
             public long ProcessedSequence = 0; // Consumed count
             public readonly EventWaitHandle WaitHandle = new AutoResetEvent(false);
             public Task WorkerTask;
-            
+
+            /// <summary>
+            /// Shard-local symbol state - only accessed by this shard's worker thread.
+            /// Key: symbol name, Value: state (previous volume, price, etc.)
+            /// No locks needed - single-writer guarantee by design.
+            /// </summary>
+            public readonly Dictionary<string, SymbolState> SymbolStates = new Dictionary<string, SymbolState>();
+
             public Shard()
             {
                 for (int i = 0; i < RING_BUFFER_SIZE; i++)
                     RingBuffer[i] = new TickProcessingItem();
+            }
+
+            /// <summary>
+            /// Get or create symbol state (called only by shard worker - no locks needed)
+            /// </summary>
+            public SymbolState GetOrCreateState(string symbol)
+            {
+                if (!SymbolStates.TryGetValue(symbol, out var state))
+                {
+                    state = new SymbolState();
+                    SymbolStates[symbol] = state;
+                }
+                return state;
             }
         }
 
@@ -82,6 +113,9 @@ namespace QANinjaAdapter.Services.MarketData
         private long _totalCallbackTimeMs = 0;
         private long _slowCallbacks = 0; // Callbacks taking >1ms
         private long _verySlowCallbacks = 0; // Callbacks taking >5ms
+        private long _optionTickLogCounter = 0; // For diagnostic logging
+        private long _optionCallbackFiredCounter = 0; // Track when option callbacks actually fire
+        private long _noCallbackLogCounter = 0; // Track subscription exists but no callback cases
 
         // Backpressure tracking counters
         private long _ticksDroppedBackpressure = 0;
@@ -140,6 +174,7 @@ namespace QANinjaAdapter.Services.MarketData
             _healthMonitoringTimer.AutoReset = true;
             _healthMonitoringTimer.Start();
 
+            Logger.Info($"[OTP] OptimizedTickProcessor INITIALIZED with {SHARD_COUNT} shards, RingBuffer size={RING_BUFFER_SIZE}");
             Log($"OptimizedTickProcessor: Initialized with {SHARD_COUNT} shards and Disruptor-style RingBuffers.");
         }
 
@@ -150,20 +185,31 @@ namespace QANinjaAdapter.Services.MarketData
         private void ProcessShardSynchronously(int shardIndex)
         {
             var shard = _shards[shardIndex];
-            Log($"OptimizedTickProcessor: Shard {shardIndex} worker starting");
+            Logger.Info($"[OTP-SHARD] Shard {shardIndex} worker STARTING");
+            long lastLoggedSeq = 0;
 
             try
             {
                 while (!_cancellationTokenSource.IsCancellationRequested)
                 {
                     // Fast path: Check if there's anything to process without waiting
-                    long currentSequence = Interlocked.Read(ref shard.Sequence);
+                    // Use Volatile.Read to ensure we see the latest producer writes
+                    long currentSequence = Volatile.Read(ref shard.Sequence);
                     long processedSequence = shard.ProcessedSequence;
+
+                    // DIAGNOSTIC: Log when sequence advances (every 100 ticks or first tick)
+                    if (currentSequence > lastLoggedSeq + 100 || (currentSequence > 0 && lastLoggedSeq == 0))
+                    {
+                        Logger.Info($"[OTP-SHARD] Shard {shardIndex}: seq={currentSequence}, processed={processedSequence}, pending={currentSequence - processedSequence}");
+                        lastLoggedSeq = currentSequence;
+                    }
 
                     if (currentSequence == processedSequence)
                     {
                         // Wait for more data
                         shard.WaitHandle.WaitOne(100); // 100ms timeout to re-check cancellation
+                        // After waking, ensure we see fresh values
+                        Thread.MemoryBarrier();
                         continue;
                     }
 
@@ -173,21 +219,52 @@ namespace QANinjaAdapter.Services.MarketData
                         int index = (int)(processedSequence & RING_BUFFER_MASK);
                         var item = shard.RingBuffer[index];
 
-                        if (item != null && item.TickData != null)
+                        // Wait for producer to finish writing (spin then yield)
+                        int spinCount = 0;
+                        while (!item.IsReady && spinCount < 100)
+                        {
+                            spinCount++;
+                            Thread.SpinWait(10);
+                        }
+
+                        // If still not ready after spin, yield and retry
+                        int yieldCount = 0;
+                        while (!item.IsReady && !_cancellationTokenSource.IsCancellationRequested)
+                        {
+                            yieldCount++;
+                            if (yieldCount == 100) // Log if stuck for 100ms
+                            {
+                                Logger.Warn($"[OTP-SHARD] Shard {shardIndex}: Stuck waiting for IsReady at seq={processedSequence}, idx={index}, TickData={(item.TickData != null ? "SET" : "NULL")}");
+                            }
+                            Thread.Sleep(1); // Yield to let producer finish
+                        }
+
+                        // Now process the item (it must be ready or we're cancelled)
+                        if (!_cancellationTokenSource.IsCancellationRequested && item.TickData != null)
                         {
                             try
                             {
-                                ProcessSingleTick(item);
+                                ProcessSingleTick(item, shard);
                             }
                             catch (Exception ex)
                             {
-                                Log($"Shard {shardIndex}: Error processing tick: {ex.Message}");
+                                Logger.Error($"[OTP-SHARD] Shard {shardIndex}: Error processing tick: {ex.Message}", ex);
                             }
                             finally
                             {
-                                // Item cleanup for reuse (Disruptor pattern)
+                                // Item cleanup for reuse (Disruptor pattern) - also clears IsReady
                                 item.Reset();
                             }
+                        }
+                        else if (!item.IsReady)
+                        {
+                            // Item never became ready - log this anomaly
+                            Logger.Warn($"[OTP-SHARD] Shard {shardIndex}: Item at index {index} never became ready (seq={processedSequence})");
+                        }
+                        else if (item.TickData == null)
+                        {
+                            // IsReady was set but TickData is null - data corruption
+                            Logger.Warn($"[OTP-SHARD] Shard {shardIndex}: IsReady=true but TickData=NULL at seq={processedSequence}, idx={index}");
                         }
 
                         processedSequence++;
@@ -234,9 +311,16 @@ namespace QANinjaAdapter.Services.MarketData
                 }
             }
 
-            // Get next sequence in RingBuffer
-            long sequence = Interlocked.Read(ref shard.Sequence);
+            // ATOMIC: Reserve slot using Increment (returns NEW value, so subtract 1 for index)
+            // This fixes the race condition where multiple threads would read the same sequence
+            long sequence = Interlocked.Increment(ref shard.Sequence) - 1;
             int index = (int)(sequence & RING_BUFFER_MASK);
+
+            // DIAGNOSTIC: Log first few queued ticks per shard
+            if (sequence < 5)
+            {
+                Logger.Info($"[OTP-QUEUE] Shard {shardIndex}: Queuing tick seq={sequence}, idx={index}, symbol={nativeSymbolName}");
+            }
 
             // Assign data directly to pre-allocated item
             var item = shard.RingBuffer[index];
@@ -244,8 +328,13 @@ namespace QANinjaAdapter.Services.MarketData
             item.TickData = tickData;
             item.QueueTime = DateTime.UtcNow;
 
-            // Commit sequence and signal
-            Interlocked.Increment(ref shard.Sequence);
+            // Mark item as ready for consumer (ensures data is visible before consumer reads)
+            item.MarkReady();
+
+            // Ensure all writes are visible before signaling
+            Thread.MemoryBarrier();
+
+            // Signal worker (sequence already incremented above)
             Interlocked.Increment(ref _ticksQueued);
             shard.WaitHandle.Set();
 
@@ -579,9 +668,12 @@ namespace QANinjaAdapter.Services.MarketData
 
 
         /// <summary>
-        /// Process a single tick with optimized lookups and performance tracking
+        /// Process a single tick with optimized lookups and performance tracking.
+        /// Uses shard-local state for thread-safe volume delta calculations.
         /// </summary>
-        private void ProcessSingleTick(TickProcessingItem item)
+        private long _optionProcessSingleTickCounter = 0; // Diagnostic counter
+
+        private void ProcessSingleTick(TickProcessingItem item, Shard shard)
         {
             var stopwatch = Stopwatch.StartNew();
 
@@ -594,6 +686,16 @@ namespace QANinjaAdapter.Services.MarketData
                 }
 
                 string ntSymbolName = item.NativeSymbolName;
+
+                // DIAGNOSTIC: Log option ticks entering ProcessSingleTick (every 50th)
+                if ((ntSymbolName.Contains("CE") || ntSymbolName.Contains("PE")) &&
+                    !ntSymbolName.Contains("SENSEX") && !ntSymbolName.Contains("BANKNIFTY"))
+                {
+                    if (Interlocked.Increment(ref _optionProcessSingleTickCounter) % 50 == 1)
+                    {
+                        Logger.Info($"[OTP-ENTRY] ProcessSingleTick: {ntSymbolName}, LTP={item.TickData.LastTradePrice}, Vol={item.TickData.TotalQtyTraded}");
+                    }
+                }
 
                 // Fast symbol lookup using cache (O(1))
                 if (_symbolMappingCache.TryGetValue(item.NativeSymbolName, out string mappedName))
@@ -609,19 +711,18 @@ namespace QANinjaAdapter.Services.MarketData
                 // Fast subscription lookup using cache (O(1))
                 if (!_subscriptionCache.TryGetValue(ntSymbolName, out var subscription))
                 {
-                    // Log first miss for each symbol to help debug
+                    // Log first miss for each symbol to help debug - include NIFTY options
                     if (_subscriptionCache.Count > 0 && !_loggedMissedSymbols.Contains(ntSymbolName))
                     {
-                        _loggedMissedSymbols.Add(ntSymbolName);
-                        Logger.Info($"[OTP] No subscription for '{ntSymbolName}'. Cache has: {string.Join(", ", _subscriptionCache.Keys.Take(10))}");
+                        // Log NIFTY/SENSEX option misses
+                        if ((ntSymbolName.Contains("NIFTY") || ntSymbolName.Contains("SENSEX")) &&
+                            (ntSymbolName.Contains("CE") || ntSymbolName.Contains("PE")))
+                        {
+                            _loggedMissedSymbols.Add(ntSymbolName);
+                            Logger.Info($"[OTP-MISS] No subscription for option '{ntSymbolName}'. SubscriptionCache has {_subscriptionCache.Count} entries. First 5: {string.Join(", ", _subscriptionCache.Keys.Take(5))}");
+                        }
                     }
-                    
-                    // CRITICAL DEBUG: Log attempts for SENSEX options even if not subscribed
-                    if (ntSymbolName.Contains("SENSEX") && ntSymbolName.Contains("CE"))
-                    {
-                        // Logger.Info($"[OTP-DEBUG] Tick received for {ntSymbolName} but NO SUBSCRIPTION found!");
-                    }
-                    
+
                     return; // No subscription found
                 }
 
@@ -636,10 +737,13 @@ namespace QANinjaAdapter.Services.MarketData
                 // Fast callback lookup using pre-built cache (O(1))
                 if (!_callbackCache.TryGetValue(ntSymbolName, out var callbacks) || callbacks?.Count == 0)
                 {
-                    // CRITICAL DEBUG: Subscription exists (passed check above) but NO CALLBACKS?
-                    if (ntSymbolName.Contains("SENSEX") && ntSymbolName.Contains("CE"))
+                    // DIAGNOSTIC: Log when subscription exists but no callbacks (every 100th occurrence)
+                    if ((ntSymbolName.Contains("CE") || ntSymbolName.Contains("PE")) && !ntSymbolName.Contains("SENSEX"))
                     {
-                         Logger.Info($"[OTP-CALLBACK] Subscription exists but NO CALLBACKS for {ntSymbolName}!");
+                        if (Interlocked.Increment(ref _noCallbackLogCounter) % 100 == 1)
+                        {
+                            Logger.Info($"[OTP-NOCB] Subscription exists but NO CALLBACKS for {ntSymbolName}! SubscriptionCache={_subscriptionCache.Count}, CallbackCache={_callbackCache.Count}");
+                        }
                     }
                     return; // No callbacks found
                 }
@@ -652,8 +756,11 @@ namespace QANinjaAdapter.Services.MarketData
                         Logger.Info($"[OTP-CALLBACK] Invoking {callbacks.Count} callbacks for {ntSymbolName}");
                 }
 
-                // Calculate volume delta efficiently
-                int volumeDelta = CalculateVolumeDelta(subscription, item.TickData);
+                // Get shard-local state for this symbol (used for volume delta and price tracking)
+                var symbolState = shard.GetOrCreateState(ntSymbolName);
+
+                // Calculate volume delta using shard-local state (thread-safe, no locks)
+                int volumeDelta = CalculateVolumeDelta(symbolState, item.TickData);
 
                 // Debug logging for index symbols
                 if (subscription.IsIndex && Logger.IsDebugEnabled)
@@ -661,8 +768,8 @@ namespace QANinjaAdapter.Services.MarketData
                     Logger.Debug($"[OTP] ProcessSingleTick INDEX: symbol={ntSymbolName}, price={item.TickData.LastTradePrice}, volumeDelta={volumeDelta}, callbacks={callbacks?.Count}");
                 }
 
-                // Process all callbacks for this subscription (pass subscription for IsIndex handling)
-                ProcessCallbacks(callbacks, item.TickData, volumeDelta, subscription);
+                // Process all callbacks for this subscription (pass shard-local state for price tracking)
+                ProcessCallbacks(callbacks, item.TickData, volumeDelta, subscription, symbolState);
 
                 // Record successful processing
                 stopwatch.Stop();
@@ -680,20 +787,26 @@ namespace QANinjaAdapter.Services.MarketData
         }
 
         /// <summary>
-        /// Calculate volume delta efficiently
+        /// Calculate volume delta using shard-local state.
+        /// Thread-safe by design - only the shard worker accesses this state.
+        /// Note: This updates state.PreviousVolume but NOT PreviousPrice (caller handles price update)
         /// </summary>
-        private int CalculateVolumeDelta(L1Subscription subscription, ZerodhaTickData tickData)
+        private int CalculateVolumeDelta(SymbolState state, ZerodhaTickData tickData)
         {
             int volumeDelta = 0;
-            if (subscription.PreviousVolume > 0)
+            if (state.PreviousVolume > 0)
             {
-                volumeDelta = Math.Max(0, tickData.TotalQtyTraded - subscription.PreviousVolume);
+                volumeDelta = Math.Max(0, tickData.TotalQtyTraded - state.PreviousVolume);
             }
             else
             {
                 volumeDelta = tickData.LastTradeQty > 0 ? tickData.LastTradeQty : 0;
             }
-            subscription.PreviousVolume = tickData.TotalQtyTraded;
+
+            // Update volume state (single-writer, no locks needed)
+            state.PreviousVolume = tickData.TotalQtyTraded;
+            state.LastTickTime = DateTime.UtcNow;
+
             return volumeDelta;
         }
 
@@ -764,26 +877,36 @@ namespace QANinjaAdapter.Services.MarketData
         }
 
         /// <summary>
-        /// Process callbacks for the subscription with performance tracking
+        /// Process callbacks for the subscription with performance tracking.
+        /// Uses shard-local SymbolState for thread-safe price/volume tracking.
         /// </summary>
-        private void ProcessCallbacks(List<SubscriptionCallback> callbacks, ZerodhaTickData tickData, int volumeDelta, L1Subscription subscription)
+        private void ProcessCallbacks(List<SubscriptionCallback> callbacks, ZerodhaTickData tickData, int volumeDelta, L1Subscription subscription, SymbolState symbolState)
         {
-            // For indices (no volume), check if price changed
+            // For indices (no volume), check if price changed using shard-local state
             bool isIndex = subscription?.IsIndex ?? false;
             double lastPrice = tickData.LastTradePrice;
-            double prevPrice = subscription?.PreviousPrice ?? 0;
+            double prevPrice = symbolState.PreviousPrice;
             bool priceChanged = isIndex && Math.Abs(lastPrice - prevPrice) > 0.0001;
+
+            // DIAGNOSTIC: Log option tick processing to trace the flow
+            string symbolName = subscription?.Instrument?.MasterInstrument?.Name ?? "UNKNOWN";
+            if (symbolName.Contains("CE") || symbolName.Contains("PE"))
+            {
+                // Log every 100th option tick to avoid spam but still get visibility
+                if (Interlocked.Increment(ref _optionTickLogCounter) % 100 == 1)
+                {
+                    Logger.Info($"[OTP-DIAG] Option tick: symbol={symbolName}, lastPrice={lastPrice}, volumeDelta={volumeDelta}, totalVol={tickData.TotalQtyTraded}, callbackCount={callbacks?.Count ?? 0}");
+                }
+            }
 
             // Debug logging for indices
             if (isIndex && Logger.IsDebugEnabled)
             {
                 Logger.Debug($"[OTP] ProcessCallbacks INDEX: lastPrice={lastPrice}, prevPrice={prevPrice}, priceChanged={priceChanged}, volumeDelta={volumeDelta}, callbackCount={callbacks?.Count}");
-                subscription.PreviousPrice = lastPrice;
             }
-            else if (isIndex)
-            {
-                subscription.PreviousPrice = lastPrice;
-            }
+
+            // Update shard-local price state (single-writer, no locks needed)
+            symbolState.PreviousPrice = lastPrice;
 
             // OPTIMIZATION: Get current time once before the callback loop (same timestamp for all callbacks)
             DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, IstTimeZone);
@@ -843,6 +966,15 @@ namespace QANinjaAdapter.Services.MarketData
 
                     if (tickData.LastTradePrice > 0 && shouldFireCallback)
                     {
+                        // DIAGNOSTIC: Log when option callback actually fires
+                        if (symbolName.Contains("CE") || symbolName.Contains("PE"))
+                        {
+                            if (Interlocked.Increment(ref _optionCallbackFiredCounter) % 50 == 1)
+                            {
+                                Logger.Info($"[OTP-DIAG] Option CALLBACK FIRED: symbol={symbolName}, price={tickData.LastTradePrice}, volumeDelta={volumeDelta}");
+                            }
+                        }
+
                         // OPTIMIZATION: Prices from Zerodha are already at valid tick sizes (exchange-traded)
                         // No need to call RoundToTickSize - removing unnecessary method calls in hot path
                         var callbackTimer = Stopwatch.StartNew();

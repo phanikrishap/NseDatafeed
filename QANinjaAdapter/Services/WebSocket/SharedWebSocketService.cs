@@ -15,9 +15,28 @@ using QANinjaAdapter.Services.Zerodha;
 namespace QANinjaAdapter.Services.WebSocket
 {
     /// <summary>
+    /// Connection state machine for SharedWebSocketService.
+    /// Provides atomic state transitions to prevent race conditions.
+    /// </summary>
+    public enum WebSocketConnectionState
+    {
+        /// <summary>Initial state - never connected</summary>
+        Disconnected = 0,
+        /// <summary>Connection attempt in progress</summary>
+        Connecting = 1,
+        /// <summary>Connected and ready for operations</summary>
+        Connected = 2,
+        /// <summary>Reconnecting after disconnect</summary>
+        Reconnecting = 3,
+        /// <summary>Shutting down - reject all operations</summary>
+        Disposing = 4
+    }
+
+    /// <summary>
     /// Manages a single shared WebSocket connection for all symbol subscriptions.
     /// Zerodha allows 3 connections with up to 1000 symbols each.
     /// This service uses one connection for all symbols (typically &lt;100).
+    /// Uses state machine pattern for reliable connection management.
     /// </summary>
     public class SharedWebSocketService : IDisposable
     {
@@ -28,9 +47,10 @@ namespace QANinjaAdapter.Services.WebSocket
         private ClientWebSocket _sharedWebSocket;
         private CancellationTokenSource _connectionCts;
         private Task _messageLoopTask;
-        private bool _isConnected = false;
-        private volatile bool _isConnecting = false;
-        private readonly object _connectionLock = new object();
+
+        // State machine - replaces boolean flags for atomic transitions
+        private int _connectionState = (int)WebSocketConnectionState.Disconnected;
+
         private readonly SemaphoreSlim _connectionSemaphore = new SemaphoreSlim(1, 1);
 
         // Semaphore to serialize WebSocket send operations (WebSocket only allows one outstanding SendAsync at a time)
@@ -78,28 +98,77 @@ namespace QANinjaAdapter.Services.WebSocket
             Logger.Info("[SharedWS] SharedWebSocketService initialized");
         }
 
+        #region State Machine Helpers
+
+        /// <summary>
+        /// Gets the current connection state (thread-safe read)
+        /// </summary>
+        private WebSocketConnectionState CurrentState => (WebSocketConnectionState)Volatile.Read(ref _connectionState);
+
+        /// <summary>
+        /// Attempts atomic state transition. Returns true if transition succeeded.
+        /// </summary>
+        private bool TryTransition(WebSocketConnectionState fromState, WebSocketConnectionState toState)
+        {
+            int result = Interlocked.CompareExchange(
+                ref _connectionState,
+                (int)toState,
+                (int)fromState);
+            bool success = result == (int)fromState;
+            if (success)
+            {
+                Logger.Info($"[SharedWS] State: {fromState} -> {toState}");
+            }
+            return success;
+        }
+
+        /// <summary>
+        /// Forces state transition (use carefully - mainly for cleanup)
+        /// </summary>
+        private void ForceState(WebSocketConnectionState newState)
+        {
+            var oldState = (WebSocketConnectionState)Interlocked.Exchange(ref _connectionState, (int)newState);
+            Logger.Info($"[SharedWS] State: {oldState} -> {newState} (forced)");
+        }
+
+        /// <summary>
+        /// Checks if currently in a connected or connecting state
+        /// </summary>
+        private bool IsConnectedOrConnecting => CurrentState == WebSocketConnectionState.Connected ||
+                                                  CurrentState == WebSocketConnectionState.Connecting ||
+                                                  CurrentState == WebSocketConnectionState.Reconnecting;
+
+        #endregion
+
         /// <summary>
         /// Ensures the WebSocket connection is established
         /// </summary>
         public async Task<bool> EnsureConnectedAsync()
         {
+            var state = CurrentState;
+
             // Fast path - already connected
-            if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
+            if (state == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
                 return true;
 
-            // If already connecting, wait for it
-            if (_isConnecting)
+            // If disposing, reject
+            if (state == WebSocketConnectionState.Disposing)
+                return false;
+
+            // If already connecting/reconnecting, wait for it
+            if (state == WebSocketConnectionState.Connecting || state == WebSocketConnectionState.Reconnecting)
             {
                 // Wait up to 10 seconds for connection to complete
                 for (int i = 0; i < 100; i++)
                 {
                     await Task.Delay(100);
-                    if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
+                    state = CurrentState;
+                    if (state == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
                         return true;
-                    if (!_isConnecting)
+                    if (state != WebSocketConnectionState.Connecting && state != WebSocketConnectionState.Reconnecting)
                         break;
                 }
-                return _isConnected && _sharedWebSocket?.State == WebSocketState.Open;
+                return CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open;
             }
 
             return await ConnectAsync();
@@ -108,63 +177,69 @@ namespace QANinjaAdapter.Services.WebSocket
         /// <summary>
         /// Establishes the WebSocket connection
         /// </summary>
-        private async Task<bool> ConnectAsync()
+        private async Task<bool> ConnectAsync(bool isReconnect = false)
         {
-            // Use semaphore to prevent concurrent connection attempts
-            bool acquired = await _connectionSemaphore.WaitAsync(0);
-            if (!acquired)
+            // Attempt state transition: Disconnected -> Connecting (or Disconnected -> Reconnecting)
+            var targetState = isReconnect ? WebSocketConnectionState.Reconnecting : WebSocketConnectionState.Connecting;
+            if (!TryTransition(WebSocketConnectionState.Disconnected, targetState))
             {
-                // Another thread is already connecting, wait for it
-                Logger.Debug("[SharedWS] Connection already in progress, waiting...");
-                await _connectionSemaphore.WaitAsync();
-                _connectionSemaphore.Release();
-                return _isConnected && _sharedWebSocket?.State == WebSocketState.Open;
+                var current = CurrentState;
+                // If already connected, return success
+                if (current == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
+                    return true;
+                // If already connecting, wait for it
+                if (current == WebSocketConnectionState.Connecting || current == WebSocketConnectionState.Reconnecting)
+                {
+                    Logger.Debug("[SharedWS] Connection already in progress, waiting...");
+                    await _connectionSemaphore.WaitAsync();
+                    _connectionSemaphore.Release();
+                    return CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open;
+                }
+                // If disposing, reject
+                if (current == WebSocketConnectionState.Disposing)
+                    return false;
             }
+
+            // Use semaphore to prevent concurrent connection attempts
+            await _connectionSemaphore.WaitAsync();
 
             try
             {
                 // Double-check after acquiring semaphore
-                if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
+                if (CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
                 {
                     return true;
                 }
 
-                _isConnecting = true;
-
-                lock (_connectionLock)
+                // Cleanup existing connection
+                if (_sharedWebSocket != null)
                 {
-                    // Cleanup existing connection
-                    if (_sharedWebSocket != null)
+                    try
                     {
-                        try
+                        if (_sharedWebSocket.State == WebSocketState.Open)
                         {
-                            if (_sharedWebSocket.State == WebSocketState.Open)
-                            {
-                                _sharedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Reconnecting", CancellationToken.None).Wait(1000);
-                            }
-                            _sharedWebSocket.Dispose();
+                            _sharedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Reconnecting", CancellationToken.None).Wait(1000);
                         }
-                        catch { }
-                        _sharedWebSocket = null;
+                        _sharedWebSocket.Dispose();
                     }
-
-                    if (_connectionCts != null)
-                    {
-                        _connectionCts.Cancel();
-                        _connectionCts.Dispose();
-                    }
-                    _connectionCts = new CancellationTokenSource();
+                    catch { }
+                    _sharedWebSocket = null;
                 }
+
+                if (_connectionCts != null)
+                {
+                    _connectionCts.Cancel();
+                    _connectionCts.Dispose();
+                }
+                _connectionCts = new CancellationTokenSource();
 
                 Logger.Info("[SharedWS] Connecting to Zerodha WebSocket...");
 
                 _sharedWebSocket = _webSocketManager.CreateWebSocketClient();
                 await _webSocketManager.ConnectAsync(_sharedWebSocket);
 
-                lock (_connectionLock)
-                {
-                    _isConnected = true;
-                }
+                // Transition to Connected state
+                ForceState(WebSocketConnectionState.Connected);
 
                 Logger.Info($"[SharedWS] Connected successfully. State={_sharedWebSocket.State}");
 
@@ -182,15 +257,11 @@ namespace QANinjaAdapter.Services.WebSocket
             catch (Exception ex)
             {
                 Logger.Error($"[SharedWS] Connection failed: {ex.Message}", ex);
-                lock (_connectionLock)
-                {
-                    _isConnected = false;
-                }
+                ForceState(WebSocketConnectionState.Disconnected);
                 return false;
             }
             finally
             {
-                _isConnecting = false;
                 _connectionSemaphore.Release();
             }
         }
@@ -216,9 +287,9 @@ namespace QANinjaAdapter.Services.WebSocket
                 };
 
                 // If not connected, queue for later
-                if (!_isConnected || _sharedWebSocket?.State != WebSocketState.Open)
+                if (CurrentState != WebSocketConnectionState.Connected || _sharedWebSocket?.State != WebSocketState.Open)
                 {
-                    Logger.Info($"[SharedWS] Connection not ready, queueing subscription for {symbol}");
+                    Logger.Info($"[SharedWS] Connection not ready (state={CurrentState}), queueing subscription for {symbol}");
                     _pendingSubscriptions.Enqueue((symbol, instrumentToken));
 
                     // Try to connect
@@ -264,9 +335,9 @@ namespace QANinjaAdapter.Services.WebSocket
                     tokens.Add(token);
                 }
 
-                if (!_isConnected || _sharedWebSocket?.State != WebSocketState.Open)
+                if (CurrentState != WebSocketConnectionState.Connected || _sharedWebSocket?.State != WebSocketState.Open)
                 {
-                    Logger.Info($"[SharedWS] Connection not ready, queueing {symbols.Count} subscriptions");
+                    Logger.Info($"[SharedWS] Connection not ready (state={CurrentState}), queueing {symbols.Count} subscriptions");
                     foreach (var (symbol, token, _) in symbols)
                     {
                         _pendingSubscriptions.Enqueue((symbol, token));
@@ -310,7 +381,7 @@ namespace QANinjaAdapter.Services.WebSocket
                 _subscriptions.TryRemove(symbol, out _);
 
                 // Send unsubscribe message if connected
-                if (_isConnected && _sharedWebSocket?.State == WebSocketState.Open)
+                if (CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
                 {
                     await SendSubscriptionAsync(new List<int> { token }, "unsubscribe");
                     Logger.Info($"[SharedWS] Unsubscribed from {symbol} (token={token})");
@@ -355,12 +426,21 @@ namespace QANinjaAdapter.Services.WebSocket
         }
 
         /// <summary>
-        /// Sends a text message over the WebSocket
+        /// Sends a text message over the WebSocket (serialized via semaphore)
         /// </summary>
         private async Task SendTextMessageAsync(string message)
         {
+            // WebSocket only allows one outstanding SendAsync at a time - serialize with semaphore
+            await _sendSemaphore.WaitAsync(_connectionCts.Token);
             try
             {
+                // Double-check WebSocket is still open after acquiring semaphore
+                if (_sharedWebSocket?.State != WebSocketState.Open)
+                {
+                    Logger.Warn("[SharedWS] SendTextMessage: WebSocket not open, skipping send");
+                    return;
+                }
+
                 byte[] messageBytes = Encoding.UTF8.GetBytes(message);
                 await _sharedWebSocket.SendAsync(
                     new ArraySegment<byte>(messageBytes),
@@ -372,6 +452,10 @@ namespace QANinjaAdapter.Services.WebSocket
             {
                 Logger.Error($"[SharedWS] SendTextMessage failed: {ex.Message}", ex);
                 throw;
+            }
+            finally
+            {
+                _sendSemaphore.Release();
             }
         }
 
@@ -458,18 +542,20 @@ namespace QANinjaAdapter.Services.WebSocket
             finally
             {
                 ArrayPool<byte>.Shared.Return(buffer);
-                lock (_connectionLock)
+
+                // Transition to Disconnected (if not already disposing)
+                if (CurrentState != WebSocketConnectionState.Disposing)
                 {
-                    _isConnected = false;
+                    ForceState(WebSocketConnectionState.Disconnected);
                 }
                 Logger.Info("[SharedWS] Message processing loop ended");
 
-                // Attempt reconnection
-                if (!token.IsCancellationRequested)
+                // Attempt reconnection (only if not disposing)
+                if (!token.IsCancellationRequested && CurrentState != WebSocketConnectionState.Disposing)
                 {
                     Logger.Info("[SharedWS] Attempting reconnection in 2 seconds...");
                     await Task.Delay(2000);
-                    _ = ConnectAsync();
+                    _ = ConnectAsync(isReconnect: true);
                 }
             }
         }
@@ -619,7 +705,12 @@ namespace QANinjaAdapter.Services.WebSocket
         /// <summary>
         /// Gets the current connection status
         /// </summary>
-        public bool IsConnected => _isConnected && _sharedWebSocket?.State == WebSocketState.Open;
+        public bool IsConnected => CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open;
+
+        /// <summary>
+        /// Gets the current connection state for diagnostics
+        /// </summary>
+        public WebSocketConnectionState ConnectionState => CurrentState;
 
         /// <summary>
         /// Gets the number of active subscriptions
@@ -628,6 +719,9 @@ namespace QANinjaAdapter.Services.WebSocket
 
         public void Dispose()
         {
+            // Set disposing state first to prevent reconnection attempts
+            ForceState(WebSocketConnectionState.Disposing);
+
             try
             {
                 _connectionCts?.Cancel();
@@ -643,6 +737,7 @@ namespace QANinjaAdapter.Services.WebSocket
 
                 _connectionCts?.Dispose();
                 _connectionSemaphore?.Dispose();
+                _sendSemaphore?.Dispose();
                 Logger.Info("[SharedWS] Disposed");
             }
             catch (Exception ex)

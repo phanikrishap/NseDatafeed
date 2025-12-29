@@ -635,31 +635,42 @@ namespace QANinjaAdapter.AddOns.MarketAnalyzer
 
             listView.View = _gridView;
 
-            // Style for rows with ATM highlighting and custom selection colors
+            // Style for rows with custom ControlTemplate to completely remove borders
             var style = new Style(typeof(ListViewItem));
-            style.Setters.Add(new Setter(ListViewItem.BackgroundProperty, _bgColor));
             style.Setters.Add(new Setter(ListViewItem.ForegroundProperty, _fgColor));
+            style.Setters.Add(new Setter(ListViewItem.FontFamilyProperty, _ntFont));
+            style.Setters.Add(new Setter(ListViewItem.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch));
+            style.Setters.Add(new Setter(ListViewItem.FocusVisualStyleProperty, null)); // Remove focus rectangle
+            style.Setters.Add(new Setter(ListViewItem.BackgroundProperty, _bgColor));
             style.Setters.Add(new Setter(ListViewItem.BorderThicknessProperty, new Thickness(0)));
             style.Setters.Add(new Setter(ListViewItem.BorderBrushProperty, null));
             style.Setters.Add(new Setter(ListViewItem.PaddingProperty, new Thickness(2)));
-            style.Setters.Add(new Setter(ListViewItem.FontFamilyProperty, _ntFont));
-            style.Setters.Add(new Setter(ListViewItem.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch));
 
-            // ATM row highlight trigger
+            // Create a custom ControlTemplate with NO border - just background bound to ListViewItem.Background
+            var itemTemplate = new ControlTemplate(typeof(ListViewItem));
+            var itemBorder = new FrameworkElementFactory(typeof(Border));
+            itemBorder.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(ListViewItem.BackgroundProperty));
+            itemBorder.SetValue(Border.BorderThicknessProperty, new Thickness(0));
+            itemBorder.SetValue(Border.PaddingProperty, new Thickness(2));
+            itemBorder.SetValue(Border.SnapsToDevicePixelsProperty, true);
+            var contentPresenter = new FrameworkElementFactory(typeof(GridViewRowPresenter));
+            contentPresenter.SetValue(GridViewRowPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
+            contentPresenter.SetValue(GridViewRowPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+            contentPresenter.SetValue(GridViewRowPresenter.SnapsToDevicePixelsProperty, true);
+            itemBorder.AppendChild(contentPresenter);
+            itemTemplate.VisualTree = itemBorder;
+            style.Setters.Add(new Setter(ListViewItem.TemplateProperty, itemTemplate));
+
+            // Style-level triggers (change ListViewItem.Background which template binds to)
             var atmTrigger = new DataTrigger { Binding = new Binding("IsATM"), Value = true };
             atmTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, _atmBg));
             atmTrigger.Setters.Add(new Setter(ListViewItem.FontWeightProperty, FontWeights.Bold));
             style.Triggers.Add(atmTrigger);
 
-            // Selection highlight - dark gray background, no border (triggers override default blue)
             var selectedTrigger = new Trigger { Property = ListViewItem.IsSelectedProperty, Value = true };
             selectedTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(60, 60, 65))));
-            selectedTrigger.Setters.Add(new Setter(ListViewItem.ForegroundProperty, new SolidColorBrush(Colors.White)));
-            selectedTrigger.Setters.Add(new Setter(ListViewItem.BorderBrushProperty, null));
-            selectedTrigger.Setters.Add(new Setter(ListViewItem.BorderThicknessProperty, new Thickness(0)));
             style.Triggers.Add(selectedTrigger);
 
-            // MouseOver highlight - subtle dark gray
             var mouseOverTrigger = new Trigger { Property = ListViewItem.IsMouseOverProperty, Value = true };
             mouseOverTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(50, 50, 55))));
             style.Triggers.Add(mouseOverTrigger);

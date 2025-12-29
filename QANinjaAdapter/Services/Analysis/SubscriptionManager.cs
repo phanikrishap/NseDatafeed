@@ -48,6 +48,14 @@ namespace QANinjaAdapter.Services.Analysis
         private const int CACHED_BATCH_SIZE = 25;
         private const int CACHED_BATCH_DELAY_MS = 500; // 500ms between batches for cached data
 
+        // Event-driven processing: trigger BarsRequest + WebSocket after this many instruments are cached
+        private const int STREAMING_BATCH_SIZE = 6;
+
+        // Queue for instruments ready for BarsRequest and WebSocket subscription (after caching)
+        private readonly ConcurrentQueue<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)> _readyForStreamingQueue =
+            new ConcurrentQueue<(MappedInstrument, string, Instrument)>();
+        private bool _isProcessingStreaming = false;
+
         // Event for UI updates
         public event Action<string, double> OptionPriceUpdated;
 
@@ -236,10 +244,10 @@ namespace QANinjaAdapter.Services.Analysis
                             // Update UI with live prices
                             if (type == MarketDataType.Last && price > 0)
                             {
-                                // DEBUG: Log to confirm callback is firing (sample to reduce log spam)
-                                if (symbolForClosure.Contains("85500") && DateTime.Now.Second % 5 == 0)
+                                // DIAGNOSTIC: Log every callback firing for options (sampled)
+                                if ((symbolForClosure.Contains("CE") || symbolForClosure.Contains("PE")) && DateTime.Now.Second % 10 == 0)
                                 {
-                                    Logger.Debug($"[SubscriptionManager] LiveData CALLBACK FIRING: {symbolForClosure} = {price}");
+                                    Logger.Info($"[SM-DIAG] LiveData CALLBACK: {symbolForClosure} = {price}, size={size}");
                                 }
                                 OptionPriceUpdated?.Invoke(symbolForClosure, price);
                             }
@@ -329,13 +337,14 @@ namespace QANinjaAdapter.Services.Analysis
             _isProcessingHistorical = false;
             Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Completed all batches. Total instruments processed: {totalProcessed}");
 
-            // After all historical data is fetched and cached, trigger BarsRequest to push to NinjaTrader DB
-            Logger.Info("[SubscriptionManager] ProcessHistoricalDataQueue(): Starting BarsRequest to push data to NinjaTrader...");
-            await TriggerBarsRequestForAllInstruments();
+            // NOTE: BarsRequest + WebSocket subscription is now handled in real-time by ProcessStreamingQueue
+            // as instruments are cached, rather than waiting for all to complete.
+            Logger.Info("[SubscriptionManager] ProcessHistoricalDataQueue(): Historical caching complete. Streaming processor handles BarsRequest.");
         }
 
         /// <summary>
-        /// Triggers historical data backfill for an instrument and updates the price in UI
+        /// Triggers historical data backfill for an instrument and updates the price in UI.
+        /// After caching, queues the instrument for immediate BarsRequest + WebSocket subscription.
         /// </summary>
         private async Task TriggerBackfillAndUpdatePrice(MappedInstrument mappedInst, string ntSymbol, Instrument instrument)
         {
@@ -368,11 +377,19 @@ namespace QANinjaAdapter.Services.Analysis
                     Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Received {records.Count} bars");
 
                     // Notify UI of status - "Cached" means data is in SQLite cache, ready for BarsRequest
-                    // "Done" will be shown after BarsRequest completes and data is in NinjaTrader DB
                     OptionStatusUpdated?.Invoke(ntSymbol, $"Cached ({records.Count})");
 
-                    // Track this instrument for BarsRequest later
+                    // Track this instrument for BarsRequest (kept for backward compatibility)
                     _processedInstruments.Add((ntSymbol, instrument));
+
+                    // Queue for immediate streaming (BarsRequest + WebSocket)
+                    _readyForStreamingQueue.Enqueue((mappedInst, ntSymbol, instrument));
+
+                    // Start streaming processor if not running
+                    if (!_isProcessingStreaming)
+                    {
+                        _ = Task.Run(ProcessStreamingQueue);
+                    }
 
                     // Cache bars for straddle computation if this is an option
                     if (!string.IsNullOrEmpty(mappedInst.option_type) && mappedInst.strike.HasValue)
@@ -402,6 +419,156 @@ namespace QANinjaAdapter.Services.Analysis
             {
                 Logger.Error($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Exception occurred - {ex.Message}", ex);
             }
+        }
+
+        /// <summary>
+        /// Processes instruments ready for streaming in mini-batches.
+        /// Triggers BarsRequest to push to NT DB and starts WebSocket subscription immediately.
+        /// </summary>
+        private async Task ProcessStreamingQueue()
+        {
+            if (_isProcessingStreaming) return;
+            _isProcessingStreaming = true;
+
+            Logger.Info("[SubscriptionManager] ProcessStreamingQueue(): Started event-driven streaming processor");
+
+            DateTime fromDate = DateTime.Now.AddDays(-3);
+            DateTime toDate = DateTime.Now;
+            int batchNumber = 0;
+            int totalStreamed = 0;
+
+            while (true)
+            {
+                // Collect a mini-batch of instruments ready for streaming
+                var batch = new List<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)>();
+
+                // Wait until we have STREAMING_BATCH_SIZE instruments OR historical processing is complete
+                while (batch.Count < STREAMING_BATCH_SIZE)
+                {
+                    if (_readyForStreamingQueue.TryDequeue(out var item))
+                    {
+                        batch.Add(item);
+                    }
+                    else if (!_isProcessingHistorical && _readyForStreamingQueue.IsEmpty)
+                    {
+                        // Historical processing done and queue empty - process remaining batch
+                        break;
+                    }
+                    else
+                    {
+                        // Wait a bit for more items
+                        await Task.Delay(100);
+                    }
+                }
+
+                if (batch.Count == 0)
+                {
+                    // All done
+                    break;
+                }
+
+                batchNumber++;
+                Logger.Info($"[SubscriptionManager] ProcessStreamingQueue(): Processing streaming batch {batchNumber} with {batch.Count} instruments");
+
+                // Process each instrument: BarsRequest -> VWAP -> WebSocket (all happen in RequestBarsForInstrument callback)
+                foreach (var (mappedInst, ntSymbol, ntInstrument) in batch)
+                {
+                    await RequestBarsForInstrumentStreaming(ntSymbol, ntInstrument, fromDate, toDate);
+                    totalStreamed++;
+                }
+
+                Logger.Info($"[SubscriptionManager] ProcessStreamingQueue(): Batch {batchNumber} complete. Total streamed: {totalStreamed}");
+
+                // Small delay between batches to avoid overwhelming NT
+                await Task.Delay(200);
+            }
+
+            _isProcessingStreaming = false;
+            Logger.Info($"[SubscriptionManager] ProcessStreamingQueue(): Completed. Total instruments streamed: {totalStreamed}");
+
+            // Process any straddle symbols that accumulated
+            await ProcessStraddleSymbolsStreaming();
+        }
+
+        /// <summary>
+        /// Requests bars for a CE/PE instrument (streaming mode - immediate processing).
+        /// </summary>
+        private async Task RequestBarsForInstrumentStreaming(string ntSymbol, Instrument ntInstrument, DateTime fromDate, DateTime toDate)
+        {
+            try
+            {
+                // Check if we have cached data - use optimized small request
+                bool hasCachedData = HistoricalBarCache.Instance.HasCachedData(ntSymbol, "minute", fromDate, toDate);
+                int barsBack = hasCachedData ? 100 : 1500;
+
+                Logger.Debug($"[SubscriptionManager] RequestBarsForInstrumentStreaming({ntSymbol}): Cache {(hasCachedData ? "HIT" : "MISS")} - using {barsBack} bars");
+
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        var barsRequest = new BarsRequest(ntInstrument, barsBack);
+                        barsRequest.BarsPeriod = new BarsPeriod
+                        {
+                            BarsPeriodType = BarsPeriodType.Minute,
+                            Value = 1
+                        };
+                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                        barsRequest.Update += OnBarsRequestUpdate;
+
+                        string symbolForClosure = ntSymbol;
+                        Instrument instrumentForClosure = ntInstrument;
+                        _activeBarsRequests.TryAdd(ntSymbol, barsRequest);
+
+                        barsRequest.Request((request, errorCode, errorMessage) =>
+                        {
+                            int barCount = request.Bars?.Count ?? 0;
+                            if (errorCode == ErrorCode.NoError)
+                            {
+                                Logger.Info($"[SubscriptionManager] Streaming BarsRequest completed for {symbolForClosure}: {barCount} bars");
+                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
+
+                                // Start VWAP calculation immediately
+                                _ = VWAPCalculatorService.Instance.StartVWAPCalculation(symbolForClosure, instrumentForClosure);
+                            }
+                            else
+                            {
+                                Logger.Warn($"[SubscriptionManager] Streaming BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
+                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[SubscriptionManager] RequestBarsForInstrumentStreaming({ntSymbol}): Error - {ex.Message}", ex);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SubscriptionManager] RequestBarsForInstrumentStreaming({ntSymbol}): Dispatcher error - {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Processes straddle symbols in streaming mode after CE/PE instruments are done.
+        /// </summary>
+        private async Task ProcessStraddleSymbolsStreaming()
+        {
+            var straddleSymbols = _processedStraddleSymbols.Distinct().ToList();
+            if (straddleSymbols.Count == 0) return;
+
+            Logger.Info($"[SubscriptionManager] ProcessStraddleSymbolsStreaming(): Processing {straddleSymbols.Count} STRDL symbols");
+
+            DateTime fromDate = DateTime.Now.AddDays(-3);
+            DateTime toDate = DateTime.Now;
+
+            foreach (var straddleSymbol in straddleSymbols)
+            {
+                await RequestBarsForStraddleSymbol(straddleSymbol, fromDate, toDate);
+            }
+
+            Logger.Info($"[SubscriptionManager] ProcessStraddleSymbolsStreaming(): Completed all STRDL symbols");
         }
 
         /// <summary>

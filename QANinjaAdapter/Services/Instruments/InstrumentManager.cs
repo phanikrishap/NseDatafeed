@@ -1182,6 +1182,29 @@ namespace QANinjaAdapter.Services.Instruments
                 return "GIFT NIFTY"; // Zerodha symbol has space, not underscore
             }
 
+            // Detect NIFTY/BANKNIFTY options (NFO) - pattern: NIFTY{DATE}CE/PE or BANKNIFTY{DATE}CE/PE
+            // Examples: NIFTY25DEC27650CE, NIFTY25DEC23500PE, BANKNIFTY25DEC52000CE
+            if ((symbol.StartsWith("NIFTY", StringComparison.OrdinalIgnoreCase) ||
+                 symbol.StartsWith("BANKNIFTY", StringComparison.OrdinalIgnoreCase) ||
+                 symbol.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase) ||
+                 symbol.StartsWith("MIDCPNIFTY", StringComparison.OrdinalIgnoreCase)) &&
+                (symbol.EndsWith("CE", StringComparison.OrdinalIgnoreCase) ||
+                 symbol.EndsWith("PE", StringComparison.OrdinalIgnoreCase)))
+            {
+                marketType = MarketType.UsdM; // NFO for NIFTY options
+                return symbol;
+            }
+
+            // Detect SENSEX options (BFO) - pattern: SENSEX{DATE}CE/PE
+            // Examples: SENSEX25DEC85400CE, SENSEX25DEC85400PE
+            if (symbol.StartsWith("SENSEX", StringComparison.OrdinalIgnoreCase) &&
+                (symbol.EndsWith("CE", StringComparison.OrdinalIgnoreCase) ||
+                 symbol.EndsWith("PE", StringComparison.OrdinalIgnoreCase)))
+            {
+                marketType = MarketType.UsdM; // BFO for SENSEX options (use UsdM for F&O)
+                return symbol;
+            }
+
             string[] collection = symbol.Split('_');
             if (collection == null || collection.Length == 0)
                 return "";

@@ -158,6 +158,9 @@ namespace QANinjaAdapter.Services.Analysis
         // Track if we've already generated options to avoid duplicates
         private bool _optionsAlreadyGenerated = false;
 
+        // Lock object for straddles_config.json file access to prevent concurrent write errors
+        private static readonly object _straddlesConfigLock = new object();
+
         private MarketAnalyzerLogic()
         {
             Logger.Info("[MarketAnalyzerLogic] Constructor: Initializing singleton instance");
@@ -432,16 +435,21 @@ namespace QANinjaAdapter.Services.Analysis
                 var generated = new List<MappedInstrument>();
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Generating option symbols (ATM +/- 30)...");
 
+                // Determine if selected expiry is monthly (last expiry of that month)
+                var allExpiries = selectedUnderlying == "NIFTY" ? niftyExpiries : sensexExpiries;
+                bool isMonthlyExpiry = IsMonthlyExpiry(selectedExpiry, allExpiries);
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Expiry {selectedExpiry:yyyy-MM-dd} is {(isMonthlyExpiry ? "MONTHLY" : "WEEKLY")}");
+
                 for (int i = -30; i <= 30; i++)
                 {
                     double strike = atmStrike + (i * stepSize);
 
                     // Create CE
-                    var ceOption = CreateOption(selectedUnderlying, selectedExpiry, strike, "CE", stepSize);
+                    var ceOption = CreateOption(selectedUnderlying, selectedExpiry, strike, "CE", stepSize, isMonthlyExpiry);
                     generated.Add(ceOption);
 
                     // Create PE
-                    var peOption = CreateOption(selectedUnderlying, selectedExpiry, strike, "PE", stepSize);
+                    var peOption = CreateOption(selectedUnderlying, selectedExpiry, strike, "PE", stepSize, isMonthlyExpiry);
                     generated.Add(peOption);
                 }
 
@@ -464,18 +472,63 @@ namespace QANinjaAdapter.Services.Analysis
             }
         }
         
-        private MappedInstrument CreateOption(string underlying, DateTime expiry, double strike, string type, int step)
+        /// <summary>
+        /// Creates a MappedInstrument with the correct Zerodha symbol format.
+        ///
+        /// Zerodha Option Symbol Formats:
+        /// - Monthly Expiry: UNDERLYING + YY + MMM + STRIKE + TYPE (e.g., NIFTY25DEC24700CE)
+        /// - Weekly Expiry (Jan-Sep): UNDERLYING + YY + M + DD + STRIKE + TYPE (e.g., NIFTY25D2924700CE where M=1-9)
+        /// - Weekly Expiry (Oct-Dec): UNDERLYING + YY + X + DD + STRIKE + TYPE (e.g., NIFTY25O0324700CE where X=O/N/D)
+        /// </summary>
+        private MappedInstrument CreateOption(string underlying, DateTime expiry, double strike, string type, int step, bool isMonthlyExpiry)
         {
-            // Create Zerodha-style symbol: SENSEX25DEC85500CE (UNDERLYING + YYMMM + STRIKE + TYPE)
-            // Format: UNDERLYING + YY + MMM (3-letter month) + STRIKE + CE/PE
-            // NOTE: Zerodha does NOT include day (DD) in option symbols - only YYMMM
-            string monthAbbr = expiry.ToString("MMM").ToUpper();
-            string zerodhaSymbol = $"{underlying}{expiry:yy}{monthAbbr}{strike:F0}{type}";
+            string zerodhaSymbol;
 
-            // NT symbol uses the Zerodha symbol directly (no transformation needed)
+            if (isMonthlyExpiry)
+            {
+                // Monthly format: UNDERLYING + YY + MMM + STRIKE + TYPE
+                // Example: NIFTY25DEC24700CE, BANKNIFTY25OCT40000CE
+                string monthAbbr = expiry.ToString("MMM").ToUpper();
+                zerodhaSymbol = $"{underlying}{expiry:yy}{monthAbbr}{strike:F0}{type}";
+            }
+            else
+            {
+                // Weekly format depends on month
+                int month = expiry.Month;
+                int day = expiry.Day;
+                int year = expiry.Year % 100; // 2-digit year
+
+                string monthIndicator;
+                if (month >= 1 && month <= 9)
+                {
+                    // Jan-Sep: Use single digit 1-9
+                    // Example: NIFTY25D2924700CE (D=12=December? NO, this is wrong)
+                    // Actually: NIFTY + 25 + 1 (for Jan) + 29 (day) + strike + type
+                    // Wait, let me re-read: BANKNIFTY+23+9+20+40000+CE means Sep 20
+                    monthIndicator = month.ToString();
+                }
+                else
+                {
+                    // Oct-Dec: Use O, N, D respectively
+                    // Month 10=O, 11=N, 12=D
+                    monthIndicator = month switch
+                    {
+                        10 => "O",
+                        11 => "N",
+                        12 => "D",
+                        _ => month.ToString() // Fallback
+                    };
+                }
+
+                // Weekly format: UNDERLYING + YY + M + DD + STRIKE + TYPE
+                // Day is always 2 digits (padded with 0 if needed)
+                zerodhaSymbol = $"{underlying}{year}{monthIndicator}{day:D2}{strike:F0}{type}";
+            }
+
+            // NT symbol uses the Zerodha symbol directly
             string ntSymbol = zerodhaSymbol;
 
-            Logger.Debug($"[MarketAnalyzerLogic] CreateOption(): Created {ntSymbol} - {underlying} {expiry:yyyy-MM-dd} {strike} {type}");
+            Logger.Debug($"[MarketAnalyzerLogic] CreateOption(): Created {ntSymbol} - {underlying} {expiry:yyyy-MM-dd} {strike} {type} (Monthly={isMonthlyExpiry})");
 
             return new MappedInstrument
             {
@@ -490,6 +543,35 @@ namespace QANinjaAdapter.Services.Analysis
                 lot_size = underlying == "SENSEX" ? 10 : 25, // SENSEX lot = 10, NIFTY lot = 25
                 instrument_token = 0 // Will be looked up by SubscriptionManager
             };
+        }
+
+        /// <summary>
+        /// Determines if an expiry date is a monthly expiry (last expiry of that month).
+        /// Monthly expiries are the last Thursday of the month (or last trading day before that).
+        /// We check if there are any other expiries in the same month after this date.
+        /// </summary>
+        private bool IsMonthlyExpiry(DateTime expiry, List<DateTime> allExpiries)
+        {
+            // Get all expiries in the same month as the target expiry
+            var sameMonthExpiries = allExpiries
+                .Where(e => e.Year == expiry.Year && e.Month == expiry.Month)
+                .OrderBy(e => e)
+                .ToList();
+
+            if (sameMonthExpiries.Count == 0)
+            {
+                // No expiries found - assume monthly (shouldn't happen)
+                Logger.Warn($"[MarketAnalyzerLogic] IsMonthlyExpiry: No expiries found for {expiry:yyyy-MM}, assuming monthly");
+                return true;
+            }
+
+            // The expiry is monthly if it's the LAST one in its month
+            DateTime lastExpiry = sameMonthExpiries.Last();
+            bool isMonthly = expiry.Date == lastExpiry.Date;
+
+            Logger.Debug($"[MarketAnalyzerLogic] IsMonthlyExpiry: {expiry:yyyy-MM-dd} - Month has {sameMonthExpiries.Count} expiries, last is {lastExpiry:yyyy-MM-dd}, isMonthly={isMonthly}");
+
+            return isMonthly;
         }
 
         private DateTime GetNearestExpiry(List<DateTime> expiries)
@@ -542,24 +624,27 @@ namespace QANinjaAdapter.Services.Analysis
                     }
                 }
 
-                // Write to straddles_config.json
+                // Write to straddles_config.json (synchronized to prevent concurrent access errors)
                 string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
                 string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "QAAdapter", "straddles_config.json");
 
-                // Ensure directory exists
-                string dir = Path.GetDirectoryName(configPath);
-                if (!Directory.Exists(dir))
+                lock (_straddlesConfigLock)
                 {
-                    Directory.CreateDirectory(dir);
+                    // Ensure directory exists
+                    string dir = Path.GetDirectoryName(configPath);
+                    if (!Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+
+                    var config = new { Straddles = straddles };
+                    string json = JsonConvert.SerializeObject(config, Formatting.Indented);
+                    File.WriteAllText(configPath, json);
+
+                    Logger.Info($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Written {straddles.Count} straddles to {configPath}");
                 }
 
-                var config = new { Straddles = straddles };
-                string json = JsonConvert.SerializeObject(config, Formatting.Indented);
-                File.WriteAllText(configPath, json);
-
-                Logger.Info($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Written {straddles.Count} straddles to {configPath}");
-
-                // Reload straddle configurations in the service
+                // Reload straddle configurations in the service (outside lock to avoid deadlock)
                 try
                 {
                     var adapter = Connector.Instance.GetAdapter() as QAAdapter;

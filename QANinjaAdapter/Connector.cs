@@ -45,6 +45,9 @@ namespace QANinjaAdapter
         private readonly HistoricalDataService _historicalDataService;
         private readonly MarketDataService _marketDataService;
 
+        // Task to track token validation completion
+        private Task<bool> _tokenValidationTask;
+
         /// <summary>
         /// Gets the version of the adapter
         /// </summary>
@@ -146,10 +149,8 @@ namespace QANinjaAdapter
                     "Configuration Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
 
-            // Ensure valid access token
-            // In a better architecture, this would be triggered by a specific "Initialize" or "Connect" call
-            // rather than in a constructor to avoid blocking or unobserved task failures.
-            Task.Run(async () =>
+            // Ensure valid access token - store the task so CheckConnection can wait for it
+            _tokenValidationTask = Task.Run(async () =>
             {
                 try
                 {
@@ -170,6 +171,7 @@ namespace QANinjaAdapter
                             "[QAAdapter] WARNING: Failed to obtain valid Zerodha access token. Manual login may be required.",
                             NinjaTrader.Cbi.LogLevel.Warning);
                     }
+                    return tokenResult;
                 }
                 catch (Exception ex)
                 {
@@ -178,16 +180,40 @@ namespace QANinjaAdapter
                     NinjaTrader.NinjaScript.NinjaScript.Log(
                         $"[QAAdapter] Token validation error: {innerMessage}",
                         NinjaTrader.Cbi.LogLevel.Error);
+                    return false;
                 }
             });
         }
 
         /// <summary>
-        /// Checks the connection to the Zerodha API
+        /// Checks the connection to the Zerodha API.
+        /// Waits for token validation to complete first if it's still running.
         /// </summary>
         /// <returns>True if the connection is valid, false otherwise</returns>
         public bool CheckConnection()
         {
+            // Wait for token validation to complete before checking connection
+            if (_tokenValidationTask != null && !_tokenValidationTask.IsCompleted)
+            {
+                Logger.Info("Waiting for token validation to complete before checking connection...");
+                try
+                {
+                    // Wait with a timeout of 60 seconds for auto token generation
+                    bool completed = _tokenValidationTask.Wait(TimeSpan.FromSeconds(60));
+                    if (!completed)
+                    {
+                        Logger.Error("Token validation timed out after 60 seconds.");
+                        return false;
+                    }
+                    Logger.Info($"Token validation completed with result: {_tokenValidationTask.Result}");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Error waiting for token validation: {ex.Message}");
+                    return false;
+                }
+            }
+
             if (!_zerodhaClient.CheckConnection())
                 return false;
 

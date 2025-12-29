@@ -192,9 +192,20 @@ public class L1Subscription
         }
     }
 
-    public int PreviousVolume { get; set; }
-    public double PreviousPrice { get; set; }
-    public bool IsIndex { get; set; }  // Cached flag for indices (GIFT NIFTY, NIFTY 50, SENSEX) - no volume, price updates only
+    // NOTE: PreviousVolume and PreviousPrice have been REMOVED from L1Subscription.
+    // These are now tracked in OptimizedTickProcessor's shard-local SymbolState to prevent race conditions.
+    // Each shard worker maintains its own SymbolState dictionary, providing single-writer guarantee.
+
+    /// <summary>
+    /// Cached flag for indices (GIFT NIFTY, NIFTY 50, SENSEX) - no volume, price updates only.
+    /// This is read-only metadata set during subscription creation.
+    /// </summary>
+    public bool IsIndex { get; set; }
+
+    /// <summary>
+    /// The NinjaTrader instrument for this subscription.
+    /// This is read-only metadata set during subscription creation.
+    /// </summary>
     public Instrument Instrument { get; set; }
 }
 
