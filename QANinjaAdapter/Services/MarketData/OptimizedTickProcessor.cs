@@ -15,23 +15,20 @@ namespace QANinjaAdapter.Services.MarketData
 {
     /// <summary>
     /// High-performance tick processor that eliminates bottlenecks causing lag.
-    /// Uses async queue-based processing, object pooling, and batching for optimal performance.
+    /// Uses BlockingCollection for reliable producer-consumer synchronization.
     ///
     /// Features:
     /// - Centralized asynchronous pipeline for all tick processing
-    /// - Dedicated processing thread to avoid async/await overhead
-    /// - Batch processing (configurable batch size and time windows)
-    /// - Object pooling to reduce GC pressure
+    /// - Dedicated processing thread per shard using BlockingCollection
     /// - Intelligent backpressure management with tiered limits
     /// - O(1) callback caching for fast lookups
     /// - Memory pressure detection and automatic cache trimming
     /// </summary>
     public class OptimizedTickProcessor : IDisposable
     {
-        // Sharded RingBuffer Configuration
+        // Sharded Configuration
         private const int SHARD_COUNT = 4; // Configurable based on CPU cores
-        private const int RING_BUFFER_SIZE = 16384; // Must be power of 2 for fast masking
-        private const int RING_BUFFER_MASK = RING_BUFFER_SIZE - 1;
+        private const int QUEUE_CAPACITY = 16384; // Bounded capacity per shard
 
         /// <summary>
         /// Per-symbol state owned exclusively by a shard worker.
@@ -46,10 +43,11 @@ namespace QANinjaAdapter.Services.MarketData
 
         private class Shard
         {
-            public readonly TickProcessingItem[] RingBuffer = new TickProcessingItem[RING_BUFFER_SIZE];
-            public long Sequence = 0; // Produced count
-            public long ProcessedSequence = 0; // Consumed count
-            public readonly EventWaitHandle WaitHandle = new AutoResetEvent(false);
+            /// <summary>
+            /// BlockingCollection provides reliable producer-consumer synchronization.
+            /// Handles all memory barriers and thread coordination internally.
+            /// </summary>
+            public readonly BlockingCollection<TickProcessingItem> Queue;
             public Task WorkerTask;
 
             /// <summary>
@@ -59,10 +57,9 @@ namespace QANinjaAdapter.Services.MarketData
             /// </summary>
             public readonly Dictionary<string, SymbolState> SymbolStates = new Dictionary<string, SymbolState>();
 
-            public Shard()
+            public Shard(int capacity)
             {
-                for (int i = 0; i < RING_BUFFER_SIZE; i++)
-                    RingBuffer[i] = new TickProcessingItem();
+                Queue = new BlockingCollection<TickProcessingItem>(capacity);
             }
 
             /// <summary>
@@ -155,12 +152,12 @@ namespace QANinjaAdapter.Services.MarketData
             _cancellationTokenSource = new CancellationTokenSource();
             _performanceMonitor = new PerformanceMonitor(TimeSpan.FromSeconds(30));
 
-            // Initialize Shards
+            // Initialize Shards with BlockingCollection
             _shards = new Shard[SHARD_COUNT];
             for (int i = 0; i < SHARD_COUNT; i++)
             {
                 int shardIndex = i;
-                _shards[i] = new Shard();
+                _shards[i] = new Shard(QUEUE_CAPACITY);
                 _shards[i].WorkerTask = Task.Factory.StartNew(
                     () => ProcessShardSynchronously(shardIndex),
                     _cancellationTokenSource.Token,
@@ -174,119 +171,67 @@ namespace QANinjaAdapter.Services.MarketData
             _healthMonitoringTimer.AutoReset = true;
             _healthMonitoringTimer.Start();
 
-            Logger.Info($"[OTP] OptimizedTickProcessor INITIALIZED with {SHARD_COUNT} shards, RingBuffer size={RING_BUFFER_SIZE}");
-            Log($"OptimizedTickProcessor: Initialized with {SHARD_COUNT} shards and Disruptor-style RingBuffers.");
+            Logger.Info($"[OTP] OptimizedTickProcessor INITIALIZED with {SHARD_COUNT} shards, BlockingCollection capacity={QUEUE_CAPACITY}");
+            Log($"OptimizedTickProcessor: Initialized with {SHARD_COUNT} shards and BlockingCollection queues.");
         }
 
         /// <summary>
-        /// Process ticks for a specific shard. 
-        /// Uses a busy-yield-wait strategy for minimal latency.
+        /// Process ticks for a specific shard.
+        /// Uses BlockingCollection.GetConsumingEnumerable for reliable consumption.
         /// </summary>
         private void ProcessShardSynchronously(int shardIndex)
         {
             var shard = _shards[shardIndex];
-            Logger.Info($"[OTP-SHARD] Shard {shardIndex} worker STARTING");
-            long lastLoggedSeq = 0;
+            Logger.Info($"[OTP-SHARD] Shard {shardIndex} worker STARTING (BlockingCollection)");
+            long processedCount = 0;
 
             try
             {
-                while (!_cancellationTokenSource.IsCancellationRequested)
+                // GetConsumingEnumerable blocks until items are available
+                // and handles all synchronization internally - no manual memory barriers needed
+                foreach (var item in shard.Queue.GetConsumingEnumerable(_cancellationTokenSource.Token))
                 {
-                    // Fast path: Check if there's anything to process without waiting
-                    // Use Volatile.Read to ensure we see the latest producer writes
-                    long currentSequence = Volatile.Read(ref shard.Sequence);
-                    long processedSequence = shard.ProcessedSequence;
+                    processedCount++;
 
-                    // DIAGNOSTIC: Log when sequence advances (every 100 ticks or first tick)
-                    if (currentSequence > lastLoggedSeq + 100 || (currentSequence > 0 && lastLoggedSeq == 0))
+                    // DIAGNOSTIC: Log progress (every 100 ticks or first tick)
+                    if (processedCount % 100 == 1 || processedCount == 1)
                     {
-                        Logger.Info($"[OTP-SHARD] Shard {shardIndex}: seq={currentSequence}, processed={processedSequence}, pending={currentSequence - processedSequence}");
-                        lastLoggedSeq = currentSequence;
+                        Logger.Info($"[OTP-SHARD] Shard {shardIndex}: processed={processedCount}, queueCount={shard.Queue.Count}");
                     }
 
-                    if (currentSequence == processedSequence)
+                    if (item?.TickData != null)
                     {
-                        // Wait for more data
-                        shard.WaitHandle.WaitOne(100); // 100ms timeout to re-check cancellation
-                        // After waking, ensure we see fresh values
-                        Thread.MemoryBarrier();
-                        continue;
+                        try
+                        {
+                            ProcessSingleTick(item, shard);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Error($"[OTP-SHARD] Shard {shardIndex}: Error processing tick: {ex.Message}", ex);
+                        }
                     }
 
-                    // Processing loop
-                    while (processedSequence < currentSequence && !_cancellationTokenSource.IsCancellationRequested)
-                    {
-                        int index = (int)(processedSequence & RING_BUFFER_MASK);
-                        var item = shard.RingBuffer[index];
-
-                        // Wait for producer to finish writing (spin then yield)
-                        int spinCount = 0;
-                        while (!item.IsReady && spinCount < 100)
-                        {
-                            spinCount++;
-                            Thread.SpinWait(10);
-                        }
-
-                        // If still not ready after spin, yield and retry
-                        int yieldCount = 0;
-                        while (!item.IsReady && !_cancellationTokenSource.IsCancellationRequested)
-                        {
-                            yieldCount++;
-                            if (yieldCount == 100) // Log if stuck for 100ms
-                            {
-                                Logger.Warn($"[OTP-SHARD] Shard {shardIndex}: Stuck waiting for IsReady at seq={processedSequence}, idx={index}, TickData={(item.TickData != null ? "SET" : "NULL")}");
-                            }
-                            Thread.Sleep(1); // Yield to let producer finish
-                        }
-
-                        // Now process the item (it must be ready or we're cancelled)
-                        if (!_cancellationTokenSource.IsCancellationRequested && item.TickData != null)
-                        {
-                            try
-                            {
-                                ProcessSingleTick(item, shard);
-                            }
-                            catch (Exception ex)
-                            {
-                                Logger.Error($"[OTP-SHARD] Shard {shardIndex}: Error processing tick: {ex.Message}", ex);
-                            }
-                            finally
-                            {
-                                // Item cleanup for reuse (Disruptor pattern) - also clears IsReady
-                                item.Reset();
-                            }
-                        }
-                        else if (!item.IsReady)
-                        {
-                            // Item never became ready - log this anomaly
-                            Logger.Warn($"[OTP-SHARD] Shard {shardIndex}: Item at index {index} never became ready (seq={processedSequence})");
-                        }
-                        else if (item.TickData == null)
-                        {
-                            // IsReady was set but TickData is null - data corruption
-                            Logger.Warn($"[OTP-SHARD] Shard {shardIndex}: IsReady=true but TickData=NULL at seq={processedSequence}, idx={index}");
-                        }
-
-                        processedSequence++;
-                        shard.ProcessedSequence = processedSequence;
-                        Interlocked.Increment(ref _ticksProcessed);
-                    }
+                    Interlocked.Increment(ref _ticksProcessed);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // Normal shutdown - cancellation token was triggered
+                Logger.Info($"[OTP-SHARD] Shard {shardIndex} worker cancelled (normal shutdown)");
             }
             catch (Exception ex)
             {
-                Log($"CRITICAL: Shard {shardIndex} failed: {ex.Message}");
+                Logger.Error($"[OTP-SHARD] CRITICAL: Shard {shardIndex} failed: {ex.Message}", ex);
             }
             finally
             {
-                Log($"OptimizedTickProcessor: Shard {shardIndex} worker ended");
+                Logger.Info($"[OTP-SHARD] Shard {shardIndex} worker ended, processed={processedCount} ticks");
             }
         }
 
         /// <summary>
         /// Queues a tick for processing (non-blocking).
-        /// Uses object pooling to reduce GC pressure.
-        /// Implements intelligent backpressure management with tiered limits.
+        /// Uses BlockingCollection.TryAdd for reliable producer-consumer synchronization.
         /// </summary>
         public bool QueueTick(string nativeSymbolName, ZerodhaTickData tickData)
         {
@@ -299,9 +244,9 @@ namespace QANinjaAdapter.Services.MarketData
             int shardIndex = (nativeSymbolName.GetHashCode() & 0x7FFFFFFF) % SHARD_COUNT;
             var shard = _shards[shardIndex];
 
-            // Backpressure check
-            long currentCount = Interlocked.Read(ref shard.Sequence) - shard.ProcessedSequence;
-            if (currentCount >= RING_BUFFER_SIZE - 2048) // Safety margin before full
+            // Backpressure check using queue count
+            int currentCount = shard.Queue.Count;
+            if (currentCount >= QUEUE_CAPACITY - 2048) // Safety margin before full
             {
                 var backpressureResult = ApplyBackpressureManagement(currentCount, null, nativeSymbolName);
                 if (!backpressureResult.shouldQueue)
@@ -311,34 +256,34 @@ namespace QANinjaAdapter.Services.MarketData
                 }
             }
 
-            // ATOMIC: Reserve slot using Increment (returns NEW value, so subtract 1 for index)
-            // This fixes the race condition where multiple threads would read the same sequence
-            long sequence = Interlocked.Increment(ref shard.Sequence) - 1;
-            int index = (int)(sequence & RING_BUFFER_MASK);
+            // Create item for the queue
+            var item = new TickProcessingItem
+            {
+                NativeSymbolName = nativeSymbolName,
+                TickData = tickData,
+                QueueTime = DateTime.UtcNow
+            };
 
             // DIAGNOSTIC: Log first few queued ticks per shard
-            if (sequence < 5)
+            long queuedCount = Interlocked.Read(ref _ticksQueued);
+            if (queuedCount < 20)
             {
-                Logger.Info($"[OTP-QUEUE] Shard {shardIndex}: Queuing tick seq={sequence}, idx={index}, symbol={nativeSymbolName}");
+                Logger.Info($"[OTP-QUEUE] Shard {shardIndex}: Queuing tick #{queuedCount}, symbol={nativeSymbolName}, queueCount={shard.Queue.Count}");
             }
 
-            // Assign data directly to pre-allocated item
-            var item = shard.RingBuffer[index];
-            item.NativeSymbolName = nativeSymbolName;
-            item.TickData = tickData;
-            item.QueueTime = DateTime.UtcNow;
-
-            // Mark item as ready for consumer (ensures data is visible before consumer reads)
-            item.MarkReady();
-
-            // Ensure all writes are visible before signaling
-            Thread.MemoryBarrier();
-
-            // Signal worker (sequence already incremented above)
-            Interlocked.Increment(ref _ticksQueued);
-            shard.WaitHandle.Set();
-
-            return true;
+            // TryAdd is non-blocking - returns false if queue is full
+            if (shard.Queue.TryAdd(item))
+            {
+                Interlocked.Increment(ref _ticksQueued);
+                return true;
+            }
+            else
+            {
+                // Queue is full - apply backpressure
+                _performanceMonitor.RecordTickDropped(nativeSymbolName);
+                Interlocked.Increment(ref _ticksDroppedBackpressure);
+                return false;
+            }
         }
 
         /// <summary>
@@ -1113,6 +1058,16 @@ namespace QANinjaAdapter.Services.MarketData
             sb.AppendLine($"Ticks Queued: {Interlocked.Read(ref _ticksQueued)}");
             sb.AppendLine($"Ticks Processed: {Interlocked.Read(ref _ticksProcessed)}");
             sb.AppendLine($"Pending Ticks: {Interlocked.Read(ref _ticksQueued) - Interlocked.Read(ref _ticksProcessed)}");
+
+            // Per-shard queue counts
+            if (_shards != null)
+            {
+                for (int i = 0; i < _shards.Length; i++)
+                {
+                    sb.AppendLine($"Shard {i} Queue Count: {_shards[i].Queue.Count}");
+                }
+            }
+
             sb.AppendLine($"Callbacks Executed: {Interlocked.Read(ref _callbacksExecuted)}");
             sb.AppendLine($"Callback Errors: {Interlocked.Read(ref _callbackErrors)}");
             sb.AppendLine($"Slow Callbacks (>1ms): {Interlocked.Read(ref _slowCallbacks)}");
@@ -1343,7 +1298,7 @@ namespace QANinjaAdapter.Services.MarketData
             if (_isDisposed) return;
             _isDisposed = true;
 
-            Log("OptimizedTickProcessor: Disposing...");
+            Logger.Info("[OTP] OptimizedTickProcessor: Disposing...");
 
             _cancellationTokenSource.Cancel();
 
@@ -1352,11 +1307,12 @@ namespace QANinjaAdapter.Services.MarketData
             {
                 foreach (var shard in _shards)
                 {
-                    shard.WaitHandle.Set(); // Signal to exit
                     try
                     {
+                        // CompleteAdding signals no more items will be added
+                        shard.Queue.CompleteAdding();
                         shard.WorkerTask?.Wait(500);
-                        shard.WaitHandle.Dispose();
+                        shard.Queue.Dispose();
                     }
                     catch { }
                 }
@@ -1364,11 +1320,13 @@ namespace QANinjaAdapter.Services.MarketData
 
             try
             {
+                _healthMonitoringTimer?.Stop();
+                _healthMonitoringTimer?.Dispose();
                 _performanceMonitor?.Dispose();
 
                 // Dispose resources
                 _cancellationTokenSource.Dispose();
-                Log("OptimizedTickProcessor disposed");
+                Logger.Info("[OTP] OptimizedTickProcessor disposed");
             }
             catch { }
         }
