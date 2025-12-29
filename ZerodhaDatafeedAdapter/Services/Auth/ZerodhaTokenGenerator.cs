@@ -19,6 +19,9 @@ namespace ZerodhaDatafeedAdapter.Services.Auth
     /// </summary>
     public class ZerodhaTokenGenerator
     {
+        // Cached TimeZone for IST (avoids repeated FindSystemTimeZoneById calls)
+        private static readonly TimeZoneInfo IstTimeZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
+
         // Zerodha API endpoints
         private const string LOGIN_URL = "https://kite.trade/connect/login";
         private const string API_LOGIN_URL = "https://kite.zerodha.com/api/login";
@@ -576,10 +579,9 @@ namespace ZerodhaDatafeedAdapter.Services.Auth
             if (!tokenTimestamp.HasValue)
                 return true;
 
-            // Get current IST time
-            var istZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-            var nowIst = TimeZoneInfo.ConvertTime(DateTime.Now, istZone);
-            var tokenIst = TimeZoneInfo.ConvertTime(tokenTimestamp.Value, istZone);
+            // Get current IST time (using cached TimeZoneInfo for performance)
+            var nowIst = TimeZoneInfo.ConvertTime(DateTime.Now, IstTimeZone);
+            var tokenIst = TimeZoneInfo.ConvertTime(tokenTimestamp.Value, IstTimeZone);
 
             // Token expires at midnight IST (date change)
             return tokenIst.Date != nowIst.Date;

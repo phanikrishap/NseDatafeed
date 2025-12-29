@@ -47,6 +47,11 @@ namespace ZerodhaDatafeedAdapter
         private static int _instanceCounter = 0;
         private readonly int _instanceId;
 
+        // Cleanup timer for stale callback removal
+        private Timer _cleanupTimer;
+        private static readonly TimeSpan CleanupInterval = TimeSpan.FromMinutes(30);
+        private static readonly TimeSpan MaxCallbackIdleTime = TimeSpan.FromMinutes(60);
+
         public ZerodhaAdapter()
         {
             _instanceId = Interlocked.Increment(ref _instanceCounter);
@@ -123,6 +128,9 @@ namespace ZerodhaDatafeedAdapter
                     this.SetInstruments();
                     this._ninjaConnection.ConnectionStatusCallback(ConnectionStatus.Connected, ConnectionStatus.Connected, ErrorCode.NoError, "");
 
+                    // Start the cleanup timer to remove stale callbacks periodically
+                    StartCleanupTimer();
+
                     await Connector.Instance.RegisterInstruments();
                 }
                 else
@@ -162,6 +170,14 @@ namespace ZerodhaDatafeedAdapter
 
         public void Disconnect()
         {
+            Logger.Info($"[ZerodhaAdapter] [Instance={_instanceId}] Disconnect called, cleaning up...");
+
+            // Stop the cleanup timer
+            StopCleanupTimer();
+
+            // Clear all callbacks from L1 subscriptions to prevent memory leaks
+            CleanupAllSubscriptions();
+
             lock (ZerodhaAdapter._lockLiveSymbol)
                 this._marketLiveDataSymbols?.Clear();
             lock (ZerodhaAdapter._lockDepthSymbol)
@@ -463,31 +479,8 @@ namespace ZerodhaDatafeedAdapter
             }
         }
 
-        /// <summary>
-        /// Processes a parsed tick data object and updates NinjaTrader with all available market data.
-        ///
-        /// NOTE: This is the fallback synchronous path. The optimized path uses
-        /// OptimizedTickProcessor which handles tick processing asynchronously with
-        /// object pooling, backpressure management, and batch processing.
-        ///
-        /// DEPRECATED: This method is no longer used. All tick processing now goes through
-        /// OptimizedTickProcessor which maintains its own shard-local state for thread-safe
-        /// volume/price tracking. Kept for API compatibility only.
-        /// </summary>
-        /// <param name="nativeSymbolName">The native symbol name</param>
-        /// <param name="tickData">The parsed tick data</param>
-        [Obsolete("Use OptimizedTickProcessor.QueueTick instead. This method is kept for API compatibility only.")]
-        public void ProcessParsedTick(string nativeSymbolName, ZerodhaTickData tickData)
-        {
-            // DEPRECATED: All tick processing now goes through OptimizedTickProcessor
-            // This method is kept only for API compatibility
-            // The OptimizedTickProcessor maintains shard-local SymbolState for thread-safe
-            // volume delta and price change tracking, eliminating the race conditions that
-            // occurred when L1Subscription.PreviousVolume/PreviousPrice were shared state.
-            Logger.Warn($"[ZerodhaAdapter] ProcessParsedTick called for {nativeSymbolName} - this is deprecated, use OptimizedTickProcessor instead");
-        }
-
-        // Trading methods - implement these if Zerodha trading is needed
+        // Trading methods - not implemented (data feed adapter only)
+        // These empty implementations satisfy the IAdapter interface requirements
         public void Cancel(NinjaTrader.Cbi.Order[] orders) { }
 
         public void Change(NinjaTrader.Cbi.Order[] orders) { }
@@ -649,7 +642,9 @@ namespace ZerodhaDatafeedAdapter
                         Logger.Info("No data returned from historical data request");
                     }
 
-                    foreach (Record record in (IEnumerable<Record>)source.OrderBy<Record, DateTime>((Func<Record, DateTime>)(x => x.TimeStamp)))
+                    // Note: Source data from Zerodha API is already sorted by timestamp (API returns chronological order)
+                    // Removing redundant OrderBy for performance optimization
+                    foreach (Record record in source)
                     {
                         if (barsRequest.Progress != null && barsRequest.Progress.IsAborted)
                         {
@@ -749,23 +744,7 @@ namespace ZerodhaDatafeedAdapter
         /// Checks if a symbol is an index (no volume traded, price updates only).
         /// Index symbols include GIFT NIFTY, NIFTY 50, SENSEX, NIFTY BANK, etc.
         /// </summary>
-        private bool IsIndexSymbol(string symbolName)
-        {
-            if (string.IsNullOrEmpty(symbolName))
-                return false;
-
-            // Known index symbols that have no volume (they're calculated indices)
-            string upperSymbol = symbolName.ToUpperInvariant();
-            return upperSymbol == "GIFT_NIFTY" ||
-                   upperSymbol == "GIFT NIFTY" ||
-                   upperSymbol == "NIFTY 50" ||
-                   upperSymbol == "NIFTY" ||  // NT symbol for NIFTY 50 index
-                   upperSymbol == "SENSEX" ||
-                   upperSymbol == "NIFTY BANK" ||
-                   upperSymbol == "BANKNIFTY" ||
-                   upperSymbol == "FINNIFTY" ||
-                   upperSymbol == "MIDCPNIFTY";
-        }
+        private bool IsIndexSymbol(string symbolName) => SymbolHelper.IsIndexSymbol(symbolName);
 
         private NinjaTrader.Gui.Chart.Chart FindChartControl(string instrument)
         {
@@ -913,8 +892,63 @@ namespace ZerodhaDatafeedAdapter
             }
         }
 
+        #region Cleanup Timer Methods
+
+        private void StartCleanupTimer()
+        {
+            StopCleanupTimer(); // Ensure no duplicate timers
+            _cleanupTimer = new Timer(CleanupTimerCallback, null, CleanupInterval, CleanupInterval);
+            Logger.Info($"[ZerodhaAdapter] [Instance={_instanceId}] Cleanup timer started (interval: {CleanupInterval.TotalMinutes} min, max idle: {MaxCallbackIdleTime.TotalMinutes} min)");
+        }
+
+        private void StopCleanupTimer()
+        {
+            if (_cleanupTimer != null)
+            {
+                _cleanupTimer.Dispose();
+                _cleanupTimer = null;
+                Logger.Debug($"[ZerodhaAdapter] [Instance={_instanceId}] Cleanup timer stopped");
+            }
+        }
+
+        private void CleanupTimerCallback(object state)
+        {
+            try
+            {
+                int totalRemoved = 0;
+                foreach (var kvp in _l1Subscriptions)
+                {
+                    totalRemoved += kvp.Value.CleanupStaleCallbacks(MaxCallbackIdleTime);
+                }
+
+                if (totalRemoved > 0)
+                {
+                    Logger.Info($"[ZerodhaAdapter] [Instance={_instanceId}] Cleanup timer: Removed {totalRemoved} stale callbacks across all subscriptions");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[ZerodhaAdapter] [Instance={_instanceId}] Error in cleanup timer: {ex.Message}");
+            }
+        }
+
+        private void CleanupAllSubscriptions()
+        {
+            int totalCallbacks = 0;
+            foreach (var kvp in _l1Subscriptions)
+            {
+                totalCallbacks += kvp.Value.CallbackCount;
+                kvp.Value.ClearAllCallbacks();
+            }
+            Logger.Info($"[ZerodhaAdapter] [Instance={_instanceId}] CleanupAllSubscriptions: Cleared {totalCallbacks} callbacks from {_l1Subscriptions.Count} subscriptions");
+        }
+
+        #endregion
+
         public void Dispose()
         {
+            Logger.Info($"[ZerodhaAdapter] [Instance={_instanceId}] Dispose called");
+            StopCleanupTimer();
             _syntheticStraddleService?.Dispose();
             this.Disconnect();
             this._l1Subscriptions.Clear();

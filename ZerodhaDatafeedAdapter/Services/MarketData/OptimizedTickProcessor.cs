@@ -97,6 +97,8 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private volatile ConcurrentDictionary<string, L2Subscription> _l2SubscriptionCache = new ConcurrentDictionary<string, L2Subscription>();
         private volatile ConcurrentDictionary<string, List<SubscriptionCallback>> _callbackCache = new ConcurrentDictionary<string, List<SubscriptionCallback>>();
         private readonly HashSet<string> _loggedMissedSymbols = new HashSet<string>(); // Track which symbols we've logged misses for
+        private readonly object _loggedMissedSymbolsLock = new object();
+        private const int MaxLoggedMissedSymbols = 500; // Limit to prevent unbounded growth
 
         // Performance monitoring
         private readonly PerformanceMonitor _performanceMonitor;
@@ -599,6 +601,36 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             }
         }
 
+        // Counter for periodic cleanup of logged missed symbols
+        private int _cleanupCycleCounter = 0;
+        private const int CleanupCycleThreshold = 30; // Clear every 30 cycles (15 minutes at 30s intervals)
+
+        /// <summary>
+        /// Periodically cleans up the _loggedMissedSymbols HashSet to prevent unbounded growth.
+        /// Called from health monitoring timer (every 30 seconds).
+        /// </summary>
+        private void CleanupLoggedMissedSymbols()
+        {
+            _cleanupCycleCounter++;
+
+            lock (_loggedMissedSymbolsLock)
+            {
+                // Clear if we've hit the cycle threshold OR approaching the max limit
+                if (_cleanupCycleCounter >= CleanupCycleThreshold ||
+                    _loggedMissedSymbols.Count >= MaxLoggedMissedSymbols - 50)
+                {
+                    int clearedCount = _loggedMissedSymbols.Count;
+                    _loggedMissedSymbols.Clear();
+                    _cleanupCycleCounter = 0;
+
+                    if (clearedCount > 0)
+                    {
+                        Logger.Info($"[OTP] Cleared {clearedCount} entries from _loggedMissedSymbols cache (periodic cleanup)");
+                    }
+                }
+            }
+        }
+
         /// <summary>
         /// Updates symbol mapping cache for fast lookups
         /// </summary>
@@ -658,15 +690,26 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 if (!_subscriptionCache.TryGetValue(ntSymbolName, out var subscription))
                 {
                     // Log first miss for each symbol to help debug - include NIFTY options
-                    if (_subscriptionCache.Count > 0 && !_loggedMissedSymbols.Contains(ntSymbolName))
+                    bool shouldLog = false;
+                    lock (_loggedMissedSymbolsLock)
                     {
-                        // Log NIFTY/SENSEX option misses
-                        if ((ntSymbolName.Contains("NIFTY") || ntSymbolName.Contains("SENSEX")) &&
-                            (ntSymbolName.Contains("CE") || ntSymbolName.Contains("PE")))
+                        if (_subscriptionCache.Count > 0 &&
+                            !_loggedMissedSymbols.Contains(ntSymbolName) &&
+                            _loggedMissedSymbols.Count < MaxLoggedMissedSymbols)
                         {
-                            _loggedMissedSymbols.Add(ntSymbolName);
-                            Logger.Info($"[OTP-MISS] No subscription for option '{ntSymbolName}'. SubscriptionCache has {_subscriptionCache.Count} entries. First 5: {string.Join(", ", _subscriptionCache.Keys.Take(5))}");
+                            // Log NIFTY/SENSEX option misses
+                            if ((ntSymbolName.Contains("NIFTY") || ntSymbolName.Contains("SENSEX")) &&
+                                (ntSymbolName.Contains("CE") || ntSymbolName.Contains("PE")))
+                            {
+                                _loggedMissedSymbols.Add(ntSymbolName);
+                                shouldLog = true;
+                            }
                         }
+                    }
+
+                    if (shouldLog)
+                    {
+                        Logger.Info($"[OTP-MISS] No subscription for option '{ntSymbolName}'. SubscriptionCache has {_subscriptionCache.Count} entries. First 5: {string.Join(", ", _subscriptionCache.Keys.Take(5))}");
                     }
 
                     return; // No subscription found
@@ -1126,6 +1169,10 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
                 // Issue health alerts if needed
                 LogHealthAlerts(queueDepth, callbackSuccessRate, processingEfficiency, gc2Rate, totalMemoryMB);
+
+                // Periodic cleanup of _loggedMissedSymbols to prevent unbounded growth
+                // Clear every 15 minutes (30 cycles * 30 seconds) or when nearing limit
+                CleanupLoggedMissedSymbols();
 
                 // Update previous counts for next iteration
                 _lastQueuedCount = currentQueued;

@@ -618,19 +618,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         /// Checks if the symbol is an index symbol (NIFTY, SENSEX, BANKNIFTY, etc.)
         /// Indices should not be processed as synthetic straddle legs.
         /// </summary>
-        private bool IsIndexSymbol(string symbol)
-        {
-            if (string.IsNullOrEmpty(symbol))
-                return false;
-
-            // Exact index symbol names (no strike/expiry suffix)
-            return symbol == "NIFTY" ||
-                   symbol == "SENSEX" ||
-                   symbol == "BANKNIFTY" ||
-                   symbol == "FINNIFTY" ||
-                   symbol == "MIDCPNIFTY" ||
-                   symbol.EndsWith("_SPOT"); // e.g., NIFTY_SPOT, SENSEX_SPOT
-        }
+        private bool IsIndexSymbol(string symbol) => Helpers.SymbolHelper.IsIndexSymbol(symbol);
 
         /// <summary>
         /// Monitors for chart close and cleans up subscription using reference counting

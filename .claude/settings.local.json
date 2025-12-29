@@ -29,7 +29,17 @@
       "Bash(copy /Y \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\bin\\\\Debug\\\\ZerodhaAPI.dll\" \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\bin\\\\Custom\\\\ZerodhaAPI.dll\")",
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" status)",
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" branch)",
-      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" add -A)"
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" add -A)",
+      "Bash(powershell: Get-ChildItem -Path \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(for file in d:CascadeProjectsNseDatafeed_newZerodhaAPICommonModelsRequest*.cs)",
+      "Bash(do basename \"$file\" .cs)",
+      "Bash(done)",
+      "Bash(for file in d:CascadeProjectsNseDatafeed_newZerodhaAPICommonModelsResponse*.cs)",
+      "Bash(ls:*)",
+      "Bash(xargs:*)",
+      "Bash(grep:*)",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaAPI\\\\ZerodhaAPI.csproj\" -t:Build -p:Configuration=Debug -verbosity:minimal)"
     ]
   }
 }

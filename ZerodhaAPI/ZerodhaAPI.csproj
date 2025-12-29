@@ -87,7 +87,6 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Class1.cs" />
     <Compile Include="Common\Caching\APICacheManager.cs" />
     <Compile Include="Common\Caching\Interfaces\IAPICacheManager.cs" />
     <Compile Include="Common\Caching\SingletonCacheManager.cs" />

@@ -12,7 +12,7 @@ Zerodha NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader
 - **High-Performance Tick Processing**: Disruptor-style sharded RingBuffer with 4 parallel worker threads
 - **Synthetic Straddle Instruments**: Real-time CE+PE combined pricing for options trading
 - **Market Analyzer Window**: Visual option chain with ATM detection and histogram display
-- **Multi-Broker Support**: Zerodha, Upstox, and Binance connectivity
+- **Zerodha Integration**: Native Zerodha Kite Connect API support
 - **Automatic Token Generation**: TOTP-based auto-login with token refresh
 - **Memory-Optimized**: ArrayPool integration, GC pressure monitoring, and intelligent backpressure
 
@@ -114,29 +114,30 @@ Zerodha NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader
 │  │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
-│  ┌───────────────────────────┐   ┌───────────────┐   ┌───────────────┐      │
-│  │         Zerodha           │   │    Upstox     │   │    Binance    │      │
-│  │  ┌─────────────────────┐  │   │               │   │               │      │
-│  │  │   WebSocket Binary  │  │   │  REST Client  │   │  WebSocket    │      │
-│  │  │   Parser (Manual    │  │   │               │   │               │      │
-│  │  │   Big-Endian)       │  │   │               │   │               │      │
-│  │  ├─────────────────────┤  │   │               │   │               │      │
-│  │  │   REST Client       │  │   │               │   │               │      │
-│  │  │   (Kite Connect)    │  │   │               │   │               │      │
-│  │  ├─────────────────────┤  │   │               │   │               │      │
-│  │  │   TOTP Generator    │  │   │               │   │               │      │
-│  │  │   (Auto-Login)      │  │   │               │   │               │      │
-│  │  └─────────────────────┘  │   │               │   │               │      │
-│  └───────────────────────────┘   └───────────────┘   └───────────────┘      │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                            Zerodha                                 │    │
+│  │  ┌─────────────────────┐  ┌─────────────────────┐                  │    │
+│  │  │   WebSocket Binary  │  │   REST Client       │                  │    │
+│  │  │   Parser (Manual    │  │   (Kite Connect)    │                  │    │
+│  │  │   Big-Endian)       │  │   • Historical data │                  │    │
+│  │  │   • Real-time ticks │  │   • Token refresh   │                  │    │
+│  │  │   • Market depth    │  │   • Instrument info │                  │    │
+│  │  └─────────────────────┘  └─────────────────────┘                  │    │
+│  │                                                                     │    │
+│  │  ┌─────────────────────┐                                            │    │
+│  │  │   TOTP Generator    │                                            │    │
+│  │  │   (Auto-Login)      │                                            │    │
+│  │  └─────────────────────┘                                            │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
-                │                        │                     │
-                ▼                        ▼                     ▼
-       ┌─────────────────┐      ┌─────────────────┐    ┌─────────────────┐
-       │  Zerodha Kite   │      │   Upstox API    │    │   Binance API   │
-       │  Connect API    │      │                 │    │                 │
-       │  wss://ws.kite  │      │                 │    │                 │
-       └─────────────────┘      └─────────────────┘    └─────────────────┘
+                                     │
+                                     ▼
+                            ┌─────────────────┐
+                            │  Zerodha Kite   │
+                            │  Connect API    │
+                            │  wss://ws.kite  │
+                            └─────────────────┘
 ```
 
 ## WebSocket Architecture
@@ -256,20 +257,56 @@ WebSocket Binary Message
 └────────────────────────────────────────────────────────────────┘
 ```
 
+## Project Structure
+
+```
+NseDatafeed_new/
+├── ZerodhaDatafeedAdapter/          # Main NinjaTrader adapter project
+│   ├── AddOns/                      # NinjaTrader AddOn windows
+│   │   └── MarketAnalyzer/          # Market Analyzer & Option Chain UI
+│   ├── Classes/                     # Constants, Records, MarketType
+│   ├── Services/
+│   │   ├── Analysis/                # MarketAnalyzerLogic, VWAPCalculator
+│   │   ├── Auth/                    # ZerodhaTokenGenerator (TOTP)
+│   │   ├── Configuration/           # ConfigurationManager
+│   │   ├── Instruments/             # InstrumentManager, NinjaTraderHelper
+│   │   ├── MarketData/              # MarketDataService, OptimizedTickProcessor
+│   │   ├── WebSocket/               # SharedWebSocketService, WebSocketManager
+│   │   └── Zerodha/                 # ZerodhaClient
+│   ├── SyntheticInstruments/        # Straddle processing
+│   ├── ZerodhaAdapter.cs            # Main adapter entry point
+│   ├── ZerodhaConnectorOptions.cs   # NinjaTrader connection options
+│   └── Connector.cs                 # Service orchestration
+│
+├── ZerodhaAPI/                      # Zerodha API client library
+│   ├── Common/                      # Shared models, enums, interfaces
+│   └── Zerodha/                     # Kite Connect implementation
+│       ├── BrokerClient.cs          # REST API client
+│       ├── Websockets/              # WebSocket client
+│       └── Utility/                 # Binary parser
+│
+├── TokenGeneratorTest/              # Standalone token generator
+├── QA.Tests/                        # Unit tests
+├── References/                      # NinjaTrader DLLs
+└── build-and-deploy.ps1             # Build & deploy script
+```
+
 ## Installation
 
 1. Build the solution in Visual Studio (Debug or Release)
-2. Copy `ZerodhaDatafeedAdapter.dll` to:
+2. Copy both DLLs to NinjaTrader:
    ```
-   %UserProfile%\Documents\NinjaTrader 8\bin\Custom
+   %UserProfile%\Documents\NinjaTrader 8\bin\Custom\ZerodhaDatafeedAdapter.dll
+   %UserProfile%\Documents\NinjaTrader 8\bin\Custom\ZerodhaAPI.dll
    ```
+   Or use the build script: `.\build-and-deploy.ps1`
 3. Create the configuration folder:
    ```
    %UserProfile%\Documents\NinjaTrader 8\ZerodhaAdapter
    ```
 4. Create `config.json` with your Zerodha credentials
 5. Restart NinjaTrader 8
-6. Add "Zerodha" connection in Control Center → Connections
+6. Add "Zerodha Adapter" connection in Control Center → Connections
 
 ## Configuration
 
@@ -374,14 +411,18 @@ Key log prefixes:
 - .NET Framework 4.8
 - NinjaTrader 8 installed
 
-### Build
-```bash
-MSBuild ZerodhaDatafeedAdapter.csproj /t:Build /p:Configuration=Debug
-```
+### Build & Deploy
+```powershell
+# Using the build script (recommended)
+.\build-and-deploy.ps1
 
-### Deploy
-```bash
-copy /Y "bin\Debug\ZerodhaDatafeedAdapter.dll" "%UserProfile%\Documents\NinjaTrader 8\bin\Custom\"
+# Or manually with MSBuild
+& "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" `
+    ZerodhaDatafeedAdapter\ZerodhaDatafeedAdapter.csproj /t:Build /p:Configuration=Debug
+
+# Copy DLLs manually
+copy ZerodhaDatafeedAdapter\bin\Debug\ZerodhaDatafeedAdapter.dll "%UserProfile%\Documents\NinjaTrader 8\bin\Custom\"
+copy ZerodhaAPI\bin\Debug\ZerodhaAPI.dll "%UserProfile%\Documents\NinjaTrader 8\bin\Custom\"
 ```
 
 ## License

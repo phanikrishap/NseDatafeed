@@ -58,7 +58,8 @@ public class L1Subscription
                 Id = callbackId,
                 Instrument = instrument,
                 Callback = callback,
-                RegisteredAt = DateTime.UtcNow
+                RegisteredAt = DateTime.UtcNow,
+                LastFiredAt = DateTime.UtcNow // Initialize to now so new callbacks get grace period
             };
 
             _callbacks[callbackId] = entry;
@@ -174,6 +175,89 @@ public class L1Subscription
         }
     }
 
+    /// <summary>
+    /// Marks a callback as fired (updates LastFiredAt timestamp).
+    /// Call this after successfully invoking a callback.
+    /// Thread-safe operation.
+    /// </summary>
+    public void MarkCallbackFired(string callbackId)
+    {
+        if (_callbacks.TryGetValue(callbackId, out var entry))
+        {
+            entry.LastFiredAt = DateTime.UtcNow;
+        }
+    }
+
+    /// <summary>
+    /// Gets all callback entries with their metadata for cleanup decisions.
+    /// Thread-safe operation.
+    /// </summary>
+    public List<CallbackEntry> GetCallbackEntriesSnapshot()
+    {
+        lock (_lock)
+        {
+            return _callbacks.Values.ToList();
+        }
+    }
+
+    /// <summary>
+    /// Removes callbacks that haven't been fired within the specified time span.
+    /// Returns the number of callbacks removed.
+    /// Thread-safe operation.
+    /// </summary>
+    public int CleanupStaleCallbacks(TimeSpan maxIdleTime)
+    {
+        lock (_lock)
+        {
+            var cutoffTime = DateTime.UtcNow - maxIdleTime;
+            var staleCallbackIds = _callbacks.Values
+                .Where(e => e.LastFiredAt < cutoffTime)
+                .Select(e => e.Id)
+                .ToList();
+
+            int removed = 0;
+            foreach (var callbackId in staleCallbackIds)
+            {
+                if (_callbacks.TryRemove(callbackId, out var entry))
+                {
+                    // Also remove from instrument mapping
+                    if (_instrumentToCallbackIds.TryGetValue(entry.Instrument, out var ids))
+                    {
+                        ids.Remove(callbackId);
+                        if (ids.Count == 0)
+                        {
+                            _instrumentToCallbackIds.TryRemove(entry.Instrument, out _);
+                        }
+                    }
+                    removed++;
+                    Logger.Debug($"[L1Subscription] CleanupStale: Removed {entry.Instrument.FullName}, idle since {entry.LastFiredAt:HH:mm:ss}");
+                }
+            }
+
+            if (removed > 0)
+            {
+                Logger.Info($"[L1Subscription] CleanupStaleCallbacks: Removed {removed} stale callbacks, remaining={_callbacks.Count}");
+            }
+
+            return removed;
+        }
+    }
+
+    /// <summary>
+    /// Clears all callbacks. Use on disconnect.
+    /// Thread-safe operation.
+    /// </summary>
+    public void ClearAllCallbacks()
+    {
+        lock (_lock)
+        {
+            int count = _callbacks.Count;
+            _callbacks.Clear();
+            _instrumentToCallbackIds.Clear();
+            Logger.Info($"[L1Subscription] ClearAllCallbacks: Removed {count} callbacks");
+        }
+    }
+
     // Legacy property for backward compatibility
     // Returns a generated dictionary - this is expensive, use GetCallbacksSnapshot() instead
     [Obsolete("Use GetCallbacksSnapshot() instead for better performance")]
@@ -218,4 +302,8 @@ public class CallbackEntry
     public Instrument Instrument { get; set; }
     public Action<MarketDataType, double, long, DateTime, long> Callback { get; set; }
     public DateTime RegisteredAt { get; set; }
+    /// <summary>
+    /// Last time this callback was invoked. Used for staleness detection.
+    /// </summary>
+    public DateTime LastFiredAt { get; set; }
 }
