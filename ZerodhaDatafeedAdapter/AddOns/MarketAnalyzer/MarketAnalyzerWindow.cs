@@ -17,6 +17,7 @@ using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer;
 using ZerodhaDatafeedAdapter.AddOns.TBSManager;
+using ZerodhaDatafeedAdapter.AddOns.SimulationEngine;
 
 namespace NinjaTrader.NinjaScript.AddOns
 {
@@ -28,6 +29,7 @@ namespace NinjaTrader.NinjaScript.AddOns
     {
         private NTMenuItem _menuItem;
         private NTMenuItem _tbsMenuItem;
+        private NTMenuItem _simMenuItem;
         private NTMenuItem _existingNewMenu;
         private static bool _autoOpened = false;
 
@@ -122,6 +124,16 @@ namespace NinjaTrader.NinjaScript.AddOns
             _tbsMenuItem.Click += OnTBSMenuItemClick;
             _existingNewMenu.Items.Add(_tbsMenuItem);
 
+            // Add Simulation Engine menu item (does NOT auto-launch)
+            _simMenuItem = new NTMenuItem
+            {
+                Header = "Simulation Engine",
+                Style = Application.Current.TryFindResource("MainMenuItem") as Style
+            };
+
+            _simMenuItem.Click += OnSimMenuItemClick;
+            _existingNewMenu.Items.Add(_simMenuItem);
+
             Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): Menu items added successfully");
         }
 
@@ -145,6 +157,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                         _existingNewMenu.Items.Remove(_tbsMenuItem);
                         _tbsMenuItem.Click -= OnTBSMenuItemClick;
                         _tbsMenuItem = null;
+                    }
+
+                    if (_simMenuItem != null && _existingNewMenu.Items.Contains(_simMenuItem))
+                    {
+                        _existingNewMenu.Items.Remove(_simMenuItem);
+                        _simMenuItem.Click -= OnSimMenuItemClick;
+                        _simMenuItem = null;
                     }
                 }
 
@@ -186,6 +205,25 @@ namespace NinjaTrader.NinjaScript.AddOns
                 catch (Exception ex)
                 {
                     Logger.Error($"[MarketAnalyzerAddOn] OnTBSMenuItemClick(): Failed to create window - {ex.Message}", ex);
+                }
+            }));
+        }
+
+        private void OnSimMenuItemClick(object sender, RoutedEventArgs e)
+        {
+            Logger.Info("[MarketAnalyzerAddOn] OnSimMenuItemClick(): User clicked Simulation Engine menu item");
+
+            Core.Globals.RandomDispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    var win = new SimulationEngineWindow();
+                    win.Show();
+                    Logger.Info("[MarketAnalyzerAddOn] OnSimMenuItemClick(): New SimulationEngineWindow opened");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerAddOn] OnSimMenuItemClick(): Failed to create window - {ex.Message}", ex);
                 }
             }));
         }

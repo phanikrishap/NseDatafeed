@@ -239,9 +239,12 @@
     <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerWindow.cs" />
     <Compile Include="AddOns\MarketAnalyzer\OptionChainWindow.cs" />
     <Compile Include="AddOns\TBSManager\TBSManagerWindow.cs" />
+    <Compile Include="AddOns\SimulationEngine\SimulationEngineWindow.cs" />
     <Compile Include="Models\TBSConfigEntry.cs" />
     <Compile Include="Models\TBSExecutionState.cs" />
+    <Compile Include="Models\SimulationConfig.cs" />
     <Compile Include="Services\TBSConfigurationService.cs" />
+    <Compile Include="Services\SimulationService.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
     <Compile Include="Services\WebSocket\SharedWebSocketService.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />

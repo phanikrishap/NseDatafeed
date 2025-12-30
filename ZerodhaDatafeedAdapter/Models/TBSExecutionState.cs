@@ -339,7 +339,9 @@ namespace ZerodhaDatafeedAdapter.Models
         /// <summary>
         /// Update status based on current time. Returns true if status changed.
         /// </summary>
-        public bool UpdateStatusBasedOnTime(TimeSpan currentTime)
+        /// <param name="currentTime">Current time of day</param>
+        /// <param name="skipExitTimeCheck">When true, skip exit time logic (used during simulation)</param>
+        public bool UpdateStatusBasedOnTime(TimeSpan currentTime, bool skipExitTimeCheck = false)
         {
             if (Config == null) return false;
 
@@ -349,10 +351,10 @@ namespace ZerodhaDatafeedAdapter.Models
             var exitTime = ConfigExitTime != TimeSpan.Zero ? ConfigExitTime : Config.ExitTime;
             var timeDiff = entryTime - currentTime;
 
-            // Safety check: if exit time is zero or before/equal to entry time, use default (15:15:00)
+            // Safety check: if exit time is zero or before/equal to entry time, use default (15:25:00)
             if (exitTime == TimeSpan.Zero || exitTime <= entryTime)
             {
-                exitTime = new TimeSpan(15, 15, 0); // Default exit time
+                exitTime = new TimeSpan(15, 25, 0); // Default exit time
             }
 
             // If already SquaredOff, nothing to do
@@ -360,10 +362,12 @@ namespace ZerodhaDatafeedAdapter.Models
                 return false;
 
             // If Live, only check for exit time (don't change to anything else)
+            // Skip exit time check during simulation mode
             if (Status == TBSExecutionStatus.Live)
             {
                 // Only transition to SquaredOff if strike was locked (positions were populated)
-                if (StrikeLocked && currentTime >= exitTime)
+                // and we're NOT in simulation mode (skipExitTimeCheck = false)
+                if (!skipExitTimeCheck && StrikeLocked && currentTime >= exitTime)
                 {
                     Status = TBSExecutionStatus.SquaredOff;
                     Message = "Position exited (time-based)";
@@ -378,26 +382,26 @@ namespace ZerodhaDatafeedAdapter.Models
                 if (Status == TBSExecutionStatus.Monitoring)
                 {
                     // Was monitoring, now entry time passed -> go Live
-                    // Note: Don't immediately transition to SquaredOff - let the timer tick
-                    // call LockStrikeAndEnter first
                     Status = TBSExecutionStatus.Live;
-                    Message = "Position entered (simulated)";
+                    Message = "Position entered";
                     ActualEntryTime = DateTime.Today.Add(entryTime);
                 }
-                else if (Status == TBSExecutionStatus.Idle || Status == TBSExecutionStatus.Skipped)
+                else if (Status == TBSExecutionStatus.Idle)
                 {
-                    // Was idle when entry passed -> Skipped
-                    Status = TBSExecutionStatus.Skipped;
-                    Message = "Entry time passed";
+                    // Was idle when entry passed -> go Live (late start scenario)
+                    Status = TBSExecutionStatus.Live;
+                    Message = "Position entered (late)";
+                    ActualEntryTime = DateTime.Today.Add(entryTime);
                 }
+                // Skipped stays Skipped
             }
-            else if (timeDiff.TotalMinutes <= 5)
+            else if (timeDiff.TotalMinutes <= 5 && timeDiff.TotalMinutes >= 0)
             {
-                // Within 5 minutes of entry
+                // Within 5 minutes of entry (and entry hasn't passed)
                 Status = TBSExecutionStatus.Monitoring;
                 Message = $"Entry in {timeDiff.Minutes}m {timeDiff.Seconds}s";
             }
-            else
+            else if (timeDiff.TotalMinutes > 5)
             {
                 // More than 5 minutes away
                 Status = TBSExecutionStatus.Idle;

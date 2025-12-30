@@ -59,6 +59,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         // Event for UI updates
         public event Action<string, double> OptionPriceUpdated;
 
+        /// <summary>
+        /// Inject a simulated price update (for SimulationService to feed Option Chain)
+        /// </summary>
+        public void InjectSimulatedPrice(string symbol, double price)
+        {
+            OptionPriceUpdated?.Invoke(symbol, price);
+        }
+
         // Event to notify when zerodhaSymbol is resolved from DB (generatedSymbol, zerodhaSymbol)
         public event Action<string, string> SymbolResolved;
 

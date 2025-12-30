@@ -17,6 +17,7 @@ using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer;
+using SimService = ZerodhaDatafeedAdapter.Services.SimulationService;
 
 namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
 {
@@ -578,6 +579,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                 underlying == "All" ? null : underlying,
                 dte);
 
+            // ALWAYS use real system time for TBS status logic
+            // Simulation only affects price data replay, not time-based execution
+            var isSimulationActive = SimService.Instance.IsSimulationActive;
             var now = DateTime.Now.TimeOfDay;
 
             foreach (var config in configs)
@@ -614,8 +618,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                 // Always populate ATM strike for all tranches (so they're ready)
                 UpdateStrikeForState(state);
 
-                // Update initial status based on time
-                state.UpdateStatusBasedOnTime(now);
+                // Update initial status based on time (skip exit time check during simulation)
+                state.UpdateStatusBasedOnTime(now, skipExitTimeCheck: isSimulationActive);
 
                 // For tranches that are already Live or past entry (but before exit),
                 // lock strike and populate entry prices immediately
@@ -1064,12 +1068,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
             if (!_optionChainReady)
                 return;
 
+            // ALWAYS use real system time for TBS status logic
+            // Simulation only affects price data replay, not time-based execution
+            var isSimulationActive = SimService.Instance.IsSimulationActive;
             var now = DateTime.Now.TimeOfDay;
 
             foreach (var state in _executionRows)
             {
                 var oldStatus = state.Status;
-                bool statusChanged = state.UpdateStatusBasedOnTime(now);
+                // Skip exit time check when simulation is running (so positions don't auto-exit)
+                bool statusChanged = state.UpdateStatusBasedOnTime(now, skipExitTimeCheck: isSimulationActive);
 
                 // Log status changes
                 if (statusChanged)
