@@ -274,7 +274,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             try
             {
                 // Log to file only, not to NinjaTrader control panel (too verbose)
-                Logger.Info($"[PERF] {message}");
+                Logger.Debug($"[PERF] {message}");
             }
             catch
             {

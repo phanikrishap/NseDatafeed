@@ -185,7 +185,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private void ProcessShardSynchronously(int shardIndex)
         {
             var shard = _shards[shardIndex];
-            Logger.Info($"[OTP-SHARD] Shard {shardIndex} worker STARTING (BlockingCollection)");
+            Logger.Debug($"[OTP-SHARD] Shard {shardIndex} worker STARTING (BlockingCollection)");
             long processedCount = 0;
 
             try
@@ -199,7 +199,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     // DIAGNOSTIC: Log progress (every 100 ticks or first tick)
                     if (processedCount % 100 == 1 || processedCount == 1)
                     {
-                        Logger.Info($"[OTP-SHARD] Shard {shardIndex}: processed={processedCount}, queueCount={shard.Queue.Count}");
+                        Logger.Debug($"[OTP-SHARD] Shard {shardIndex}: processed={processedCount}, queueCount={shard.Queue.Count}");
                     }
 
                     if (item?.TickData != null)
@@ -220,7 +220,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             catch (OperationCanceledException)
             {
                 // Normal shutdown - cancellation token was triggered
-                Logger.Info($"[OTP-SHARD] Shard {shardIndex} worker cancelled (normal shutdown)");
+                Logger.Debug($"[OTP-SHARD] Shard {shardIndex} worker cancelled (normal shutdown)");
             }
             catch (Exception ex)
             {
@@ -228,7 +228,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             }
             finally
             {
-                Logger.Info($"[OTP-SHARD] Shard {shardIndex} worker ended, processed={processedCount} ticks");
+                Logger.Debug($"[OTP-SHARD] Shard {shardIndex} worker ended, processed={processedCount} ticks");
             }
         }
 
@@ -671,7 +671,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 {
                     if (Interlocked.Increment(ref _optionProcessSingleTickCounter) % 50 == 1)
                     {
-                        Logger.Info($"[OTP-ENTRY] ProcessSingleTick: {ntSymbolName}, LTP={item.TickData.LastTradePrice}, Vol={item.TickData.TotalQtyTraded}");
+                        Logger.Debug($"[OTP-ENTRY] ProcessSingleTick: {ntSymbolName}, LTP={item.TickData.LastTradePrice}, Vol={item.TickData.TotalQtyTraded}");
                     }
                 }
 

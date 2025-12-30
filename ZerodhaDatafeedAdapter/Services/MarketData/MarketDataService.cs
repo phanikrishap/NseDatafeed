@@ -567,7 +567,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 {
                     if (Interlocked.Increment(ref _optionTickReceiveCounter) % 100 == 1)
                     {
-                        Logger.Info($"[MDS-DIAG] Option tick RECEIVED: symbol={symbol}, ltp={tickData?.LastTradePrice}, vol={tickData?.TotalQtyTraded}");
+                        Logger.Debug($"[MDS-DIAG] Option tick RECEIVED: symbol={symbol}, ltp={tickData?.LastTradePrice}, vol={tickData?.TotalQtyTraded}");
                     }
                 }
 
