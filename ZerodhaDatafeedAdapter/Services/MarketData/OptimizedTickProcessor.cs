@@ -413,12 +413,12 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             if (subscriptions.Count < 2 && subscriptions.Count > 0)
             {
                  // Suspicious: updating cache with very few items?
-                 Logger.Info($"[OTP-CACHE] UpdateSubscriptionCache called with only {subscriptions.Count} items! Possible cache stomp.");
-                 foreach(var key in subscriptions.Keys) Logger.Info($"[OTP-CACHE] Key: {key}");
+                 Logger.Debug($"[OTP-CACHE] UpdateSubscriptionCache called with only {subscriptions.Count} items! Possible cache stomp.");
+                 foreach(var key in subscriptions.Keys) Logger.Debug($"[OTP-CACHE] Key: {key}");
             }
             else
             {
-                 Logger.Info($"[OTP-CACHE] UpdateSubscriptionCache called with {subscriptions.Count} items.");
+                 Logger.Debug($"[OTP-CACHE] UpdateSubscriptionCache called with {subscriptions.Count} items.");
             }
 
             // Build NEW caches without touching the current ones
@@ -510,7 +510,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             }
 
             Log($"OptimizedTickProcessor: Updated caches - {newSubscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
-            Logger.Info($"[OTP] Updated caches - {newSubscriptionCache.Count} subscriptions, {newCallbackCache.Count} callback entries, {_uninitializedSymbols.Count} pending init");
+            Logger.Debug($"[OTP] Updated caches - {newSubscriptionCache.Count} subscriptions, {newCallbackCache.Count} callback entries, {_uninitializedSymbols.Count} pending init");
 
             // Force GC if under pressure and cache is large
             if (_isUnderMemoryPressure && newSubscriptionCache.Count > 100)
@@ -859,7 +859,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 // Log every 100th option tick to avoid spam but still get visibility
                 if (Interlocked.Increment(ref _optionTickLogCounter) % 100 == 1)
                 {
-                    Logger.Info($"[OTP-DIAG] Option tick: symbol={symbolName}, lastPrice={lastPrice}, volumeDelta={volumeDelta}, totalVol={tickData.TotalQtyTraded}, callbackCount={callbacks?.Count ?? 0}");
+                    Logger.Debug($"[OTP-DIAG] Option tick: symbol={symbolName}, lastPrice={lastPrice}, volumeDelta={volumeDelta}, totalVol={tickData.TotalQtyTraded}, callbackCount={callbacks?.Count ?? 0}");
                 }
             }
 
@@ -935,7 +935,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                         {
                             if (Interlocked.Increment(ref _optionCallbackFiredCounter) % 50 == 1)
                             {
-                                Logger.Info($"[OTP-DIAG] Option CALLBACK FIRED: symbol={symbolName}, price={tickData.LastTradePrice}, volumeDelta={volumeDelta}");
+                                Logger.Debug($"[OTP-DIAG] Option CALLBACK FIRED: symbol={symbolName}, price={tickData.LastTradePrice}, volumeDelta={volumeDelta}");
                             }
                         }
 

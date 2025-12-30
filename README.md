@@ -264,7 +264,13 @@ NseDatafeed_new/
 ├── ZerodhaDatafeedAdapter/          # Main NinjaTrader adapter project
 │   ├── AddOns/                      # NinjaTrader AddOn windows
 │   │   └── MarketAnalyzer/          # Market Analyzer & Option Chain UI
+│   ├── Annotations/                 # JetBrains annotations for code quality
 │   ├── Classes/                     # Constants, Records, MarketType
+│   ├── Controls/                    # Custom WPF controls (SymbolSearch, etc.)
+│   ├── Enums/                       # Shared enumerations
+│   ├── Helpers/                     # Utility helpers (PriceHelper, etc.)
+│   ├── Logging/                     # Logging configuration and custom appenders
+│   ├── Models/                      # Data models (TickData, Subscription info)
 │   ├── Services/
 │   │   ├── Analysis/                # MarketAnalyzerLogic, VWAPCalculator
 │   │   ├── Auth/                    # ZerodhaTokenGenerator (TOTP)
@@ -273,10 +279,11 @@ NseDatafeed_new/
 │   │   ├── MarketData/              # MarketDataService, OptimizedTickProcessor
 │   │   ├── WebSocket/               # SharedWebSocketService, WebSocketManager
 │   │   └── Zerodha/                 # ZerodhaClient
-│   ├── SyntheticInstruments/        # Straddle processing
+│   ├── SyntheticInstruments/        # Straddle processing and synthetic logic
+│   ├── ViewModels/                  # MVVM ViewModels for UI
 │   ├── ZerodhaAdapter.cs            # Main adapter entry point
 │   ├── ZerodhaConnectorOptions.cs   # NinjaTrader connection options
-│   └── Connector.cs                 # Service orchestration
+│   └── Connector.cs                 # Service orchestration and singleton access
 │
 ├── ZerodhaAPI/                      # Zerodha API client library
 │   ├── Common/                      # Shared models, enums, interfaces
@@ -285,10 +292,11 @@ NseDatafeed_new/
 │       ├── Websockets/              # WebSocket client
 │       └── Utility/                 # Binary parser
 │
-├── TokenGeneratorTest/              # Standalone token generator
-├── QA.Tests/                        # Unit tests
-├── References/                      # NinjaTrader DLLs
-└── build-and-deploy.ps1             # Build & deploy script
+├── TokenGeneratorTest/              # Standalone token generator for testing
+├── QA.Tests/                        # Unit tests for core components
+├── References/                      # Required NinjaTrader and third-party DLLs
+├── Test Applications/               # Small utilities for connectivity testing
+└── build-and-deploy.ps1             # PowerShell script for automated build/deploy
 ```
 
 ## Installation

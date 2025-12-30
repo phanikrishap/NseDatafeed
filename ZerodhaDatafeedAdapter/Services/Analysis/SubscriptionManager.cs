@@ -247,13 +247,13 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                                 // DIAGNOSTIC: Log every callback firing for options (sampled)
                                 if ((symbolForClosure.Contains("CE") || symbolForClosure.Contains("PE")) && DateTime.Now.Second % 10 == 0)
                                 {
-                                    Logger.Info($"[SM-DIAG] LiveData CALLBACK: {symbolForClosure} = {price}, size={size}");
+                                    Logger.Debug($"[SM-DIAG] LiveData CALLBACK: {symbolForClosure} = {price}, size={size}");
                                 }
                                 OptionPriceUpdated?.Invoke(symbolForClosure, price);
                             }
                         });
 
-                        Logger.Info($"[SubscriptionManager] SubscribeToInstrument({ntName}): Live subscription active");
+                        Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({ntName}): Live subscription active");
                     }
                     else
                     {

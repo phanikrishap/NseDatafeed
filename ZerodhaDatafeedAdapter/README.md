@@ -73,13 +73,15 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 | Component | Description |
 |-----------|-------------|
 | **ZerodhaAdapter** | NinjaTrader adapter interface - handles Subscribe/Unsubscribe calls |
+| **Connector** | Service orchestration and singleton access hub |
 | **L1Subscription** | Thread-safe multi-callback container - allows multiple consumers per symbol |
-| **OptimizedTickProcessor** | High-performance tick processing with sharded parallelism |
+| **OptimizedTickProcessor** | High-performance tick processing with sharded parallelism and tiered backpressure |
 | **SharedWebSocketService** | Single shared WebSocket connection for all market data |
 | **SubscriptionManager** | Manages option chain subscriptions and BarsRequests |
 | **MarketAnalyzerLogic** | Calculates projected opens and generates option chains |
 | **OptionChainWindow** | WPF UI for displaying real-time option chain data |
 | **SubscriptionTrackingService** | Reference counting and sticky subscriptions |
+| **InstrumentManager** | Handles symbol mapping, token lookup, and NT instrument creation |
 
 ### Data Flow
 

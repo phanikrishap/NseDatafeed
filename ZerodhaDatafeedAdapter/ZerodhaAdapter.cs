@@ -305,7 +305,7 @@ namespace ZerodhaDatafeedAdapter
                         name.StartsWith("COPPER", StringComparison.OrdinalIgnoreCase))
                     {
                         mt = MarketType.MCX;
-                        Logger.Info($"[SUBSCRIBE] Detected MCX commodity symbol: {name}, forcing MarketType=MCX");
+                        Logger.Debug($"[SUBSCRIBE] Detected MCX commodity symbol: {name}, forcing MarketType=MCX");
                     }
 
                     // Always add to local tracking if not present (for UI status etc)
@@ -314,7 +314,7 @@ namespace ZerodhaDatafeedAdapter
                         this._marketLiveDataSymbols.Add(nativeSymbolName);
                     }
 
-                    Logger.Info($"[SUBSCRIBE] Initiating WebSocket for {name} (originalSymbol={originalSymbol}, marketType={mt})");
+                    Logger.Debug($"[SUBSCRIBE] Initiating WebSocket for {name} (originalSymbol={originalSymbol}, marketType={mt})");
 
                     // CRITICAL: Capture variables for closure to avoid race conditions
                     string capturedName = name;
@@ -326,7 +326,7 @@ namespace ZerodhaDatafeedAdapter
                     var thread = new Thread(() => {
                         try
                         {
-                            Logger.Info($"[SUBSCRIBE] Thread STARTED for {capturedName}");
+                            Logger.Debug($"[SUBSCRIBE] Thread STARTED for {capturedName}");
                             // Run the async method synchronously on this dedicated thread
                             Connector.Instance.SubscribeToTicks(
                                 capturedNativeSymbol,
@@ -339,7 +339,7 @@ namespace ZerodhaDatafeedAdapter
                                         return !this._marketLiveDataSymbols.Contains(capturedNativeSymbol);
                                 }))
                             ).GetAwaiter().GetResult();
-                            Logger.Info($"[SUBSCRIBE] SubscribeToTicks completed for {capturedName}");
+                            Logger.Debug($"[SUBSCRIBE] SubscribeToTicks completed for {capturedName}");
                         }
                         catch (Exception ex)
                         {
@@ -360,7 +360,7 @@ namespace ZerodhaDatafeedAdapter
                     thread.IsBackground = true;
                     thread.Name = $"WS_{capturedName}";
                     thread.Start();
-                    Logger.Info($"[SUBSCRIBE] Thread launched for {capturedName}, ThreadId={thread.ManagedThreadId}");
+                    Logger.Debug($"[SUBSCRIBE] Thread launched for {capturedName}, ThreadId={thread.ManagedThreadId}");
                 }
             }
             catch (Exception ex)
@@ -794,10 +794,10 @@ namespace ZerodhaDatafeedAdapter
             try
             {
                 // Ensure leg is in subscriptions map so MarketDataService processes it
-                Logger.Info($"[SYNTH-LEG] SubscribeToSyntheticLeg called for {legSymbol}");
+                Logger.Debug($"[SYNTH-LEG] SubscribeToSyntheticLeg called for {legSymbol}");
                 if (!_l1Subscriptions.ContainsKey(legSymbol))
                 {
-                    Logger.Info($"[SYNTH-LEG] Adding local subscription entry for {legSymbol}");
+                    Logger.Debug($"[SYNTH-LEG] Adding local subscription entry for {legSymbol}");
                     var sub = new L1Subscription
                     {
                         IsIndex = false
@@ -812,7 +812,7 @@ namespace ZerodhaDatafeedAdapter
                 {
                     // CRITICAL FIX: Always call SubscribeToTicks regardless of local cache.
                     // This allows SubscriptionTrackingService to handle reference counting properly.
-                    
+
                     MarketType mt;
                     string originalSymbol = Connector.GetSymbolName(legSymbol, out mt);
 
@@ -825,7 +825,7 @@ namespace ZerodhaDatafeedAdapter
                         legSymbol.StartsWith("COPPER", StringComparison.OrdinalIgnoreCase))
                     {
                         mt = MarketType.MCX;
-                        Logger.Info($"[SYNTH-LEG] Detected MCX commodity symbol: {legSymbol}, forcing MarketType=MCX");
+                        Logger.Debug($"[SYNTH-LEG] Detected MCX commodity symbol: {legSymbol}, forcing MarketType=MCX");
                     }
 
                     // Always add to local tracking if not present
@@ -834,7 +834,7 @@ namespace ZerodhaDatafeedAdapter
                         this._marketLiveDataSymbols.Add(legSymbol);
                     }
 
-                    Logger.Info($"[SYNTH-LEG] Initiating live connection for {legSymbol} (originalSymbol={originalSymbol}, marketType={mt})");
+                    Logger.Debug($"[SYNTH-LEG] Initiating live connection for {legSymbol} (originalSymbol={originalSymbol}, marketType={mt})");
 
                     // CRITICAL: Capture variables for closure to avoid race conditions
                     string capturedLegSymbol = legSymbol;
@@ -845,7 +845,7 @@ namespace ZerodhaDatafeedAdapter
                     var thread = new Thread(() => {
                         try
                         {
-                            Logger.Info($"[SYNTH-LEG] Thread STARTED for {capturedLegSymbol}");
+                            Logger.Debug($"[SYNTH-LEG] Thread STARTED for {capturedLegSymbol}");
                             Connector.Instance.SubscribeToTicks(
                                 capturedLegSymbol,
                                 capturedMarketType,
@@ -857,7 +857,7 @@ namespace ZerodhaDatafeedAdapter
                                         return !this._marketLiveDataSymbols.Contains(capturedLegSymbol);
                                 }))
                             ).GetAwaiter().GetResult();
-                            Logger.Info($"[SYNTH-LEG] SubscribeToTicks completed for {capturedLegSymbol}");
+                            Logger.Debug($"[SYNTH-LEG] SubscribeToTicks completed for {capturedLegSymbol}");
                         }
                         catch (Exception ex)
                         {
@@ -872,7 +872,7 @@ namespace ZerodhaDatafeedAdapter
                     thread.IsBackground = true;
                     thread.Name = $"WS_LEG_{capturedLegSymbol}";
                     thread.Start();
-                    Logger.Info($"[SYNTH-LEG] Thread launched for {capturedLegSymbol}");
+                    Logger.Debug($"[SYNTH-LEG] Thread launched for {capturedLegSymbol}");
                 }
             }
             catch (Exception ex)

@@ -38,8 +38,18 @@ namespace ZerodhaDatafeedAdapter
                 string fileName = $"ZerodhaAdapter_{DateTime.Now:yyyy-MM-dd}.log";
                 _logFilePath = Path.Combine(_logFolderPath, fileName);
 
-                // Configure log4net programmatically
-                ConfigureLog4Net();
+                // Try to load log4net.config from user's ZerodhaAdapter folder first
+                string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "log4net.config");
+                if (File.Exists(configPath))
+                {
+                    var configFile = new FileInfo(configPath);
+                    XmlConfigurator.Configure(configFile);
+                }
+                else
+                {
+                    // Fall back to programmatic configuration
+                    ConfigureLog4Net();
+                }
 
                 // Get logger instance
                 _log = LogManager.GetLogger(typeof(Logger));
@@ -111,7 +121,7 @@ namespace ZerodhaDatafeedAdapter
                     {
                         // Load log4net configuration from file if exists
                         string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                        string configPath = Path.Combine(documentsPath, "NinjaTrader8", "ZerodhaAdapter", "log4net.config");
+                        string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "log4net.config");
 
                         if (File.Exists(configPath))
                         {

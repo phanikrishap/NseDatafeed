@@ -460,7 +460,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             ConcurrentDictionary<string, L1Subscription> l1Subscriptions,
             WebSocketConnectionFunc webSocketConnectionFunc)
         {
-            Logger.Info($"[TICK-SHARED] SubscribeToTicksShared: symbol={symbol}, nativeSymbol={nativeSymbolName}");
+            Logger.Debug($"[TICK-SHARED] SubscribeToTicksShared: symbol={symbol}, nativeSymbol={nativeSymbolName}");
 
             try
             {
@@ -472,7 +472,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
                 // Get instrument token
                 int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
-                Logger.Info($"[TICK-SHARED] Got token {tokenInt} for symbol='{symbol}'");
+                Logger.Debug($"[TICK-SHARED] Got token {tokenInt} for symbol='{symbol}'");
 
                 // Determine if this is an index
                 bool isIndex = false;
@@ -491,7 +491,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
                     if (subscribed)
                     {
-                        Logger.Info($"[TICK-SHARED] Successfully subscribed to {symbol} (token={tokenInt}, isIndex={isIndex})");
+                        Logger.Debug($"[TICK-SHARED] Successfully subscribed to {symbol} (token={tokenInt}, isIndex={isIndex})");
                     }
                     else
                     {
@@ -536,7 +536,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     // Wire up tick handler
                     _sharedWebSocketService.TickReceived += OnSharedWebSocketTickReceived;
 
-                    Logger.Info("[TICK-SHARED] SharedWebSocketService initialized and tick handler connected");
+                    Logger.Debug("[TICK-SHARED] SharedWebSocketService initialized and tick handler connected");
                 }
             }
 
@@ -546,7 +546,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
             if (connected)
             {
-                Logger.Info("[TICK-SHARED] SharedWebSocketService connected successfully");
+                Logger.Debug("[TICK-SHARED] SharedWebSocketService connected successfully");
             }
             else
             {
@@ -639,7 +639,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                             if (shouldUnsubscribe)
                             {
                                 // This was the last reference - actually unsubscribe from WebSocket
-                                Logger.Info($"[TICK-SHARED] Exit detected for {symbol}, last reference removed - unsubscribing from WebSocket");
+                                Logger.Debug($"[TICK-SHARED] Exit detected for {symbol}, last reference removed - unsubscribing from WebSocket");
                                 _sharedWebSocketService?.UnsubscribeAsync(symbol);
                             }
                             else

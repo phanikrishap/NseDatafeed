@@ -309,6 +309,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         // Mapping from straddle symbol to row for synthetic straddle price updates
         private Dictionary<string, OptionChainRow> _straddleSymbolToRowMap = new Dictionary<string, OptionChainRow>();
 
+        // Track instruments subscribed for DB persistence (to avoid duplicate subscriptions)
+        private HashSet<string> _persistenceSubscribedSymbols = new HashSet<string>();
+
         // NinjaTrader-style colors
         private static readonly SolidColorBrush _bgColor = new SolidColorBrush(Color.FromRgb(27, 27, 28));
         private static readonly SolidColorBrush _fgColor = new SolidColorBrush(Color.FromRgb(212, 212, 212));
@@ -910,6 +913,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                             row.CEStatus = "Pending";
                             _symbolToRowMap[ce.symbol] = (row, "CE");
                             Logger.Debug($"[OptionChainTabPage] Mapped CE: {ce.symbol} -> Strike {row.Strike}");
+
+                            // Subscribe to NinjaTrader for DB persistence (enables hourly tick flushing)
+                            SubscribeForPersistence(ce.symbol);
                         }
 
                         if (pe != null)
@@ -918,6 +924,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                             row.PEStatus = "Pending";
                             _symbolToRowMap[pe.symbol] = (row, "PE");
                             Logger.Debug($"[OptionChainTabPage] Mapped PE: {pe.symbol} -> Strike {row.Strike}");
+
+                            // Subscribe to NinjaTrader for DB persistence (enables hourly tick flushing)
+                            SubscribeForPersistence(pe.symbol);
                         }
 
                         // Create straddle symbol mapping (e.g., NIFTY25DEC24000_STRDL)
@@ -959,6 +968,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                     {
                         _symbolToRowMap[zerodhaSymbol] = mapping;
                         Logger.Debug($"[OptionChainTabPage] OnSymbolResolved: Added zerodha mapping {zerodhaSymbol} -> Strike {mapping.row.Strike} {mapping.optionType}");
+
+                        // Retry persistence subscription with resolved Zerodha symbol
+                        TrySubscribeResolvedSymbol(zerodhaSymbol);
                     }
                 }
                 catch (Exception ex)
@@ -1236,6 +1248,74 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             }
         }
 
+        #region DB Persistence Subscription
+
+        /// <summary>
+        /// Subscribe instrument to NinjaTrader's market data system for DB persistence.
+        /// This enables the same hourly tick flushing behavior as standard Market Analyzer/Charts.
+        /// When the adapter callback is invoked for these instruments, NinjaTrader automatically
+        /// queues ticks for database persistence during market hours.
+        /// </summary>
+        private void SubscribeForPersistence(string symbol)
+        {
+            try
+            {
+                // Skip if already subscribed
+                if (_persistenceSubscribedSymbols.Contains(symbol))
+                    return;
+
+                var ntInstrument = Instrument.GetInstrument(symbol);
+                if (ntInstrument == null)
+                {
+                    Logger.Debug($"[OptionChainTabPage] SubscribeForPersistence: Instrument not found for {symbol}, will retry on symbol resolution");
+                    return;
+                }
+
+                var adapter = Connector.Instance?.GetAdapter() as ZerodhaAdapter;
+                if (adapter == null)
+                {
+                    Logger.Warn("[OptionChainTabPage] SubscribeForPersistence: Adapter not available");
+                    return;
+                }
+
+                // Create a callback that enables NinjaTrader DB persistence.
+                // The callback invocation by OptimizedTickProcessor triggers NT's internal
+                // database flushing mechanism - the callback itself doesn't need to do anything.
+                Action<NinjaTrader.Data.MarketDataType, double, long, DateTime, long> persistenceCallback =
+                    (type, price, volume, time, arg5) =>
+                    {
+                        // NinjaTrader automatically persists ticks when this callback is invoked
+                        // by OptimizedTickProcessor with MarketDataType.Last
+                        // No additional action needed here - the invocation itself triggers persistence
+                    };
+
+                // Subscribe through the adapter - this adds the callback to _l1Subscriptions
+                // and ensures OptimizedTickProcessor invokes it for every tick
+                adapter.SubscribeMarketData(ntInstrument, persistenceCallback);
+
+                _persistenceSubscribedSymbols.Add(symbol);
+                Logger.Debug($"[OptionChainTabPage] SubscribeForPersistence: Subscribed {symbol} for DB persistence (total: {_persistenceSubscribedSymbols.Count})");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[OptionChainTabPage] SubscribeForPersistence error for {symbol}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Called when a symbol is resolved from generated name to Zerodha name.
+        /// Retry persistence subscription with the resolved symbol.
+        /// </summary>
+        private void TrySubscribeResolvedSymbol(string zerodhaSymbol)
+        {
+            if (!_persistenceSubscribedSymbols.Contains(zerodhaSymbol))
+            {
+                SubscribeForPersistence(zerodhaSymbol);
+            }
+        }
+
+        #endregion
+
         #region IInstrumentProvider Implementation
 
         /// <summary>
@@ -1365,6 +1445,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             if (adapter?.SyntheticStraddleService != null)
             {
                 adapter.SyntheticStraddleService.StraddlePriceCalculated -= OnStraddlePriceCalculated;
+            }
+
+            // Clear persistence subscriptions tracking
+            // Note: We don't unsubscribe from the adapter because subscriptions are "sticky"
+            // (they stay active until adapter disconnect) - this is by design to ensure
+            // continuous tick flow even when Option Chain window is closed/reopened
+            if (_persistenceSubscribedSymbols.Count > 0)
+            {
+                Logger.Info($"[OptionChainTabPage] Cleanup: Clearing {_persistenceSubscribedSymbols.Count} persistence subscription tracking entries");
+                _persistenceSubscribedSymbols.Clear();
             }
 
             base.Cleanup();
