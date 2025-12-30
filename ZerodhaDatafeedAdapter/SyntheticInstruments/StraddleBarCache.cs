@@ -107,7 +107,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
             if (string.IsNullOrEmpty(straddleSymbol) || bars == null || bars.Count == 0)
                 return;
 
-            Logger.Info($"[StraddleBarCache] StoreCEBars: {straddleSymbol} with {bars.Count} bars");
+            Logger.Debug($"[StraddleBarCache] StoreCEBars: {straddleSymbol} with {bars.Count} bars");
 
             var pendingDict = _pendingBars.GetOrAdd(straddleSymbol, _ => new ConcurrentDictionary<DateTime, (BarData, BarData)>());
 
@@ -140,7 +140,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
             if (string.IsNullOrEmpty(straddleSymbol) || bars == null || bars.Count == 0)
                 return;
 
-            Logger.Info($"[StraddleBarCache] StorePEBars: {straddleSymbol} with {bars.Count} bars");
+            Logger.Debug($"[StraddleBarCache] StorePEBars: {straddleSymbol} with {bars.Count} bars");
 
             var pendingDict = _pendingBars.GetOrAdd(straddleSymbol, _ => new ConcurrentDictionary<DateTime, (BarData, BarData)>());
 
@@ -256,7 +256,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
             // Save to SQLite
             SaveBarsToDatabase(straddleSymbol, completeBars);
 
-            Logger.Info($"[StraddleBarCache] Combined {completeBars.Count} bars for {straddleSymbol} (forward-fill from {firstCompleteTimestamp.Value:HH:mm})");
+            Logger.Debug($"[StraddleBarCache] Combined {completeBars.Count} bars for {straddleSymbol} (forward-fill from {firstCompleteTimestamp.Value:HH:mm})");
         }
 
         /// <summary>
@@ -362,7 +362,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
                     }
                 }
 
-                Logger.Info($"[StraddleBarCache] Retrieved {records.Count} cached bars for {straddleSymbol}");
+                Logger.Debug($"[StraddleBarCache] Retrieved {records.Count} cached bars for {straddleSymbol}");
             }
             catch (Exception ex)
             {

@@ -67,18 +67,18 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
             DateTime toDate,
             ViewModelBase viewModelBase)
         {
-            Logger.Info($"[SyntheticHistorical] Fetching data for {syntheticSymbol} (CE={ceSymbol}, PE={peSymbol})");
-            Logger.Info($"[SyntheticHistorical] Period: {barsPeriodType}, From: {fromDate}, To: {toDate}");
+            Logger.Debug($"[SyntheticHistorical] Fetching data for {syntheticSymbol} (CE={ceSymbol}, PE={peSymbol})");
+            Logger.Debug($"[SyntheticHistorical] Period: {barsPeriodType}, From: {fromDate}, To: {toDate}");
 
             // First, try to get cached data from SQLite (populated by OptionChain window)
             var cachedRecords = StraddleBarCache.Instance.GetCachedBars(syntheticSymbol, fromDate, toDate);
             if (cachedRecords != null && cachedRecords.Count > 0)
             {
-                Logger.Info($"[SyntheticHistorical] Found {cachedRecords.Count} cached bars for {syntheticSymbol}");
+                Logger.Debug($"[SyntheticHistorical] Found {cachedRecords.Count} cached bars for {syntheticSymbol}");
                 return cachedRecords;
             }
 
-            Logger.Info($"[SyntheticHistorical] No cached data, fetching from API...");
+            Logger.Debug($"[SyntheticHistorical] No cached data, fetching from API...");
 
             List<Record> combinedRecords = new List<Record>();
 
@@ -96,7 +96,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
                 var ceRecords = ceTask.Result;
                 var peRecords = peTask.Result;
 
-                Logger.Info($"[SyntheticHistorical] Fetched {ceRecords?.Count ?? 0} CE bars, {peRecords?.Count ?? 0} PE bars");
+                Logger.Debug($"[SyntheticHistorical] Fetched {ceRecords?.Count ?? 0} CE bars, {peRecords?.Count ?? 0} PE bars");
 
                 if (ceRecords == null || peRecords == null || ceRecords.Count == 0 || peRecords.Count == 0)
                 {
@@ -189,7 +189,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
                     }
                 }
 
-                Logger.Info($"[SyntheticHistorical] Combined {combinedRecords.Count} bars ({forwardFilledCount} forward-filled) from {firstCompleteTimestamp.Value:HH:mm}");
+                Logger.Debug($"[SyntheticHistorical] Combined {combinedRecords.Count} bars ({forwardFilledCount} forward-filled) from {firstCompleteTimestamp.Value:HH:mm}");
 
                 // Sort by timestamp
                 combinedRecords = combinedRecords.OrderBy(r => r.TimeStamp).ToList();

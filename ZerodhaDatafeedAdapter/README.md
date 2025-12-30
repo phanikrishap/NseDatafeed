@@ -20,6 +20,12 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 - **Projected Open Calculations**: Uses GIFT NIFTY to project market opens
 - **0DTE/1DTE Selection**: Automatic selection of optimal expiry based on DTE
 
+### TBS Manager (Time-Based Straddle)
+- **Excel-Based Configuration**: Read straddle configs from `tbsConfig.xlsx`
+- **Multi-Tranche Support**: Multiple entry/exit times per day
+- **Execution Dashboard**: Real-time monitoring of straddle positions
+- **Simulated P&L Tracking**: Track theoretical P&L without live execution
+
 ### Performance Optimizations
 - **OptimizedTickProcessor**: Lock-free concurrent tick processing with sharded parallelism
 - **SharedWebSocketService**: Single WebSocket connection shared across all subscriptions
@@ -78,8 +84,10 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 | **OptimizedTickProcessor** | High-performance tick processing with sharded parallelism and tiered backpressure |
 | **SharedWebSocketService** | Single shared WebSocket connection for all market data |
 | **SubscriptionManager** | Manages option chain subscriptions and BarsRequests |
-| **MarketAnalyzerLogic** | Calculates projected opens and generates option chains |
+| **MarketAnalyzerLogic** | Calculates projected opens, generates option chains, hosts PriceHub and ATM tracking |
 | **OptionChainWindow** | WPF UI for displaying real-time option chain data |
+| **TBSManagerWindow** | TBS Manager addon for time-based straddle execution simulation |
+| **TBSConfigurationService** | Reads straddle configurations from Excel file |
 | **SubscriptionTrackingService** | Reference counting and sticky subscriptions |
 | **InstrumentManager** | Handles symbol mapping, token lookup, and NT instrument creation |
 
@@ -104,6 +112,60 @@ Symbol: SENSEX25DEC85500CE
 ```
 
 This is achieved through `L1Subscription.AddCallback()` which uses unique callback IDs rather than replacing callbacks.
+
+### Price Distribution Hub (PriceHub)
+
+The adapter implements a centralized price distribution hub to avoid duplicate WebSocket subscriptions across multiple UI panes:
+
+```
+┌─────────────────┐         ┌─────────────────┐
+│  WebSocket      │────────>│ SubscriptionMgr │
+│  (Zerodha)      │         │ OptionPriceUpd  │
+└─────────────────┘         └────────┬────────┘
+                                     │
+                                     v
+                            ┌────────────────────┐
+                            │   Option Chain     │
+                            │ (populates prices) │
+                            └────────┬───────────┘
+                                     │ UpdateOptionPrice()
+                                     v
+                            ┌────────────────────┐
+                            │     PriceHub       │  <-- Single source of truth
+                            │ (MarketAnalyzerLog)│
+                            │                    │
+                            │ - GetPrice(symbol) │
+                            │ - GetATMStrike()   │
+                            │ - PriceUpdated evt │
+                            └────────┬───────────┘
+                                     │ PriceUpdated event
+                    ┌────────────────┼────────────────┐
+                    v                v                v
+            ┌───────────┐    ┌───────────┐    ┌───────────┐
+            │TBS Manager│    │Future Pane│    │Future Pane│
+            │(consumer) │    │(consumer) │    │(consumer) │
+            └───────────┘    └───────────┘    └───────────┘
+```
+
+**Key Features:**
+- **Single WebSocket Subscription**: Option Chain subscribes once, all consumers share the data
+- **Centralized ATM Tracking**: `MarketAnalyzerLogic.GetATMStrike()` provides ATM to all consumers
+- **Event-Driven Updates**: `PriceUpdated` event fires only when prices actually change
+- **Thread-Safe Access**: All price operations are lock-protected
+
+**Usage:**
+```csharp
+// Get current price (populated by Option Chain)
+decimal price = MarketAnalyzerLogic.Instance.GetPrice("NIFTY25DEC25000CE");
+
+// Get ATM strike (calculated by Option Chain from straddle prices)
+decimal atm = MarketAnalyzerLogic.Instance.GetATMStrike("NIFTY");
+
+// Subscribe to price updates
+MarketAnalyzerLogic.Instance.PriceUpdated += (symbol, price) => {
+    // Handle price update
+};
+```
 
 ## Requirements
 
@@ -172,6 +234,57 @@ Access via: NinjaTrader → New → Zerodha Market Analyzer
 |--------|----------|-----------|----------|-----------|----------|
 | 85500 | 49.40 | Done | 145.15 | Done | 95.75 |
 
+## TBS Manager AddOn
+
+Access via: NinjaTrader → New → TBS Manager
+
+### Overview
+Time-Based Straddle (TBS) Manager provides a simulation dashboard for monitoring short straddle strategies with multiple entry tranches throughout the trading day.
+
+### Configuration
+Create an Excel file at: `Documents\NinjaTrader 8\ZerodhaAdapter\tbsConfig.xlsx`
+
+| Column | Description | Example |
+|--------|-------------|---------|
+| Underlying | Index symbol | NIFTY, BANKNIFTY, SENSEX |
+| DTE | Days to expiry filter | 0, 1, 2 |
+| EntryTime | Time to enter straddle | 09:20:00 |
+| ExitTime | Time to exit straddle | 15:15:00 |
+| IndividualSL | Per-leg stop-loss % | 50% |
+| CombinedSL | Combined stop-loss % | 25% |
+| HedgeAction | Action on SL hit | exit_both, hedge_to_cost |
+| Quantity | Lot size | 1 |
+| Active | Enable/disable row | TRUE, FALSE |
+
+### Features
+
+**Configuration Tab:**
+- View all configurations from Excel file
+- Filter by Underlying and DTE
+- Refresh button to reload configurations
+
+**Execution Tab:**
+- Real-time monitoring of straddle tranches
+- Status tracking: Idle → Monitoring → Live → SquaredOff
+- Per-leg and combined P&L tracking
+- Auto-derives underlying/DTE from Option Chain
+
+### Status States
+
+| Status | Description |
+|--------|-------------|
+| **Idle** | Entry time > 5 minutes away |
+| **Monitoring** | Within 5 minutes of entry, ATM strike tracked |
+| **Live** | Position entered (simulated), strike locked |
+| **SquaredOff** | Position exited at exit time |
+| **Skipped** | Entry time passed while not monitoring |
+
+### Integration with Option Chain
+- Waits 45 seconds after Option Chain loads before initializing
+- Gets ATM strike from Option Chain via `MarketAnalyzerLogic.GetATMStrike()`
+- Gets real-time prices from PriceHub (no duplicate subscriptions)
+- Auto-filters configs based on Option Chain's underlying and DTE
+
 ## Synthetic Straddle Instruments
 
 Create straddle instruments that combine CE + PE into a single tradeable symbol:
@@ -207,6 +320,8 @@ Enable DEBUG level to see:
 - `[SubscriptionManager] LiveData CALLBACK FIRING` - Callback invocations
 - `[OptionChainTabPage] OnOptionPriceUpdated RECEIVED` - UI updates
 - `[L1Subscription] AddCallback` - Callback registrations
+- `[MarketAnalyzerLogic] ATM strike updated` - ATM changes from Option Chain
+- `[TBSManagerTabPage] Locked strike` - TBS Manager strike locks
 
 ## Version History
 

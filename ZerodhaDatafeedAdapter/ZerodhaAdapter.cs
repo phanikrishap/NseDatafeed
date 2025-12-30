@@ -231,7 +231,7 @@ namespace ZerodhaDatafeedAdapter
                     var def = _syntheticStraddleService.GetDefinition(name);
                     if (def != null)
                     {
-                         Logger.Info($"ZerodhaAdapter: Subscribing to synthetic straddle {name} (Legs: {def.CESymbol}, {def.PESymbol})");
+                         Logger.Debug($"ZerodhaAdapter: Subscribing to synthetic straddle {name} (Legs: {def.CESymbol}, {def.PESymbol})");
                          Logger.Debug($"ZerodhaAdapter: About to call SubscribeToSyntheticLeg for CE: {def.CESymbol}");
                          SubscribeToSyntheticLeg(def.CESymbol);
                          Logger.Debug($"ZerodhaAdapter: About to call SubscribeToSyntheticLeg for PE: {def.PESymbol}");
@@ -506,7 +506,7 @@ namespace ZerodhaDatafeedAdapter
             {
                 
                 // Log to file only (not NinjaTrader control panel)
-                Logger.Info($"Starting bars request for {barsRequest?.Bars?.Instrument?.MasterInstrument?.Name}");
+                Logger.Debug($"Starting bars request for {barsRequest?.Bars?.Instrument?.MasterInstrument?.Name}");
 
                 if (barsRequest.Progress != null)
                 {
@@ -557,7 +557,7 @@ namespace ZerodhaDatafeedAdapter
                         var straddleDef = _syntheticStraddleService?.GetDefinition(name);
                         if (straddleDef != null)
                         {
-                            Logger.Info($"[SYNTH-HIST] Processing synthetic straddle: {name} (CE={straddleDef.CESymbol}, PE={straddleDef.PESymbol})");
+                            Logger.Debug($"[SYNTH-HIST] Processing synthetic straddle: {name} (CE={straddleDef.CESymbol}, PE={straddleDef.PESymbol})");
 
                             if (barsRequest.Bars.BarsPeriod.BarsPeriodType == BarsPeriodType.Tick)
                             {
@@ -606,7 +606,7 @@ namespace ZerodhaDatafeedAdapter
                         try
                         {
                             source = task.Result;
-                            Logger.Info($"Retrieved {source?.Count ?? 0} historical data points");
+                            Logger.Debug($"Retrieved {source?.Count ?? 0} historical data points");
                         }
                         catch (AggregateException ae)
                         {

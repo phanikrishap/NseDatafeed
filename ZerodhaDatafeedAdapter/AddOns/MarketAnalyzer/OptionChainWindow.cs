@@ -1122,6 +1122,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
 
             DateTime now = DateTime.Now;
 
+            // PRICE HUB: Update centralized price hub for TBS Manager and other consumers
+            // This allows other components to access prices without duplicate WebSocket subscriptions
+            MarketAnalyzerLogic.Instance.UpdateOptionPrice(symbol, (decimal)price, now);
+
             // Market hours filtering for NSE/BSE instruments (9:15 AM - 3:30 PM)
             // Skip updates outside market hours EXCEPT for GIFT NIFTY and MCX which have extended hours
             bool isExtendedHours = symbol.Contains("GIFT") || symbol.Contains("MCX");
@@ -1245,6 +1249,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 atmRow.IsATM = true;
                 _lblATMStrike.Text = $"{atmRow.Strike:F0} ({minStraddle:F2})";
                 Logger.Debug($"[OptionChainTabPage] UpdateATMStrike: ATM={atmRow.Strike}, Straddle={minStraddle:F2}, MaxPrice={_maxOptionPrice:F2}");
+
+                // Publish ATM strike to MarketAnalyzerLogic for TBS Manager and other consumers
+                MarketAnalyzerLogic.Instance.SetATMStrike(_underlying, (decimal)atmRow.Strike);
             }
         }
 

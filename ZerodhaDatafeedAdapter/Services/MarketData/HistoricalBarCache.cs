@@ -201,7 +201,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
                 if (records.Count > 0)
                 {
-                    Logger.Info($"[HistoricalBarCache] Retrieved {records.Count} cached bars for {symbol} ({interval})");
+                    Logger.Debug($"[HistoricalBarCache] Retrieved {records.Count} cached bars for {symbol} ({interval})");
                 }
             }
             catch (Exception ex)

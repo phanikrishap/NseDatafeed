@@ -63,11 +63,31 @@ Desktop.ini
 mapped_instruments.json
 InstrumentMasters.db
 ZerodhaAdapter.log
-ZerodhaDatafeedAdapter.dll
-ZerodhaAPI.dll
 *.log
 *.sqlite
 *.db
+
+# Build output DLLs (anywhere in project)
+*.dll
+*.pdb
+*.exe
+
+# lib folder DLLs are also ignored - they can be restored from NuGet or copied from NinjaTrader
+# If you need to track them, use: !**/lib/*.dll
+
+# JSON data files that are generated
+fo_instruments.json
+fo_mappings.json
+index_mappings.json
+straddles_config.json
+
+# Database files
+*.db
+historical_bars.db
+straddle_bars.db
+
+# Excel temp files
+~$*.xlsx
 
 # Sensitive files
 config.json

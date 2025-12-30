@@ -154,6 +154,166 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public event Action<List<MappedInstrument>> OptionsGenerated;
         public event Action<TickerData> TickerUpdated;
         public event Action<string, string> HistoricalDataStatusChanged; // symbol, status
+        public event Action<string, decimal> ATMStrikeUpdated; // underlying, atmStrike
+
+        // Current ATM strike per underlying (set by Option Chain, consumed by TBS Manager)
+        private readonly Dictionary<string, decimal> _currentATMStrikes = new Dictionary<string, decimal>();
+        private readonly object _atmLock = new object();
+
+        // ============================================================================
+        // PRICE HUB: Centralized price cache to avoid duplicate WebSocket subscriptions
+        // Option Chain populates this, TBS Manager and other consumers read from it
+        // ============================================================================
+        private readonly Dictionary<string, decimal> _priceHub = new Dictionary<string, decimal>();
+        private readonly Dictionary<string, DateTime> _priceTimestamps = new Dictionary<string, DateTime>();
+        private readonly object _priceHubLock = new object();
+
+        /// <summary>
+        /// Event fired when a price is updated in the hub (for consumers who want real-time updates)
+        /// </summary>
+        public event Action<string, decimal> PriceUpdated;
+
+        /// <summary>
+        /// Get current price for a symbol from the centralized price hub.
+        /// Returns 0 if symbol not found or price not available.
+        /// </summary>
+        public decimal GetPrice(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol)) return 0;
+            lock (_priceHubLock)
+            {
+                if (_priceHub.TryGetValue(symbol, out decimal price))
+                    return price;
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Get current price with timestamp for a symbol.
+        /// </summary>
+        public (decimal price, DateTime timestamp) GetPriceWithTimestamp(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol)) return (0, DateTime.MinValue);
+            lock (_priceHubLock)
+            {
+                if (_priceHub.TryGetValue(symbol, out decimal price))
+                {
+                    var timestamp = _priceTimestamps.TryGetValue(symbol, out DateTime ts) ? ts : DateTime.MinValue;
+                    return (price, timestamp);
+                }
+            }
+            return (0, DateTime.MinValue);
+        }
+
+        /// <summary>
+        /// Update option price in the centralized hub (called by Option Chain or any WebSocket consumer).
+        /// Only fires event if price actually changed.
+        /// </summary>
+        public void UpdateOptionPrice(string symbol, decimal price, DateTime? timestamp = null)
+        {
+            if (string.IsNullOrEmpty(symbol) || price <= 0) return;
+
+            bool priceChanged = false;
+            lock (_priceHubLock)
+            {
+                if (!_priceHub.TryGetValue(symbol, out decimal existingPrice) || existingPrice != price)
+                {
+                    _priceHub[symbol] = price;
+                    _priceTimestamps[symbol] = timestamp ?? DateTime.Now;
+                    priceChanged = true;
+                }
+            }
+
+            // Fire event outside lock to avoid deadlocks
+            if (priceChanged)
+            {
+                PriceUpdated?.Invoke(symbol, price);
+            }
+        }
+
+        /// <summary>
+        /// Bulk update prices (more efficient for batch updates from Option Chain)
+        /// </summary>
+        public void UpdatePrices(IEnumerable<(string symbol, decimal price)> updates)
+        {
+            var changedPrices = new List<(string symbol, decimal price)>();
+
+            lock (_priceHubLock)
+            {
+                var now = DateTime.Now;
+                foreach (var (symbol, price) in updates)
+                {
+                    if (string.IsNullOrEmpty(symbol) || price <= 0) continue;
+
+                    if (!_priceHub.TryGetValue(symbol, out decimal existingPrice) || existingPrice != price)
+                    {
+                        _priceHub[symbol] = price;
+                        _priceTimestamps[symbol] = now;
+                        changedPrices.Add((symbol, price));
+                    }
+                }
+            }
+
+            // Fire events outside lock
+            foreach (var (symbol, price) in changedPrices)
+            {
+                PriceUpdated?.Invoke(symbol, price);
+            }
+        }
+
+        /// <summary>
+        /// Get all cached prices (for debugging/diagnostics)
+        /// </summary>
+        public Dictionary<string, decimal> GetAllPrices()
+        {
+            lock (_priceHubLock)
+            {
+                return new Dictionary<string, decimal>(_priceHub);
+            }
+        }
+
+        /// <summary>
+        /// Get count of cached prices
+        /// </summary>
+        public int PriceCount
+        {
+            get
+            {
+                lock (_priceHubLock)
+                {
+                    return _priceHub.Count;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Get the current ATM strike for an underlying (as calculated by Option Chain)
+        /// </summary>
+        public decimal GetATMStrike(string underlying)
+        {
+            if (string.IsNullOrEmpty(underlying)) return 0;
+            lock (_atmLock)
+            {
+                if (_currentATMStrikes.TryGetValue(underlying.ToUpperInvariant(), out decimal strike))
+                    return strike;
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Set the current ATM strike for an underlying (called by Option Chain)
+        /// </summary>
+        public void SetATMStrike(string underlying, decimal strike)
+        {
+            if (string.IsNullOrEmpty(underlying) || strike <= 0) return;
+            var key = underlying.ToUpperInvariant();
+            lock (_atmLock)
+            {
+                _currentATMStrikes[key] = strike;
+            }
+            Logger.Debug($"[MarketAnalyzerLogic] ATM strike updated: {key} = {strike}");
+            ATMStrikeUpdated?.Invoke(key, strike);
+        }
 
         // Track if we've already generated options to avoid duplicates
         private bool _optionsAlreadyGenerated = false;

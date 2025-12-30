@@ -16,16 +16,18 @@ using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer;
+using ZerodhaDatafeedAdapter.AddOns.TBSManager;
 
 namespace NinjaTrader.NinjaScript.AddOns
 {
     /// <summary>
-    /// NinjaTrader AddOn that integrates the GIFT NIFTY Market Analyzer into the Control Center menu
-    /// and auto-launches the window on startup.
+    /// NinjaTrader AddOn that integrates Index Watch, Option Chain, and TBS Manager into the Control Center menu
+    /// and auto-launches windows on startup.
     /// </summary>
     public class MarketAnalyzerAddOn : AddOnBase
     {
         private NTMenuItem _menuItem;
+        private NTMenuItem _tbsMenuItem;
         private NTMenuItem _existingNewMenu;
         private static bool _autoOpened = false;
 
@@ -33,7 +35,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             if (State == State.SetDefaults)
             {
-                Description = "GIFT NIFTY Market Analyzer AddOn";
+                Description = "Zerodha Adapter AddOns";
                 Name = "MarketAnalyzerAddOn";
                 Logger.Info("[MarketAnalyzerAddOn] OnStateChange(): SetDefaults - AddOn initialized");
             }
@@ -60,23 +62,29 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (!_autoOpened)
             {
                 _autoOpened = true;
-                Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): Auto-launching MarketAnalyzerWindow...");
+                Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): Auto-launching windows...");
 
                 Core.Globals.RandomDispatcher.BeginInvoke(new Action(() =>
                 {
                     try
                     {
-                        // Open Market Analyzer window
-                        Logger.Debug("[MarketAnalyzerAddOn] OnWindowCreated(): Creating MarketAnalyzerWindow instance");
+                        // Open Index Watch window (formerly GIFT NIFTY Market Analyzer)
+                        Logger.Debug("[MarketAnalyzerAddOn] OnWindowCreated(): Creating IndexWatch (MarketAnalyzerWindow) instance");
                         var win = new MarketAnalyzerWindow();
                         win.Show();
-                        Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): MarketAnalyzerWindow shown successfully");
+                        Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): IndexWatch shown successfully");
 
-                        // Also open Option Chain window automatically
+                        // Open Option Chain window
                         Logger.Debug("[MarketAnalyzerAddOn] OnWindowCreated(): Creating OptionChainWindow instance");
                         var chainWin = new OptionChainWindow();
                         chainWin.Show();
                         Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): OptionChainWindow shown successfully");
+
+                        // Open TBS Manager window
+                        Logger.Debug("[MarketAnalyzerAddOn] OnWindowCreated(): Creating TBSManagerWindow instance");
+                        var tbsWin = new TBSManagerWindow();
+                        tbsWin.Show();
+                        Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): TBSManagerWindow shown successfully");
                     }
                     catch (Exception ex)
                     {
@@ -97,27 +105,48 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             _menuItem = new NTMenuItem
             {
-                Header = "GIFT NIFTY Market Analyzer",
+                Header = "Index Watch",
                 Style = Application.Current.TryFindResource("MainMenuItem") as Style
             };
 
             _menuItem.Click += OnMenuItemClick;
             _existingNewMenu.Items.Add(_menuItem);
-            Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): Menu item added successfully");
+
+            // Add TBS Manager menu item
+            _tbsMenuItem = new NTMenuItem
+            {
+                Header = "TBS Manager",
+                Style = Application.Current.TryFindResource("MainMenuItem") as Style
+            };
+
+            _tbsMenuItem.Click += OnTBSMenuItemClick;
+            _existingNewMenu.Items.Add(_tbsMenuItem);
+
+            Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): Menu items added successfully");
         }
 
         protected override void OnWindowDestroyed(Window window)
         {
-            if (_menuItem != null && window is ControlCenter)
+            if (window is ControlCenter)
             {
-                Logger.Info("[MarketAnalyzerAddOn] OnWindowDestroyed(): ControlCenter closing, cleaning up menu item");
+                Logger.Info("[MarketAnalyzerAddOn] OnWindowDestroyed(): ControlCenter closing, cleaning up menu items");
 
-                if (_existingNewMenu != null && _existingNewMenu.Items.Contains(_menuItem))
+                if (_existingNewMenu != null)
                 {
-                    _existingNewMenu.Items.Remove(_menuItem);
+                    if (_menuItem != null && _existingNewMenu.Items.Contains(_menuItem))
+                    {
+                        _existingNewMenu.Items.Remove(_menuItem);
+                        _menuItem.Click -= OnMenuItemClick;
+                        _menuItem = null;
+                    }
+
+                    if (_tbsMenuItem != null && _existingNewMenu.Items.Contains(_tbsMenuItem))
+                    {
+                        _existingNewMenu.Items.Remove(_tbsMenuItem);
+                        _tbsMenuItem.Click -= OnTBSMenuItemClick;
+                        _tbsMenuItem = null;
+                    }
                 }
-                _menuItem.Click -= OnMenuItemClick;
-                _menuItem = null;
 
                 Logger.Info("[MarketAnalyzerAddOn] OnWindowDestroyed(): Menu item cleanup complete");
             }
@@ -138,6 +167,25 @@ namespace NinjaTrader.NinjaScript.AddOns
                 catch (Exception ex)
                 {
                     Logger.Error($"[MarketAnalyzerAddOn] OnMenuItemClick(): Failed to create window - {ex.Message}", ex);
+                }
+            }));
+        }
+
+        private void OnTBSMenuItemClick(object sender, RoutedEventArgs e)
+        {
+            Logger.Info("[MarketAnalyzerAddOn] OnTBSMenuItemClick(): User clicked TBS Manager menu item");
+
+            Core.Globals.RandomDispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    var win = new TBSManagerWindow();
+                    win.Show();
+                    Logger.Info("[MarketAnalyzerAddOn] OnTBSMenuItemClick(): New TBSManagerWindow opened");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerAddOn] OnTBSMenuItemClick(): Failed to create window - {ex.Message}", ex);
                 }
             }));
         }
@@ -164,7 +212,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
     }
 
     /// <summary>
-    /// Dashboard window for the GIFT NIFTY Market Analyzer.
+    /// Dashboard window for Index Watch (formerly GIFT NIFTY Market Analyzer).
     /// Displays real-time prices in a NinjaTrader-style ListView with resizable columns.
     /// </summary>
     public class MarketAnalyzerWindow : NTWindow, IWorkspacePersistence
@@ -190,7 +238,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         {
             Logger.Info("[MarketAnalyzerWindow] Constructor: Creating window");
 
-            Caption = "GIFT NIFTY Market Analyzer";
+            Caption = "Index Watch";
             Width = 650;
             Height = 400;
 

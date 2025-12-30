@@ -35,6 +35,12 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="ExcelDataReader">
+      <HintPath>lib\ExcelDataReader.dll</HintPath>
+    </Reference>
+    <Reference Include="ExcelDataReader.DataSet">
+      <HintPath>lib\ExcelDataReader.DataSet.dll</HintPath>
+    </Reference>
     <Reference Include="log4net, Version=2.0.9.0, Culture=neutral, PublicKeyToken=669e0ddf0bb1aa2a, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
       <HintPath>lib\log4net.dll</HintPath>
@@ -232,6 +238,10 @@
     <Compile Include="Services\Analysis\VWAPCalculatorService.cs" />
     <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerWindow.cs" />
     <Compile Include="AddOns\MarketAnalyzer\OptionChainWindow.cs" />
+    <Compile Include="AddOns\TBSManager\TBSManagerWindow.cs" />
+    <Compile Include="Models\TBSConfigEntry.cs" />
+    <Compile Include="Models\TBSExecutionState.cs" />
+    <Compile Include="Services\TBSConfigurationService.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
     <Compile Include="Services\WebSocket\SharedWebSocketService.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />
@@ -265,6 +275,8 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="lib\log4net.dll" />
+    <Content Include="lib\ExcelDataReader.dll" />
+    <Content Include="lib\ExcelDataReader.DataSet.dll" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

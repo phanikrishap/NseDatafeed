@@ -36,7 +36,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 return;
             }
 
-            Logger.Info($"[VWAPCalculatorService] Starting VWAP calculation for {symbol}");
+            Logger.Debug($"[VWAPCalculatorService] Starting VWAP calculation for {symbol}");
 
             try
             {
@@ -66,7 +66,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             if (errorCode == ErrorCode.NoError)
                             {
                                 int barCount = request.Bars?.Count ?? 0;
-                                Logger.Info($"[VWAPCalculatorService] BarsRequest completed for {symbolForClosure}: {barCount} bars loaded");
+                                Logger.Debug($"[VWAPCalculatorService] BarsRequest completed for {symbolForClosure}: {barCount} bars loaded");
 
                                 // Calculate initial VWAP from historical bars
                                 if (request.Bars != null && barCount > 0)

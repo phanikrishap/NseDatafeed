@@ -795,18 +795,18 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             int barCount = request.Bars?.Count ?? 0;
                             if (errorCode == ErrorCode.NoError)
                             {
-                                Logger.Info($"[SubscriptionManager] BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
+                                Logger.Debug($"[SubscriptionManager] BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
 
                                 // LOG SUBSCRIPTION STATE
                                 var refDetails = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
-                                Logger.Info($"[SubscriptionManager] PRE-DONE STATUS: {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
+                                Logger.Debug($"[SubscriptionManager] PRE-DONE STATUS: {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
 
                                 // Update UI status to "Done" now that data is in NinjaTrader database
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
 
                                 // LOG SUBSCRIPTION STATE AGAIN
                                 var refDetailsAfter = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
-                                Logger.Info($"[SubscriptionManager] POST-DONE STATUS: {symbolForClosure} - RefCount={refDetailsAfter.Count}, Sticky={refDetailsAfter.IsSticky}, Consumers={string.Join(",", refDetailsAfter.Consumers)}");
+                                Logger.Debug($"[SubscriptionManager] POST-DONE STATUS: {symbolForClosure} - RefCount={refDetailsAfter.Count}, Sticky={refDetailsAfter.IsSticky}, Consumers={string.Join(",", refDetailsAfter.Consumers)}");
 
                                 // Start VWAP calculation for this instrument using hidden BarsRequest
                                 _ = VWAPCalculatorService.Instance.StartVWAPCalculation(symbolForClosure, instrumentForClosure);
@@ -821,7 +821,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             // When BarsRequest is active with Update handler, NinjaTrader writes incoming ticks to its database.
                             // Disposing it stops real-time tick storage (only historical bars would be saved).
                             // We keep the BarsRequest in _activeBarsRequests to maintain the live subscription.
-                            Logger.Info($"[SubscriptionManager] BarsRequest for {symbolForClosure} completed - keeping alive for real-time tick storage");
+                            Logger.Debug($"[SubscriptionManager] BarsRequest for {symbolForClosure} completed - keeping alive for real-time tick storage");
                         });
 
                         Logger.Debug($"[SubscriptionManager] BarsRequest sent for {ntSymbol}");
@@ -893,18 +893,18 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             int barCount = request.Bars?.Count ?? 0;
                             if (errorCode == ErrorCode.NoError)
                             {
-                                Logger.Info($"[SubscriptionManager] STRDL BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
+                                Logger.Debug($"[SubscriptionManager] STRDL BarsRequest completed for {symbolForClosure}: {barCount} bars inserted to NT DB");
 
                                 // LOG SUBSCRIPTION STATE
                                 var refDetails = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
-                                Logger.Info($"[SubscriptionManager] PRE-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
+                                Logger.Debug($"[SubscriptionManager] PRE-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
 
                                 // Update UI status to "Done" now that data is in NinjaTrader database
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
 
                                 // LOG SUBSCRIPTION STATE AGAIN
                                 var refDetailsAfter = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
-                                Logger.Info($"[SubscriptionManager] POST-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetailsAfter.Count}, Sticky={refDetailsAfter.IsSticky}, Consumers={string.Join(",", refDetailsAfter.Consumers)}");
+                                Logger.Debug($"[SubscriptionManager] POST-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetailsAfter.Count}, Sticky={refDetailsAfter.IsSticky}, Consumers={string.Join(",", refDetailsAfter.Consumers)}");
 
                                 // Start VWAP calculation for this STRDL instrument using hidden BarsRequest
                                 _ = VWAPCalculatorService.Instance.StartVWAPCalculation(symbolForClosure, instrumentForClosure);
@@ -919,7 +919,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             // When BarsRequest is active with Update handler, NinjaTrader writes incoming ticks to its database.
                             // Disposing it stops real-time tick storage (only historical bars would be saved).
                             // We keep the BarsRequest in _activeBarsRequests to maintain the live subscription.
-                            Logger.Info($"[SubscriptionManager] STRDL BarsRequest for {symbolForClosure} completed - keeping alive for real-time tick storage");
+                            Logger.Debug($"[SubscriptionManager] STRDL BarsRequest for {symbolForClosure} completed - keeping alive for real-time tick storage");
                         });
 
                         Logger.Debug($"[SubscriptionManager] STRDL BarsRequest sent for {straddleSymbol}");

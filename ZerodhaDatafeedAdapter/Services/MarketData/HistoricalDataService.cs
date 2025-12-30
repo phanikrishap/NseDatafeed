@@ -77,7 +77,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             ViewModelBase viewModelBase)
         {
             // Log request parameters (to file only, not NinjaTrader control panel)
-            Logger.Info($"Getting historical data for {symbol}, period: {barsPeriodType}, market type: {marketType}, dates: {fromDate} to {toDate}");
+            Logger.Debug($"Getting historical data for {symbol}, period: {barsPeriodType}, market type: {marketType}, dates: {fromDate} to {toDate}");
 
             // Determine interval string based on BarsPeriodType
             string interval = barsPeriodType == BarsPeriodType.Minute ? "minute" : "day";
@@ -101,11 +101,11 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     var cachedRecords = _barCache.GetCachedBars(symbol, interval, effectiveFromDate, toDate);
                     if (cachedRecords != null && cachedRecords.Count > 0)
                     {
-                        Logger.Info($"[HistoricalDataService] CACHE HIT: {symbol} - {cachedRecords.Count} bars from cache");
+                        Logger.Debug($"[HistoricalDataService] CACHE HIT: {symbol} - {cachedRecords.Count} bars from cache");
                         return cachedRecords;
                     }
 
-                    Logger.Info($"[HistoricalDataService] CACHE MISS: {symbol} - fetching from Zerodha API");
+                    Logger.Debug($"[HistoricalDataService] CACHE MISS: {symbol} - fetching from Zerodha API");
 
                     // Get the instrument token
                     long instrumentToken = await _instrumentManager.GetInstrumentToken(symbol);
@@ -129,7 +129,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     if (records.Count > 0)
                     {
                         _barCache.StoreBars(symbol, interval, records);
-                        Logger.Info($"[HistoricalDataService] Cached {records.Count} bars for {symbol}");
+                        Logger.Debug($"[HistoricalDataService] Cached {records.Count} bars for {symbol}");
                     }
                 }
                 else
@@ -143,7 +143,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 NinjaTrader.NinjaScript.NinjaScript.Log($"Exception in GetHistoricalTrades: {ex.Message}", NinjaTrader.Cbi.LogLevel.Error);
             }
 
-            Logger.Info($"Returning {records.Count} historical records for {symbol}");
+            Logger.Debug($"Returning {records.Count} historical records for {symbol}");
             return records;
         }
 
@@ -200,7 +200,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 if (response.IsSuccessStatusCode)
                 {
                     string content = await response.Content.ReadAsStringAsync();
-                    Logger.Info($"Received historical response with length: {content.Length} from {fromDateStr} to {toDateStr}");
+                    Logger.Debug($"Received historical response with length: {content.Length} from {fromDateStr} to {toDateStr}");
 
                     // Parse the JSON response
                     JObject json = JObject.Parse(content);
