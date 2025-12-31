@@ -330,7 +330,63 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
             return expiries;
         }
 
-        
+        /// <summary>
+        /// Gets the lot size for an underlying from the instrument database.
+        /// Queries for any option instrument of the underlying and returns its lot_size.
+        /// </summary>
+        /// <param name="underlying">The underlying symbol (e.g., NIFTY, SENSEX, BANKNIFTY)</param>
+        /// <returns>The lot size, or 0 if not found</returns>
+        public async Task<int> GetLotSizeForUnderlying(string underlying)
+        {
+            Logger.Info($"InstrumentManager: GetLotSizeForUnderlying({underlying}) called");
+
+            // Ensure database path is set and database exists
+            string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            _sqliteDbFullPath = Path.Combine(documentsPath, Constants.BaseDataFolder, Constants.InstrumentDbFileName);
+
+            if (!File.Exists(_sqliteDbFullPath))
+            {
+                Logger.Info($"InstrumentManager: Database not found at {_sqliteDbFullPath}, downloading...");
+                await DownloadAndCreateInstrumentDatabase();
+            }
+
+            if (string.IsNullOrEmpty(_sqliteDbFullPath) || !File.Exists(_sqliteDbFullPath))
+            {
+                Logger.Warn($"InstrumentManager: Database still not available after download attempt for lot size lookup of {underlying}");
+                return 0;
+            }
+
+            try
+            {
+                using (var connection = new SQLiteConnection($"Data Source={_sqliteDbFullPath};Version=3;Read Only=True;"))
+                {
+                    connection.Open();
+                    // Get lot_size from any option instrument for this underlying
+                    string query = @"SELECT lot_size FROM instruments
+                                     WHERE underlying = @underlying
+                                     AND instrument_type IN ('CE', 'PE')
+                                     AND lot_size > 0
+                                     LIMIT 1";
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@underlying", underlying);
+                        var result = cmd.ExecuteScalar();
+                        if (result != null && result != DBNull.Value)
+                        {
+                            int lotSize = Convert.ToInt32(result);
+                            Logger.Info($"InstrumentManager: Found lot size {lotSize} for {underlying}");
+                            return lotSize;
+                        }
+                    }
+                }
+                Logger.Warn($"InstrumentManager: No lot size found for {underlying}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"InstrumentManager: Error fetching lot size for {underlying}: {ex.Message}");
+            }
+            return 0;
+        }
 
         /// <summary>
         /// Gets the instrument token for a symbol

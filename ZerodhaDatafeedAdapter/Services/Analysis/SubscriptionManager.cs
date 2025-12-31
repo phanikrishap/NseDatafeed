@@ -409,12 +409,25 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         }
                     }
 
-                    // Extract last price and update UI
+                    // Extract last price and update UI - BUT only if data is recent!
+                    // Historical data API may return stale data (e.g., from 10:48 when querying at 13:27)
+                    // If we blindly update price, we corrupt live WebSocket prices with old data
                     var lastRecord = records.OrderByDescending(r => r.TimeStamp).FirstOrDefault();
                     if (lastRecord != null && lastRecord.Close > 0)
                     {
-                        Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): LastPrice={lastRecord.Close} from {lastRecord.TimeStamp:yyyy-MM-dd HH:mm}");
-                        OptionPriceUpdated?.Invoke(ntSymbol, lastRecord.Close);
+                        var dataAge = DateTime.Now - lastRecord.TimeStamp;
+                        Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): LastPrice={lastRecord.Close} from {lastRecord.TimeStamp:yyyy-MM-dd HH:mm} (age={dataAge.TotalMinutes:F1}min)");
+
+                        // Only use historical price if it's within last 5 minutes
+                        // Otherwise, live WebSocket price is more accurate
+                        if (dataAge.TotalMinutes <= 5)
+                        {
+                            OptionPriceUpdated?.Invoke(ntSymbol, lastRecord.Close);
+                        }
+                        else
+                        {
+                            Logger.Warn($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Skipping stale price update (age={dataAge.TotalMinutes:F1}min > 5min threshold)");
+                        }
                     }
                 }
                 else

@@ -196,6 +196,14 @@ namespace ZerodhaDatafeedAdapter.Services
                         config.CombinedSL = ParseDecimalPercent(strValue);
                         break;
 
+                    case "tgt":
+                    case "target":
+                    case "targetpercent":
+                    case "targetprofit":
+                    case "profittarget":
+                        config.TargetPercent = ParseDecimalPercent(strValue);
+                        break;
+
                     case "hedgeaction":
                     case "action":
                     case "slaction":
@@ -215,6 +223,16 @@ namespace ZerodhaDatafeedAdapter.Services
                         config.IsActive = strValue.ToLowerInvariant() == "true" ||
                                          strValue.ToLowerInvariant() == "yes" ||
                                          strValue == "1";
+                        break;
+
+                    case "profitcondition":
+                    case "profitcond":
+                    case "profcondition":
+                    case "profcond":
+                        // Blank or "false" = false, "true" = true
+                        config.ProfitCondition = strValue.ToLowerInvariant() == "true" ||
+                                                strValue.ToLowerInvariant() == "yes" ||
+                                                strValue == "1";
                         break;
                 }
             }

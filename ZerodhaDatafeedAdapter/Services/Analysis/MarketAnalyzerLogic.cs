@@ -161,6 +161,64 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private readonly object _atmLock = new object();
 
         // ============================================================================
+        // EXPIRY CACHE: Cached expiries per underlying for symbol generation
+        // ============================================================================
+        private readonly Dictionary<string, List<DateTime>> _cachedExpiries = new Dictionary<string, List<DateTime>>();
+        private readonly object _expiryLock = new object();
+        private string _selectedUnderlying;
+        private DateTime? _selectedExpiry;
+        private bool _selectedIsMonthlyExpiry;
+
+        // ============================================================================
+        // LOT SIZE CACHE: Cached lot sizes per underlying from instrument masters DB
+        // ============================================================================
+        private readonly Dictionary<string, int> _cachedLotSizes = new Dictionary<string, int>();
+        private readonly object _lotSizeLock = new object();
+
+        /// <summary>
+        /// Get cached expiries for an underlying. Returns empty list if not cached.
+        /// </summary>
+        public List<DateTime> GetCachedExpiries(string underlying)
+        {
+            if (string.IsNullOrEmpty(underlying)) return new List<DateTime>();
+            lock (_expiryLock)
+            {
+                if (_cachedExpiries.TryGetValue(underlying.ToUpperInvariant(), out var expiries))
+                    return new List<DateTime>(expiries); // Return copy
+            }
+            return new List<DateTime>();
+        }
+
+        /// <summary>
+        /// Get cached lot size for an underlying. Returns 0 if not cached.
+        /// </summary>
+        public int GetCachedLotSize(string underlying)
+        {
+            if (string.IsNullOrEmpty(underlying)) return 0;
+            lock (_lotSizeLock)
+            {
+                if (_cachedLotSizes.TryGetValue(underlying.ToUpperInvariant(), out var lotSize))
+                    return lotSize;
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Get the currently selected underlying from Option Chain
+        /// </summary>
+        public string SelectedUnderlying => _selectedUnderlying;
+
+        /// <summary>
+        /// Get the currently selected expiry from Option Chain
+        /// </summary>
+        public DateTime? SelectedExpiry => _selectedExpiry;
+
+        /// <summary>
+        /// Whether the selected expiry is a monthly expiry
+        /// </summary>
+        public bool SelectedIsMonthlyExpiry => _selectedIsMonthlyExpiry;
+
+        // ============================================================================
         // PRICE HUB: Centralized price cache to avoid duplicate WebSocket subscriptions
         // Option Chain populates this, TBS Manager and other consumers read from it
         // ============================================================================
@@ -480,6 +538,32 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 var sensexExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlying("SENSEX");
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Found {sensexExpiries.Count} SENSEX expiries");
 
+                // Cache expiries globally for TBS Manager and other consumers
+                lock (_expiryLock)
+                {
+                    _cachedExpiries["NIFTY"] = new List<DateTime>(niftyExpiries);
+                    _cachedExpiries["SENSEX"] = new List<DateTime>(sensexExpiries);
+                }
+                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Cached expiries for NIFTY and SENSEX");
+
+                // FETCH LOT SIZES from database and cache them
+                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Fetching lot sizes from database...");
+                var niftyLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("NIFTY");
+                var sensexLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("SENSEX");
+                var bankniftyLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("BANKNIFTY");
+                var finniftyLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("FINNIFTY");
+                var midcpniftyLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("MIDCPNIFTY");
+
+                lock (_lotSizeLock)
+                {
+                    if (niftyLotSize > 0) _cachedLotSizes["NIFTY"] = niftyLotSize;
+                    if (sensexLotSize > 0) _cachedLotSizes["SENSEX"] = sensexLotSize;
+                    if (bankniftyLotSize > 0) _cachedLotSizes["BANKNIFTY"] = bankniftyLotSize;
+                    if (finniftyLotSize > 0) _cachedLotSizes["FINNIFTY"] = finniftyLotSize;
+                    if (midcpniftyLotSize > 0) _cachedLotSizes["MIDCPNIFTY"] = midcpniftyLotSize;
+                }
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Cached lot sizes - NIFTY={niftyLotSize}, SENSEX={sensexLotSize}, BANKNIFTY={bankniftyLotSize}");
+
                 var niftyNear = GetNearestExpiry(niftyExpiries);
                 var sensexNear = GetNearestExpiry(sensexExpiries);
 
@@ -600,6 +684,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 bool isMonthlyExpiry = IsMonthlyExpiry(selectedExpiry, allExpiries);
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Expiry {selectedExpiry:yyyy-MM-dd} is {(isMonthlyExpiry ? "MONTHLY" : "WEEKLY")}");
 
+                // Cache the selected values for TBS Manager and other consumers
+                _selectedUnderlying = selectedUnderlying;
+                _selectedExpiry = selectedExpiry;
+                _selectedIsMonthlyExpiry = isMonthlyExpiry;
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Cached selection - Underlying={selectedUnderlying}, Expiry={selectedExpiry:yyyy-MM-dd}, IsMonthly={isMonthlyExpiry}");
+
                 for (int i = -30; i <= 30; i++)
                 {
                     double strike = atmStrike + (i * stepSize);
@@ -700,7 +790,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 option_type = type,
                 segment = underlying == "SENSEX" ? "BFO-OPT" : "NFO-OPT",
                 tick_size = 0.05,
-                lot_size = underlying == "SENSEX" ? 10 : 25, // SENSEX lot = 10, NIFTY lot = 25
+                lot_size = Helpers.SymbolHelper.GetLotSize(underlying), // Get from cache or defaults
                 instrument_token = 0 // Will be looked up by SubscriptionManager
             };
         }

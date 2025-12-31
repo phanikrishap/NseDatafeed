@@ -1,6 +1,7 @@
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 namespace ZerodhaDatafeedAdapter.Models
@@ -165,6 +166,61 @@ namespace ZerodhaDatafeedAdapter.Models
         /// </summary>
         public int TotalQuantity => Quantity * LotSize;
 
+        #region Stoxxo Integration Fields
+
+        /// <summary>
+        /// Stoxxo leg ID from IB_GetUserLegs
+        /// </summary>
+        public int StoxxoLegID { get; set; }
+
+        /// <summary>
+        /// Stoxxo filled quantity
+        /// </summary>
+        private int _stoxxoQty;
+        public int StoxxoQty
+        {
+            get => _stoxxoQty;
+            set { _stoxxoQty = value; OnPropertyChanged(); }
+        }
+
+        /// <summary>
+        /// Stoxxo average entry price
+        /// </summary>
+        private decimal _stoxxoEntryPrice;
+        public decimal StoxxoEntryPrice
+        {
+            get => _stoxxoEntryPrice;
+            set { _stoxxoEntryPrice = value; OnPropertyChanged(); OnPropertyChanged(nameof(StoxxoEntryPriceDisplay)); }
+        }
+
+        public string StoxxoEntryPriceDisplay => StoxxoEntryPrice > 0 ? StoxxoEntryPrice.ToString("F2") : "-";
+
+        /// <summary>
+        /// Stoxxo average exit price
+        /// </summary>
+        private decimal _stoxxoExitPrice;
+        public decimal StoxxoExitPrice
+        {
+            get => _stoxxoExitPrice;
+            set { _stoxxoExitPrice = value; OnPropertyChanged(); OnPropertyChanged(nameof(StoxxoExitPriceDisplay)); }
+        }
+
+        public string StoxxoExitPriceDisplay => StoxxoExitPrice > 0 ? StoxxoExitPrice.ToString("F2") : "-";
+
+        /// <summary>
+        /// Stoxxo leg status (e.g., "Active", "Completed")
+        /// </summary>
+        private string _stoxxoStatus;
+        public string StoxxoStatus
+        {
+            get => _stoxxoStatus;
+            set { _stoxxoStatus = value; OnPropertyChanged(); OnPropertyChanged(nameof(StoxxoStatusDisplay)); }
+        }
+
+        public string StoxxoStatusDisplay => string.IsNullOrEmpty(StoxxoStatus) ? "-" : StoxxoStatus;
+
+        #endregion
+
         private void UpdatePnL()
         {
             if (EntryPrice > 0 && CurrentPrice > 0 && Status == TBSLegStatus.Active)
@@ -210,6 +266,76 @@ namespace ZerodhaDatafeedAdapter.Models
         /// Reference to the configuration this execution is based on
         /// </summary>
         public TBSConfigEntry Config { get; set; }
+
+        /// <summary>
+        /// Unique tranche identifier (auto-incremented)
+        /// </summary>
+        private int _trancheId;
+        public int TrancheId
+        {
+            get => _trancheId;
+            set { _trancheId = value; OnPropertyChanged(); }
+        }
+
+        #region Stoxxo Integration Fields
+
+        /// <summary>
+        /// Stoxxo portfolio name assigned after placing order (e.g., "NF_MULTILEG_1")
+        /// </summary>
+        private string _stoxxoPortfolioName;
+        public string StoxxoPortfolioName
+        {
+            get => _stoxxoPortfolioName;
+            set { _stoxxoPortfolioName = value; OnPropertyChanged(); OnPropertyChanged(nameof(StoxxoPortfolioNameDisplay)); }
+        }
+
+        public string StoxxoPortfolioNameDisplay => string.IsNullOrEmpty(StoxxoPortfolioName) ? "-" : StoxxoPortfolioName;
+
+        /// <summary>
+        /// Stoxxo portfolio status (e.g., "UnderExecution", "Completed")
+        /// </summary>
+        private string _stoxxoStatus;
+        public string StoxxoStatus
+        {
+            get => _stoxxoStatus;
+            set { _stoxxoStatus = value; OnPropertyChanged(); OnPropertyChanged(nameof(StoxxoStatusDisplay)); }
+        }
+
+        public string StoxxoStatusDisplay => string.IsNullOrEmpty(StoxxoStatus) ? "-" : StoxxoStatus;
+
+        /// <summary>
+        /// Stoxxo P&L from IB_PortfolioMTM
+        /// </summary>
+        private decimal _stoxxoPnL;
+        public decimal StoxxoPnL
+        {
+            get => _stoxxoPnL;
+            set { _stoxxoPnL = value; OnPropertyChanged(); OnPropertyChanged(nameof(StoxxoPnLDisplay)); }
+        }
+
+        public string StoxxoPnLDisplay => StoxxoPnL != 0 ? StoxxoPnL.ToString("F2") : "-";
+
+        /// <summary>
+        /// Whether Stoxxo order has been placed for this tranche
+        /// </summary>
+        public bool StoxxoOrderPlaced { get; set; } = false;
+
+        /// <summary>
+        /// Whether legs have been reconciled with Stoxxo after entry
+        /// </summary>
+        public bool StoxxoReconciled { get; set; } = false;
+
+        /// <summary>
+        /// Whether SL modification has been sent to Stoxxo
+        /// </summary>
+        public bool StoxxoSLModified { get; set; } = false;
+
+        /// <summary>
+        /// Whether exit has been called on Stoxxo
+        /// </summary>
+        public bool StoxxoExitCalled { get; set; } = false;
+
+        #endregion
 
         /// <summary>
         /// Strike price of the straddle
@@ -260,6 +386,47 @@ namespace ZerodhaDatafeedAdapter.Models
         /// Cached combined SL percentage from config
         /// </summary>
         public decimal CombinedSLPercent { get; set; }
+
+        /// <summary>
+        /// Cached target profit percentage from config (e.g., 0.25 for 25%)
+        /// Only applies when both legs are still open
+        /// </summary>
+        public decimal TargetPercent { get; set; }
+
+        /// <summary>
+        /// Combined entry premium (CE entry + PE entry)
+        /// Used to calculate target threshold
+        /// </summary>
+        public decimal CombinedEntryPremium { get; set; }
+
+        /// <summary>
+        /// Target profit threshold in absolute value
+        /// = CombinedEntryPremium * TargetPercent * Quantity * LotSize
+        /// </summary>
+        public decimal TargetProfitThreshold { get; set; }
+
+        /// <summary>
+        /// Whether target has been hit and both legs exited
+        /// </summary>
+        public bool TargetHit { get; set; } = false;
+
+        /// <summary>
+        /// Whether deployment is conditional on prior tranches being profitable.
+        /// Cached from config.
+        /// </summary>
+        public bool ProfitCondition { get; set; } = false;
+
+        /// <summary>
+        /// Whether this tranche was skipped due to profit condition not being met
+        /// (prior tranches P&L was <= 0 at entry time)
+        /// </summary>
+        public bool SkippedDueToProfitCondition { get; set; } = false;
+
+        /// <summary>
+        /// Whether this tranche was missed (entry time passed before system started).
+        /// When true, status updates are frozen - won't transition to Live.
+        /// </summary>
+        public bool IsMissed { get; set; } = false;
 
         /// <summary>
         /// Cached exit time from config
@@ -327,6 +494,47 @@ namespace ZerodhaDatafeedAdapter.Models
         public DateTime? ExitTime { get; set; }
 
         /// <summary>
+        /// Exit time display (HH:mm:ss format)
+        /// </summary>
+        public string ExitTimeDisplay => ExitTime.HasValue ? ExitTime.Value.ToString("HH:mm:ss") : "-";
+
+        /// <summary>
+        /// Combined entry price (CE + PE entry prices) for display
+        /// </summary>
+        public string EntryPriceDisplay
+        {
+            get
+            {
+                if (Legs == null || Legs.Count < 2) return "-";
+                var ce = Legs.FirstOrDefault(l => l.OptionType == "CE");
+                var pe = Legs.FirstOrDefault(l => l.OptionType == "PE");
+                if (ce?.EntryPrice > 0 && pe?.EntryPrice > 0)
+                    return $"{ce.EntryPrice:F0}+{pe.EntryPrice:F0}";
+                return "-";
+            }
+        }
+
+        /// <summary>
+        /// Combined exit price (CE + PE exit prices) for display
+        /// </summary>
+        public string ExitPriceDisplay
+        {
+            get
+            {
+                if (Legs == null || Legs.Count < 2) return "-";
+                var ce = Legs.FirstOrDefault(l => l.OptionType == "CE");
+                var pe = Legs.FirstOrDefault(l => l.OptionType == "PE");
+                if (ce?.ExitPrice > 0 || pe?.ExitPrice > 0)
+                {
+                    string ceExit = ce?.ExitPrice > 0 ? $"{ce.ExitPrice:F0}" : "-";
+                    string peExit = pe?.ExitPrice > 0 ? $"{pe.ExitPrice:F0}" : "-";
+                    return $"{ceExit}+{peExit}";
+                }
+                return "-";
+            }
+        }
+
+        /// <summary>
         /// Additional notes/messages about the execution
         /// </summary>
         private string _message;
@@ -344,6 +552,16 @@ namespace ZerodhaDatafeedAdapter.Models
         public bool UpdateStatusBasedOnTime(TimeSpan currentTime, bool skipExitTimeCheck = false)
         {
             if (Config == null) return false;
+
+            // If tranche was marked as Missed during initialization, don't allow status changes
+            // This prevents missed tranches from transitioning to Live via timer updates
+            if (IsMissed)
+                return false;
+
+            // If tranche was skipped due to profit condition not met, don't allow status changes
+            // This prevents skipped tranches from transitioning back to Monitoring/Live
+            if (SkippedDueToProfitCondition)
+                return false;
 
             var oldStatus = Status;
             var entryTime = Config.EntryTime;

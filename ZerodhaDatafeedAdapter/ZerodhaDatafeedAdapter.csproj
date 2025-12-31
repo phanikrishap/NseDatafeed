@@ -218,6 +218,9 @@
       <DependentUpon>Loadwindow.xaml</DependentUpon>
     </Compile>
     <Compile Include="LogLevel.cs" />
+    <Compile Include="Logging\AppLogger.cs" />
+    <Compile Include="Logging\LoggingLevel.cs" />
+    <Compile Include="Logging\TBSLogger.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="ZerodhaLogger.cs" />
     <Compile Include="TickVolumeLogger.cs" />
@@ -245,6 +248,8 @@
     <Compile Include="Models\SimulationConfig.cs" />
     <Compile Include="Services\TBSConfigurationService.cs" />
     <Compile Include="Services\SimulationService.cs" />
+    <Compile Include="Services\StoxxoService.cs" />
+    <Compile Include="Models\StoxxoModels.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
     <Compile Include="Services\WebSocket\SharedWebSocketService.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />
