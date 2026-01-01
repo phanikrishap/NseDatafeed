@@ -156,6 +156,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public event Action<string, string> HistoricalDataStatusChanged; // symbol, status
         public event Action<string, decimal> ATMStrikeUpdated; // underlying, atmStrike
 
+        /// <summary>
+        /// Event fired when price data is ready (enough option prices have been received).
+        /// This replaces the hardcoded 45-second delay for TBS initialization.
+        /// Fires with (underlying, priceCount) when at least MIN_PRICES_FOR_READY symbols have prices.
+        /// </summary>
+        public event Action<string, int> PriceSyncReady;
+        private bool _priceSyncFired = false;
+        private const int MIN_PRICES_FOR_READY = 10; // Minimum option prices before considering data ready
+
         // Current ATM strike per underlying (set by Option Chain, consumed by TBS Manager)
         private readonly Dictionary<string, decimal> _currentATMStrikes = new Dictionary<string, decimal>();
         private readonly object _atmLock = new object();
@@ -272,6 +281,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             if (string.IsNullOrEmpty(symbol) || price <= 0) return;
 
             bool priceChanged = false;
+            int priceCount = 0;
             lock (_priceHubLock)
             {
                 if (!_priceHub.TryGetValue(symbol, out decimal existingPrice) || existingPrice != price)
@@ -280,12 +290,47 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     _priceTimestamps[symbol] = timestamp ?? DateTime.Now;
                     priceChanged = true;
                 }
+                priceCount = _priceHub.Count;
             }
 
             // Fire event outside lock to avoid deadlocks
             if (priceChanged)
             {
                 PriceUpdated?.Invoke(symbol, price);
+
+                // Check if we should fire PriceSyncReady (only once per session)
+                CheckAndFirePriceSyncReady(priceCount);
+            }
+        }
+
+        /// <summary>
+        /// Check if enough prices have been received to fire PriceSyncReady event.
+        /// Only fires once per session to avoid repeated notifications.
+        /// </summary>
+        private void CheckAndFirePriceSyncReady(int priceCount)
+        {
+            if (_priceSyncFired || priceCount < MIN_PRICES_FOR_READY) return;
+
+            // Double-check with lock to prevent race condition
+            lock (_priceHubLock)
+            {
+                if (_priceSyncFired) return;
+                _priceSyncFired = true;
+            }
+
+            var underlying = _selectedUnderlying ?? "NIFTY";
+            Logger.Info($"[MarketAnalyzerLogic] PriceSyncReady: {priceCount} option prices received for {underlying}");
+            PriceSyncReady?.Invoke(underlying, priceCount);
+        }
+
+        /// <summary>
+        /// Reset the PriceSyncReady flag (call when underlying changes or on new session)
+        /// </summary>
+        public void ResetPriceSyncReady()
+        {
+            lock (_priceHubLock)
+            {
+                _priceSyncFired = false;
             }
         }
 

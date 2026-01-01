@@ -9,6 +9,7 @@ using System.Windows.Threading;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using ZerodhaAPI.Common.Enums;
+using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Instruments;
@@ -266,7 +267,8 @@ namespace ZerodhaDatafeedAdapter.Services
         }
 
         /// <summary>
-        /// Generate option symbols based on configuration
+        /// Generate option symbols based on configuration.
+        /// Uses SymbolHelper.BuildOptionSymbol for consistent symbol formatting.
         /// </summary>
         private List<string> GenerateOptionSymbols(SimulationConfig config)
         {
@@ -276,14 +278,21 @@ namespace ZerodhaDatafeedAdapter.Services
             int strikeCount = config.StrikeCount;
             string prefix = config.SymbolPrefix?.Trim() ?? "";
 
+            // Check if this is a monthly expiry (affects symbol format)
+            // For simulation, we default to monthly format unless we have expiry list
+            var expiries = MarketAnalyzerLogic.Instance?.GetCachedExpiries(config.Underlying);
+            bool isMonthlyExpiry = expiries != null && expiries.Count > 0
+                ? SymbolHelper.IsMonthlyExpiry(config.ExpiryDate, expiries)
+                : true; // Default to monthly format for simulation
+
             for (int i = -strikeCount; i <= strikeCount; i++)
             {
                 decimal strike = atmStrike + (i * stepSize);
 
-                string ceSymbol = FormatOptionSymbol(config.Underlying, config.ExpiryDate, strike, "CE", prefix);
+                string ceSymbol = FormatOptionSymbolForSimulation(config.Underlying, config.ExpiryDate, strike, "CE", prefix, isMonthlyExpiry);
                 symbols.Add(ceSymbol);
 
-                string peSymbol = FormatOptionSymbol(config.Underlying, config.ExpiryDate, strike, "PE", prefix);
+                string peSymbol = FormatOptionSymbolForSimulation(config.Underlying, config.ExpiryDate, strike, "PE", prefix, isMonthlyExpiry);
                 symbols.Add(peSymbol);
             }
 
@@ -291,18 +300,19 @@ namespace ZerodhaDatafeedAdapter.Services
         }
 
         /// <summary>
-        /// Format option symbol
+        /// Format option symbol for simulation.
+        /// Handles prefix override (for custom DB lookups) or delegates to SymbolHelper.
         /// </summary>
-        private string FormatOptionSymbol(string underlying, DateTime expiry, decimal strike, string optionType, string prefix = "")
+        private string FormatOptionSymbolForSimulation(string underlying, DateTime expiry, decimal strike, string optionType, string prefix, bool isMonthlyExpiry)
         {
+            // Prefix override: used when loading from NinjaTrader DB with custom naming
             if (!string.IsNullOrEmpty(prefix))
             {
                 return $"{prefix}{strike:F0}{optionType}";
             }
 
-            string monthAbbr = expiry.ToString("MMM").ToUpper();
-            int year = expiry.Year % 100;
-            return $"{underlying}{year}{monthAbbr}{strike:F0}{optionType}";
+            // Use centralized SymbolHelper for consistent symbol generation
+            return SymbolHelper.BuildOptionSymbol(underlying, expiry, strike, optionType, isMonthlyExpiry);
         }
 
         /// <summary>

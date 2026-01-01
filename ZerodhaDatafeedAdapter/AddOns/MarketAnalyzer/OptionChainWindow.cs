@@ -855,6 +855,15 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         {
             Logger.Info("[OptionChainTabPage] OnTabPageUnloaded: Unsubscribing from events");
 
+            // Stop and cleanup UI update timer (prevents memory leak)
+            if (_uiUpdateTimer != null)
+            {
+                _uiUpdateTimer.Stop();
+                _uiUpdateTimer.Tick -= OnUiUpdateTimerTick;
+                _uiUpdateTimer = null;
+                Logger.Debug("[OptionChainTabPage] OnTabPageUnloaded: UI update timer stopped and disposed");
+            }
+
             SubscriptionManager.Instance.OptionPriceUpdated -= OnOptionPriceUpdated;
             SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;
             SubscriptionManager.Instance.SymbolResolved -= OnSymbolResolved;

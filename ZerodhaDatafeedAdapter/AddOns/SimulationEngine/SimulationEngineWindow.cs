@@ -11,6 +11,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Tools;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services;
+using ZerodhaDatafeedAdapter.Helpers;
 
 namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
 {
@@ -129,6 +130,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
 
         // Configuration
         private SimulationConfig _config;
+
+        // Event handler reference for proper cleanup (prevents memory leak)
+        private PropertyChangedEventHandler _servicePropertyChangedHandler;
 
         // NinjaTrader-style colors
         private static readonly SolidColorBrush _bgColor = new SolidColorBrush(Color.FromRgb(27, 27, 28));
@@ -589,37 +593,53 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
         {
             var service = SimulationService.Instance;
 
-            service.PropertyChanged += (s, e) =>
+            // Use named handler for proper cleanup (prevents memory leak)
+            _servicePropertyChangedHandler = OnServicePropertyChanged;
+            service.PropertyChanged += _servicePropertyChangedHandler;
+        }
+
+        private void OnServicePropertyChanged(object sender, PropertyChangedEventArgs e)
+        {
+            Dispatcher.InvokeAsync(() =>
             {
-                Dispatcher.InvokeAsync(() =>
+                var service = SimulationService.Instance;
+                switch (e.PropertyName)
                 {
-                    switch (e.PropertyName)
-                    {
-                        case nameof(service.State):
-                            _lblState.Text = service.State.ToString();
-                            UpdateButtonStates();
-                            break;
-                        case nameof(service.StatusMessage):
-                            _lblStatus.Text = service.StatusMessage;
-                            break;
-                        case nameof(service.CurrentSimTimeDisplay):
-                            _lblCurrentTime.Text = service.CurrentSimTimeDisplay;
-                            break;
-                        case nameof(service.Progress):
-                            _progressBar.Value = service.Progress;
-                            break;
-                        case nameof(service.LoadedSymbolCount):
-                            _lblSymbolsLoaded.Text = service.LoadedSymbolCount.ToString();
-                            break;
-                        case nameof(service.TotalTickCount):
-                            _lblTicksLoaded.Text = service.TotalTickCount.ToString("N0");
-                            break;
-                        case nameof(service.PricesInjectedCount):
-                            _lblPricesInjected.Text = service.PricesInjectedCount.ToString("N0");
-                            break;
-                    }
-                });
-            };
+                    case nameof(service.State):
+                        _lblState.Text = service.State.ToString();
+                        UpdateButtonStates();
+                        break;
+                    case nameof(service.StatusMessage):
+                        _lblStatus.Text = service.StatusMessage;
+                        break;
+                    case nameof(service.CurrentSimTimeDisplay):
+                        _lblCurrentTime.Text = service.CurrentSimTimeDisplay;
+                        break;
+                    case nameof(service.Progress):
+                        _progressBar.Value = service.Progress;
+                        break;
+                    case nameof(service.LoadedSymbolCount):
+                        _lblSymbolsLoaded.Text = service.LoadedSymbolCount.ToString();
+                        break;
+                    case nameof(service.TotalTickCount):
+                        _lblTicksLoaded.Text = service.TotalTickCount.ToString("N0");
+                        break;
+                    case nameof(service.PricesInjectedCount):
+                        _lblPricesInjected.Text = service.PricesInjectedCount.ToString("N0");
+                        break;
+                }
+            });
+        }
+
+        private void UnbindFromService()
+        {
+            if (_servicePropertyChangedHandler != null)
+            {
+                var service = SimulationService.Instance;
+                service.PropertyChanged -= _servicePropertyChangedHandler;
+                _servicePropertyChangedHandler = null;
+                Logger.Debug("[SimulationEngineTabPage] Unbound from SimulationService PropertyChanged event");
+            }
         }
 
         private void UpdateButtonStates()
@@ -810,6 +830,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
         public override void Cleanup()
         {
             Logger.Info("[SimulationEngineTabPage] Cleanup");
+            UnbindFromService();
             SimulationService.Instance.Reset();
             base.Cleanup();
         }

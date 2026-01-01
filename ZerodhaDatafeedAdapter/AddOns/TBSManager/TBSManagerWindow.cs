@@ -20,101 +20,16 @@ using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer;
+using ZerodhaDatafeedAdapter.AddOns.TBSManager.Converters;
+using ZerodhaDatafeedAdapter.ViewModels;
 using SimService = ZerodhaDatafeedAdapter.Services.SimulationService;
 
 namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
 {
-    #region Value Converters
-
-    /// <summary>
-    /// Converts P&L value to color (green for profit, red for loss)
-    /// </summary>
-    public class PnLToColorConverter : IValueConverter
-    {
-        private static readonly SolidColorBrush GreenBrush = new SolidColorBrush(Color.FromRgb(100, 200, 100));
-        private static readonly SolidColorBrush RedBrush = new SolidColorBrush(Color.FromRgb(220, 80, 80));
-        private static readonly SolidColorBrush NeutralBrush = new SolidColorBrush(Color.FromRgb(212, 212, 212));
-
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            if (value is decimal pnl)
-            {
-                if (pnl > 0) return GreenBrush;
-                if (pnl < 0) return RedBrush;
-            }
-            return NeutralBrush;
-        }
-
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            throw new NotImplementedException();
-        }
-    }
-
-    /// <summary>
-    /// Converts execution status to color
-    /// </summary>
-    public class StatusToColorConverter : IValueConverter
-    {
-        private static readonly SolidColorBrush SkippedBrush = new SolidColorBrush(Color.FromRgb(120, 120, 120));   // Gray
-        private static readonly SolidColorBrush IdleBrush = new SolidColorBrush(Color.FromRgb(150, 150, 150));      // Light Gray
-        private static readonly SolidColorBrush MonitoringBrush = new SolidColorBrush(Color.FromRgb(200, 180, 80)); // Yellow/Amber
-        private static readonly SolidColorBrush LiveBrush = new SolidColorBrush(Color.FromRgb(100, 200, 100));      // Green
-        private static readonly SolidColorBrush SquaredOffBrush = new SolidColorBrush(Color.FromRgb(100, 150, 220));// Blue
-
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            if (value is TBSExecutionStatus status)
-            {
-                switch (status)
-                {
-                    case TBSExecutionStatus.Skipped: return SkippedBrush;
-                    case TBSExecutionStatus.Idle: return IdleBrush;
-                    case TBSExecutionStatus.Monitoring: return MonitoringBrush;
-                    case TBSExecutionStatus.Live: return LiveBrush;
-                    case TBSExecutionStatus.SquaredOff: return SquaredOffBrush;
-                }
-            }
-            return IdleBrush;
-        }
-
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            throw new NotImplementedException();
-        }
-    }
-
-    /// <summary>
-    /// Converts SL status to color (SAFE=green, WARNING=yellow, HIT=red)
-    /// </summary>
-    public class SLStatusToColorConverter : IValueConverter
-    {
-        private static readonly SolidColorBrush SafeBrush = new SolidColorBrush(Color.FromRgb(100, 200, 100));
-        private static readonly SolidColorBrush WarningBrush = new SolidColorBrush(Color.FromRgb(220, 180, 50));
-        private static readonly SolidColorBrush HitBrush = new SolidColorBrush(Color.FromRgb(220, 80, 80));
-        private static readonly SolidColorBrush NeutralBrush = new SolidColorBrush(Color.FromRgb(150, 150, 150));
-
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            if (value is string status)
-            {
-                switch (status.ToUpper())
-                {
-                    case "SAFE": return SafeBrush;
-                    case "WARNING": return WarningBrush;
-                    case "HIT": return HitBrush;
-                }
-            }
-            return NeutralBrush;
-        }
-
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            throw new NotImplementedException();
-        }
-    }
-
-    #endregion
+    // Value converters extracted to AddOns/TBSManager/Converters/ folder:
+    // - PnLToColorConverter.cs
+    // - StatusToColorConverter.cs
+    // - SLStatusToColorConverter.cs
 
     /// <summary>
     /// TBS Manager Window - hosts the TBSManagerTabPage
@@ -198,6 +113,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         // Stoxxo service for order execution
         private StoxxoService _stoxxoService;
 
+        // ViewModel for MVVM pattern - delegates to TBSExecutionService
+        private TBSViewModel _viewModel;
+
         // NOTE: Local price cache removed - using centralized PriceHub in MarketAnalyzerLogic
         // This avoids duplicate WebSocket subscriptions and ensures all consumers see same prices
 
@@ -224,16 +142,112 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
             _configRows = new ObservableCollection<TBSConfigEntry>();
             _executionRows = new ObservableCollection<TBSExecutionState>();
 
+            // Initialize ViewModel (MVVM pattern - delegates execution logic to TBSExecutionService)
+            _viewModel = new TBSViewModel();
+
             // Initialize Stoxxo service
             _stoxxoService = StoxxoService.Instance;
 
             BuildUI();
             LoadConfigurations();
             SubscribeToEvents();
+            SubscribeToViewModelEvents();
             StartStatusTimer();
             StartStoxxoPollingTimer();
 
             Logger.Info("[TBSManagerTabPage] Constructor: Completed");
+        }
+
+        /// <summary>
+        /// Subscribe to ViewModel events for UI updates
+        /// </summary>
+        private void SubscribeToViewModelEvents()
+        {
+            _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+            _viewModel.TrancheStateChanged += OnViewModelTrancheStateChanged;
+        }
+
+        /// <summary>
+        /// Unsubscribe from ViewModel events
+        /// </summary>
+        private void UnsubscribeFromViewModelEvents()
+        {
+            if (_viewModel != null)
+            {
+                _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+                _viewModel.TrancheStateChanged -= OnViewModelTrancheStateChanged;
+            }
+        }
+
+        private void OnViewModelPropertyChanged(object sender, PropertyChangedEventArgs e)
+        {
+            // Update UI when ViewModel properties change
+            Dispatcher.InvokeAsync(() =>
+            {
+                switch (e.PropertyName)
+                {
+                    case nameof(TBSViewModel.TotalPnL):
+                    case nameof(TBSViewModel.ExecutionSummaryText):
+                        UpdateSummaryFromViewModel();
+                        break;
+
+                    case nameof(TBSViewModel.IsOptionChainReady):
+                        if (_viewModel.IsOptionChainReady && !_optionChainReady)
+                        {
+                            // ViewModel says ready - sync local state
+                            _optionChainReady = true;
+                            StopOptionChainDelayTimer();
+                            InitializeExecutionStatesFromViewModel();
+                        }
+                        break;
+                }
+            });
+        }
+
+        private void OnViewModelTrancheStateChanged(object sender, TBSExecutionState state)
+        {
+            // Refresh specific tranche UI when its state changes
+            Dispatcher.InvokeAsync(() => UpdateTrancheUIForState(state));
+        }
+
+        /// <summary>
+        /// Update summary labels from ViewModel
+        /// </summary>
+        private void UpdateSummaryFromViewModel()
+        {
+            var pnl = _viewModel.TotalPnL;
+            _lblTotalPnL.Text = $"Total P&L: {(pnl >= 0 ? "+" : "")}{pnl:N2}";
+            _lblTotalPnL.Foreground = pnl >= 0 ? _liveColor : new SolidColorBrush(Color.FromRgb(220, 80, 80));
+            _lblLiveCount.Text = $"Live: {_viewModel.LiveCount}";
+            _lblMonitoringCount.Text = $"Monitoring: {_viewModel.MonitoringCount}";
+        }
+
+        /// <summary>
+        /// Initialize execution states using ViewModel (delegates to TBSExecutionService)
+        /// </summary>
+        private void InitializeExecutionStatesFromViewModel()
+        {
+            string underlying = _cboUnderlying.SelectedItem?.ToString();
+            int? dte = null;
+            if (int.TryParse(_txtDTE.Text, out int parsedDte))
+                dte = parsedDte;
+
+            // Tell ViewModel to refresh execution states with current filter
+            _viewModel.SelectedUnderlying = underlying == "All" ? "All" : underlying;
+            _viewModel.SelectedDTE = dte;
+            _viewModel.RefreshExecutionStates();
+
+            // Sync local collection from ViewModel's ExecutionStates
+            _executionRows.Clear();
+            foreach (var state in _viewModel.ExecutionStates)
+            {
+                _executionRows.Add(state);
+            }
+
+            RebuildExecutionUI();
+            UpdateSummaryFromViewModel();
+            _lblExecutionStatus.Text = $"Loaded {_executionRows.Count} tranches (via ViewModel)";
+            TBSLogger.Info($"[TBSManagerTabPage] Initialized {_executionRows.Count} tranches from ViewModel");
         }
 
         private void BuildUI()
@@ -550,11 +564,15 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
             grid.Children.Add(summaryPanel);
 
             // Scrollable execution panel
+            // Note: For true UI virtualization with 100+ tranches, convert to ItemsControl with DataTemplates
+            // Current StackPanel approach works well for typical 10-30 tranches
             _executionScrollViewer = new ScrollViewer
             {
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                Margin = new Thickness(5)
+                Margin = new Thickness(5),
+                // Smooth scrolling
+                CanContentScroll = false
             };
 
             _executionPanel = new StackPanel
@@ -708,6 +726,27 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                 _executionPanel.Children.Add(trancheUI);
                 isAlt = !isAlt;
             }
+        }
+
+        /// <summary>
+        /// Update a specific tranche's UI when its state changes (from ViewModel event)
+        /// </summary>
+        private void UpdateTrancheUIForState(TBSExecutionState state)
+        {
+            // Find the Border with this state as Tag and trigger a binding refresh
+            foreach (var child in _executionPanel.Children)
+            {
+                if (child is Border border && border.Tag == state)
+                {
+                    // Trigger binding updates by re-setting DataContext
+                    border.DataContext = null;
+                    border.DataContext = state;
+                    break;
+                }
+            }
+
+            // Also update summary
+            UpdateSummaryFromViewModel();
         }
 
         private Border CreateTrancheUI(TBSExecutionState state, bool isAlt)
@@ -2031,17 +2070,49 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
 
             // Subscribe to options generated event to auto-derive underlying and DTE from Option Chain
             MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
+
+            // Subscribe to PriceSyncReady for event-driven initialization (replaces 45s delay)
+            MarketAnalyzerLogic.Instance.PriceSyncReady += OnPriceSyncReady;
         }
 
         private void UnsubscribeFromEvents()
         {
             MarketAnalyzerLogic.Instance.PriceUpdated -= OnPriceHubUpdated;
             MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
+            MarketAnalyzerLogic.Instance.PriceSyncReady -= OnPriceSyncReady;
         }
 
         /// <summary>
-        /// Called when Option Chain generates options - auto-derives underlying and DTE for filtering
-        /// Starts a 45-second delay timer to let Option Chain fully load before TBS processes
+        /// Called when enough option prices have been received (event-driven init).
+        /// This replaces the hardcoded 45-second delay timer.
+        /// </summary>
+        private void OnPriceSyncReady(string underlying, int priceCount)
+        {
+            if (_optionChainReady) return; // Already ready
+
+            TBSLogger.Info($"[TBSManagerTabPage] PriceSyncReady: {underlying} with {priceCount} prices - initializing immediately");
+
+            Dispatcher.InvokeAsync(() =>
+            {
+                // Stop the delay timer if running (no longer needed)
+                StopOptionChainDelayTimer();
+
+                // Mark as ready
+                _optionChainReady = true;
+                _delayCountdown = 0;
+
+                // Initialize execution states immediately
+                InitializeExecutionStates();
+
+                _lblConfigStatus.Text = $"Option Chain ready - {_selectedUnderlying ?? underlying} (via price sync)";
+                TBSLogger.Info("[TBSManagerTabPage] Execution states initialized via PriceSyncReady event");
+            });
+        }
+
+        /// <summary>
+        /// Called when Option Chain generates options - auto-derives underlying and DTE for filtering.
+        /// Starts a fallback delay timer in case PriceSyncReady event doesn't fire.
+        /// Primary initialization now happens via PriceSyncReady event (event-driven).
         /// </summary>
         private void OnOptionsGenerated(List<MappedInstrument> options)
         {
@@ -2095,11 +2166,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                     // Apply filter for config tab (but not execution tab yet)
                     ApplyFilter();
 
-                    // Start delay timer if not already running
+                    // Start fallback delay timer if not already running and PriceSyncReady hasn't fired
                     if (_optionChainDelayTimer == null && !_optionChainReady)
                     {
                         StartOptionChainDelayTimer();
-                        _lblConfigStatus.Text = $"Auto-filtered for {underlying} DTE={dte} - Waiting {OPTION_CHAIN_DELAY_SECONDS}s for Option Chain...";
+                        _lblConfigStatus.Text = $"Auto-filtered for {underlying} DTE={dte} - Waiting for price data...";
                     }
                     else
                     {
@@ -2116,7 +2187,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         }
 
         /// <summary>
-        /// Start a 45-second delay timer to let Option Chain fully load
+        /// Start a fallback delay timer (45s) in case PriceSyncReady event doesn't fire.
+        /// This is a safety net - normally PriceSyncReady will fire much sooner.
         /// </summary>
         private void StartOptionChainDelayTimer()
         {
@@ -2276,6 +2348,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
             StopOptionChainDelayTimer();
             StopStoxxoPollingTimer();
             UnsubscribeFromEvents();
+            UnsubscribeFromViewModelEvents();
+
+            // Cleanup ViewModel (stops execution, unsubscribes from service events)
+            _viewModel?.Cleanup();
 
             _configRows?.Clear();
             _executionRows?.Clear();

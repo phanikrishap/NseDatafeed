@@ -68,6 +68,24 @@ namespace ZerodhaDatafeedAdapter.Helpers
             return symbolName.EndsWith("-NSE") || symbolName.EndsWith("-BSE");
         }
 
+        /// <summary>
+        /// Determines if a symbol is an MCX (Multi Commodity Exchange) symbol.
+        /// MCX symbols include crude oil, gold, silver, natural gas, copper, etc.
+        /// </summary>
+        /// <param name="symbolName">The symbol name to check</param>
+        /// <returns>True if the symbol is from MCX, false otherwise</returns>
+        public static bool IsMcxSymbol(string symbolName)
+        {
+            if (string.IsNullOrEmpty(symbolName))
+                return false;
+
+            return symbolName.StartsWith("CRUDEOIL", StringComparison.OrdinalIgnoreCase) ||
+                   symbolName.StartsWith("GOLD", StringComparison.OrdinalIgnoreCase) ||
+                   symbolName.StartsWith("SILVER", StringComparison.OrdinalIgnoreCase) ||
+                   symbolName.StartsWith("NATURALGAS", StringComparison.OrdinalIgnoreCase) ||
+                   symbolName.StartsWith("COPPER", StringComparison.OrdinalIgnoreCase);
+        }
+
         #region Option Symbol Generation
 
         /// <summary>

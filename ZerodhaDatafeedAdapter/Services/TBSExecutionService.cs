@@ -1,0 +1,1046 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
+using System.Windows.Threading;
+using ZerodhaDatafeedAdapter.Helpers;
+using ZerodhaDatafeedAdapter.Logging;
+using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Services.Analysis;
+
+namespace ZerodhaDatafeedAdapter.Services
+{
+    /// <summary>
+    /// TBS Execution Service - Manages TBS tranche execution, SL monitoring, and Stoxxo integration.
+    /// Extracted from TBSManagerWindow to separate business logic from UI.
+    /// </summary>
+    public class TBSExecutionService : INotifyPropertyChanged, IDisposable
+    {
+        #region Singleton
+
+        private static TBSExecutionService _instance;
+        private static readonly object _instanceLock = new object();
+
+        public static TBSExecutionService Instance
+        {
+            get
+            {
+                if (_instance == null)
+                {
+                    lock (_instanceLock)
+                    {
+                        if (_instance == null)
+                        {
+                            _instance = new TBSExecutionService();
+                        }
+                    }
+                }
+                return _instance;
+            }
+        }
+
+        #endregion
+
+        #region Fields
+
+        private readonly ObservableCollection<TBSExecutionState> _executionStates;
+        private readonly StoxxoService _stoxxoService;
+        private DispatcherTimer _statusTimer;
+        private DispatcherTimer _stoxxoPollingTimer;
+        private bool _optionChainReady;
+        private int _delayCountdown;
+        private int _nextTrancheId = 1;
+        private string _selectedUnderlying;
+        private DateTime? _selectedExpiry;
+        private bool _isDisposed;
+
+        private const int STATUS_TIMER_INTERVAL_MS = 1000;
+        private const int STOXXO_POLLING_INTERVAL_MS = 5000;
+        private const int FALLBACK_DELAY_SECONDS = 45; // Fallback if PriceSyncReady doesn't fire
+        private Action<string, int> _priceSyncReadyHandler;
+
+        #endregion
+
+        #region Properties
+
+        /// <summary>
+        /// Collection of execution states for all tranches
+        /// </summary>
+        public ObservableCollection<TBSExecutionState> ExecutionStates => _executionStates;
+
+        /// <summary>
+        /// Whether Option Chain has finished loading and delay has passed
+        /// </summary>
+        public bool IsOptionChainReady
+        {
+            get => _optionChainReady;
+            private set
+            {
+                if (_optionChainReady != value)
+                {
+                    _optionChainReady = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Countdown seconds remaining before Option Chain is considered ready
+        /// </summary>
+        public int DelayCountdown
+        {
+            get => _delayCountdown;
+            private set
+            {
+                if (_delayCountdown != value)
+                {
+                    _delayCountdown = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Total P&L across all Live and SquaredOff tranches (excluding missed)
+        /// </summary>
+        public decimal TotalPnL => _executionStates
+            .Where(s => s.Status == TBSExecutionStatus.Live || s.Status == TBSExecutionStatus.SquaredOff)
+            .Where(s => !s.IsMissed)
+            .Sum(s => s.CombinedPnL);
+
+        /// <summary>
+        /// Count of tranches currently Live
+        /// </summary>
+        public int LiveCount => _executionStates.Count(s => s.Status == TBSExecutionStatus.Live);
+
+        /// <summary>
+        /// Count of tranches currently in Monitoring state
+        /// </summary>
+        public int MonitoringCount => _executionStates.Count(s => s.Status == TBSExecutionStatus.Monitoring);
+
+        /// <summary>
+        /// Currently selected underlying (from Option Chain)
+        /// </summary>
+        public string SelectedUnderlying
+        {
+            get => _selectedUnderlying;
+            set
+            {
+                if (_selectedUnderlying != value)
+                {
+                    _selectedUnderlying = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Currently selected expiry (from Option Chain)
+        /// </summary>
+        public DateTime? SelectedExpiry
+        {
+            get => _selectedExpiry;
+            set
+            {
+                if (_selectedExpiry != value)
+                {
+                    _selectedExpiry = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        #endregion
+
+        #region Events
+
+        public event PropertyChangedEventHandler PropertyChanged;
+        public event EventHandler<TBSExecutionState> StateChanged;
+        public event EventHandler<string> StatusMessageChanged;
+        public event EventHandler SummaryUpdated;
+
+        #endregion
+
+        #region Constructor
+
+        private TBSExecutionService()
+        {
+            _executionStates = new ObservableCollection<TBSExecutionState>();
+            _stoxxoService = StoxxoService.Instance;
+            _delayCountdown = FALLBACK_DELAY_SECONDS;
+
+            // Subscribe to PriceSyncReady event for event-driven initialization
+            SubscribeToPriceSyncReady();
+
+            TBSLogger.Info("[TBSExecutionService] Initialized");
+        }
+
+        /// <summary>
+        /// Subscribe to MarketAnalyzerLogic's PriceSyncReady event.
+        /// This replaces the hardcoded 45-second delay with event-driven initialization.
+        /// </summary>
+        private void SubscribeToPriceSyncReady()
+        {
+            _priceSyncReadyHandler = OnPriceSyncReady;
+            MarketAnalyzerLogic.Instance.PriceSyncReady += _priceSyncReadyHandler;
+            TBSLogger.Info("[TBSExecutionService] Subscribed to PriceSyncReady event");
+        }
+
+        /// <summary>
+        /// Handler for PriceSyncReady event - marks Option Chain as ready immediately.
+        /// </summary>
+        private void OnPriceSyncReady(string underlying, int priceCount)
+        {
+            if (_optionChainReady) return; // Already ready
+
+            TBSLogger.Info($"[TBSExecutionService] PriceSyncReady received: {underlying} with {priceCount} prices");
+
+            // Mark as ready immediately - no more waiting!
+            DelayCountdown = 0;
+            IsOptionChainReady = true;
+
+            TBSLogger.Info("[TBSExecutionService] Option Chain marked ready via PriceSyncReady event");
+        }
+
+        #endregion
+
+        #region State Initialization
+
+        /// <summary>
+        /// Initialize execution states from configuration
+        /// </summary>
+        /// <param name="underlying">Filter by underlying (null for all)</param>
+        /// <param name="dte">Filter by DTE (null for all)</param>
+        public void InitializeExecutionStates(string underlying, int? dte)
+        {
+            _executionStates.Clear();
+            _nextTrancheId = 1;
+
+            var configs = TBSConfigurationService.Instance.GetConfigurations(underlying, dte);
+
+            // ALWAYS use real system time for TBS status logic
+            var isSimulationActive = SimulationService.Instance.IsSimulationActive;
+            var now = DateTime.Now.TimeOfDay;
+
+            foreach (var config in configs)
+            {
+                var state = CreateExecutionState(config, now, isSimulationActive);
+                _executionStates.Add(state);
+            }
+
+            OnSummaryUpdated();
+            TBSLogger.Info($"[TBSExecutionService] Initialized {_executionStates.Count} tranches");
+        }
+
+        private TBSExecutionState CreateExecutionState(TBSConfigEntry config, TimeSpan now, bool isSimulationActive)
+        {
+            int lotSize = SymbolHelper.GetLotSize(config.Underlying);
+
+            var state = new TBSExecutionState
+            {
+                Config = config,
+                TrancheId = _nextTrancheId++,
+                LotSize = lotSize,
+                Quantity = config.Quantity,
+                IndividualSLPercent = config.IndividualSL,
+                CombinedSLPercent = config.CombinedSL,
+                TargetPercent = config.TargetPercent,
+                ProfitCondition = config.ProfitCondition,
+                ConfigExitTime = config.ExitTime,
+                HedgeAction = config.HedgeAction ?? "exit_both"
+            };
+
+            // Initialize legs with lot size and quantity
+            state.Legs.Add(new TBSLegState
+            {
+                OptionType = "CE",
+                Quantity = config.Quantity,
+                LotSize = lotSize
+            });
+            state.Legs.Add(new TBSLegState
+            {
+                OptionType = "PE",
+                Quantity = config.Quantity,
+                LotSize = lotSize
+            });
+
+            // Always populate ATM strike for all tranches (so they're ready)
+            UpdateStrikeForState(state);
+
+            // Determine initial status based on time
+            InitializeTrancheStatus(state, config, now, isSimulationActive);
+
+            return state;
+        }
+
+        private void InitializeTrancheStatus(TBSExecutionState state, TBSConfigEntry config, TimeSpan now, bool isSimulationActive)
+        {
+            var entryTime = config.EntryTime;
+            var timeSinceEntry = now - entryTime;
+
+            if (timeSinceEntry.TotalMinutes > 1)
+            {
+                // Entry time passed more than 1 minute ago - this tranche was MISSED
+                state.Status = TBSExecutionStatus.Idle;
+                state.IsMissed = true;
+                state.Message = $"Missed (entry was at {entryTime:hh\\:mm\\:ss})";
+                TBSLogger.Info($"Tranche #{state.TrancheId} {config.EntryTime:hh\\:mm\\:ss} MISSED - initialized after entry time passed");
+            }
+            else
+            {
+                // Entry time is in the future or within monitoring window
+                state.UpdateStatusBasedOnTime(now, skipExitTimeCheck: isSimulationActive);
+
+                // If status went to Live during initialization, it means entry "just passed"
+                if (state.Status == TBSExecutionStatus.Live && !state.StrikeLocked)
+                {
+                    state.Status = TBSExecutionStatus.Idle;
+                    state.IsMissed = true;
+                    state.Message = $"Missed (entry just passed at {entryTime:hh\\:mm\\:ss})";
+                    TBSLogger.Info($"Tranche #{state.TrancheId} {config.EntryTime:hh\\:mm\\:ss} Entry just passed - marking as MISSED");
+                }
+            }
+
+            // For tranches that are SquaredOff (past exit time), mark as historical
+            if (state.Status == TBSExecutionStatus.SquaredOff)
+            {
+                state.Message = "Missed (initialized after exit time)";
+            }
+        }
+
+        #endregion
+
+        #region Timer Management
+
+        /// <summary>
+        /// Start all monitoring timers
+        /// </summary>
+        public void StartMonitoring()
+        {
+            StartStatusTimer();
+            StartStoxxoPollingTimer();
+            TBSLogger.Info("[TBSExecutionService] Monitoring started");
+        }
+
+        /// <summary>
+        /// Stop all monitoring timers
+        /// </summary>
+        public void StopMonitoring()
+        {
+            StopStatusTimer();
+            StopStoxxoPollingTimer();
+            TBSLogger.Info("[TBSExecutionService] Monitoring stopped");
+        }
+
+        private void StartStatusTimer()
+        {
+            if (_statusTimer != null) return;
+
+            _statusTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(STATUS_TIMER_INTERVAL_MS)
+            };
+            _statusTimer.Tick += OnStatusTimerTick;
+            _statusTimer.Start();
+        }
+
+        private void StopStatusTimer()
+        {
+            if (_statusTimer != null)
+            {
+                _statusTimer.Stop();
+                _statusTimer.Tick -= OnStatusTimerTick;
+                _statusTimer = null;
+            }
+        }
+
+        private void StartStoxxoPollingTimer()
+        {
+            if (_stoxxoPollingTimer != null) return;
+
+            _stoxxoPollingTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(STOXXO_POLLING_INTERVAL_MS)
+            };
+            _stoxxoPollingTimer.Tick += OnStoxxoPollingTimerTick;
+            _stoxxoPollingTimer.Start();
+            TBSLogger.Info("[TBSExecutionService] Stoxxo polling timer started");
+        }
+
+        private void StopStoxxoPollingTimer()
+        {
+            if (_stoxxoPollingTimer != null)
+            {
+                _stoxxoPollingTimer.Stop();
+                _stoxxoPollingTimer.Tick -= OnStoxxoPollingTimerTick;
+                _stoxxoPollingTimer = null;
+            }
+        }
+
+        #endregion
+
+        #region Status Timer Logic
+
+        private void OnStatusTimerTick(object sender, EventArgs e)
+        {
+            if (!_optionChainReady) return;
+
+            var isSimulationActive = SimulationService.Instance.IsSimulationActive;
+            var now = DateTime.Now.TimeOfDay;
+
+            foreach (var state in _executionStates)
+            {
+                ProcessTrancheStatus(state, now, isSimulationActive);
+            }
+
+            OnSummaryUpdated();
+        }
+
+        private void ProcessTrancheStatus(TBSExecutionState state, TimeSpan now, bool isSimulationActive)
+        {
+            var oldStatus = state.Status;
+            bool statusChanged = state.UpdateStatusBasedOnTime(now, skipExitTimeCheck: isSimulationActive);
+
+            if (statusChanged)
+            {
+                TBSLogger.LogStatusTransition(state.TrancheId, oldStatus.ToString(), state.Status.ToString(), $"StrikeLocked={state.StrikeLocked}");
+                OnStateChanged(state);
+            }
+
+            // When entering Monitoring state, fetch ATM strike
+            if (oldStatus != TBSExecutionStatus.Monitoring && state.Status == TBSExecutionStatus.Monitoring)
+            {
+                TBSLogger.Info($"Tranche #{state.TrancheId} Entered Monitoring - fetching ATM strike");
+                UpdateStrikeForState(state);
+            }
+
+            // While in Monitoring, keep updating ATM strike
+            if (state.Status == TBSExecutionStatus.Monitoring && !state.StrikeLocked)
+            {
+                UpdateStrikeForState(state);
+            }
+
+            // Stoxxo: Place order at 5 seconds before entry
+            ProcessStoxxoOrderPlacement(state, now);
+
+            // When going Live, lock strike and enter positions
+            ProcessGoingLive(state, oldStatus);
+
+            // Stoxxo: Reconcile legs 10 seconds after going Live
+            ProcessStoxxoReconciliation(state);
+
+            // While Live, check for SL conditions
+            if (state.Status == TBSExecutionStatus.Live && state.StrikeLocked)
+            {
+                CheckSLConditions(state);
+            }
+
+            // Stoxxo: Send SL modification when SL-to-cost is applied
+            if (state.SLToCostApplied && !state.StoxxoSLModified && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
+            {
+                ModifyStoxxoSLAsync(state);
+            }
+
+            // When going SquaredOff, record exit details
+            ProcessGoingSquaredOff(state, oldStatus);
+
+            // Update combined P&L from legs
+            state.UpdateCombinedPnL();
+        }
+
+        private void ProcessStoxxoOrderPlacement(TBSExecutionState state, TimeSpan now)
+        {
+            if (state.Status != TBSExecutionStatus.Monitoring || state.StoxxoOrderPlaced || state.SkippedDueToProfitCondition)
+                return;
+
+            var timeDiff = state.Config.EntryTime - now;
+            if (timeDiff.TotalSeconds <= 5 && timeDiff.TotalSeconds > 0)
+            {
+                if (state.ProfitCondition && !ShouldDeployTranche(state))
+                {
+                    TBSLogger.Warn($"Tranche #{state.TrancheId} ProfitCondition not met 5s before entry - skipping");
+                    state.SkippedDueToProfitCondition = true;
+                    state.Status = TBSExecutionStatus.Skipped;
+                    state.Message = "Skipped: Prior tranches P&L <= 0";
+                }
+                else
+                {
+                    PlaceStoxxoOrderAsync(state);
+                }
+            }
+        }
+
+        private void ProcessGoingLive(TBSExecutionState state, TBSExecutionStatus oldStatus)
+        {
+            if (oldStatus != TBSExecutionStatus.Monitoring || state.Status != TBSExecutionStatus.Live)
+                return;
+
+            if (state.SkippedDueToProfitCondition)
+            {
+                state.Status = TBSExecutionStatus.Skipped;
+            }
+            else
+            {
+                TBSLogger.Info($"Tranche #{state.TrancheId} Going Live - locking strike");
+                LockStrikeAndEnter(state);
+            }
+        }
+
+        private void ProcessStoxxoReconciliation(TBSExecutionState state)
+        {
+            if (state.Status != TBSExecutionStatus.Live || !state.StoxxoOrderPlaced || state.StoxxoReconciled)
+                return;
+
+            if (state.ActualEntryTime.HasValue)
+            {
+                var elapsed = DateTime.Now - state.ActualEntryTime.Value;
+                if (elapsed.TotalSeconds >= 10)
+                {
+                    ReconcileStoxxoLegsAsync(state);
+                }
+            }
+        }
+
+        private void ProcessGoingSquaredOff(TBSExecutionState state, TBSExecutionStatus oldStatus)
+        {
+            if (oldStatus != TBSExecutionStatus.Live || state.Status != TBSExecutionStatus.SquaredOff)
+                return;
+
+            TBSLogger.Info($"Tranche #{state.TrancheId} Going SquaredOff - recording exit prices");
+            RecordExitPrices(state);
+
+            if (!state.StoxxoExitCalled && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
+            {
+                ExitStoxxoOrderAsync(state);
+            }
+        }
+
+        #endregion
+
+        #region SL/Target Monitoring
+
+        private void CheckSLConditions(TBSExecutionState state)
+        {
+            bool anyLegHitSLThisTick = false;
+
+            foreach (var leg in state.Legs)
+            {
+                if (leg.Status != TBSLegStatus.Active) continue;
+
+                // Update current price from PriceHub
+                decimal currentPrice = GetCurrentPrice(leg.Symbol);
+                if (currentPrice > 0)
+                {
+                    leg.CurrentPrice = currentPrice;
+                }
+
+                // Check individual leg SL
+                if (leg.SLPrice > 0 && leg.CurrentPrice >= leg.SLPrice)
+                {
+                    TBSLogger.Warn($"Tranche #{state.TrancheId} {leg.OptionType} SL TRIGGERED");
+                    leg.Status = TBSLegStatus.SLHit;
+                    leg.ExitPrice = leg.CurrentPrice;
+                    leg.ExitTime = DateTime.Now;
+                    leg.ExitReason = $"SL Hit @ {leg.CurrentPrice:F2}";
+                    anyLegHitSLThisTick = true;
+                }
+            }
+
+            // Handle hedge_to_cost
+            if (anyLegHitSLThisTick && !state.SLToCostApplied &&
+                state.HedgeAction?.Contains("hedge_to_cost") == true)
+            {
+                foreach (var leg in state.Legs.Where(l => l.Status == TBSLegStatus.Active))
+                {
+                    leg.SLPrice = leg.EntryPrice;
+                    TBSLogger.Info($"Tranche #{state.TrancheId} HEDGE_TO_COST: {leg.OptionType} SL moved to cost");
+                }
+                state.SLToCostApplied = true;
+                state.Message = "SL moved to cost (hedge)";
+            }
+
+            // Check combined SL
+            CheckCombinedSL(state);
+
+            // Check Target
+            CheckTarget(state);
+
+            // If all legs are closed, mark state as SquaredOff
+            if (state.AllLegsClosed())
+            {
+                state.Status = TBSExecutionStatus.SquaredOff;
+                state.Message = state.TargetHit ? "All legs exited (Target)" : "All legs exited (SL)";
+                state.ExitTime = DateTime.Now;
+            }
+        }
+
+        private void CheckCombinedSL(TBSExecutionState state)
+        {
+            if (state.CombinedSLPercent <= 0) return;
+
+            decimal entryPremium = state.Legs.Sum(l => l.EntryPrice);
+            decimal currentPremium = state.Legs.Sum(l => l.CurrentPrice);
+
+            if (entryPremium > 0)
+            {
+                decimal combinedSLPrice = entryPremium * (1 + state.CombinedSLPercent);
+                if (currentPremium >= combinedSLPrice)
+                {
+                    TBSLogger.Warn($"Tranche #{state.TrancheId} Combined SL HIT");
+                    foreach (var leg in state.Legs.Where(l => l.Status == TBSLegStatus.Active))
+                    {
+                        leg.Status = TBSLegStatus.SLHit;
+                        leg.ExitPrice = leg.CurrentPrice;
+                        leg.ExitTime = DateTime.Now;
+                        leg.ExitReason = "Combined SL Hit";
+                    }
+                }
+            }
+        }
+
+        private void CheckTarget(TBSExecutionState state)
+        {
+            if (state.TargetPercent <= 0 || state.TargetProfitThreshold <= 0 || state.TargetHit)
+                return;
+
+            int activeLegsCount = state.Legs.Count(l => l.Status == TBSLegStatus.Active);
+            if (activeLegsCount != 2) return;
+
+            state.UpdateCombinedPnL();
+
+            if (state.CombinedPnL >= state.TargetProfitThreshold)
+            {
+                TBSLogger.Info($"Tranche #{state.TrancheId} TARGET HIT: P&L={state.CombinedPnL:F2}");
+                foreach (var leg in state.Legs.Where(l => l.Status == TBSLegStatus.Active))
+                {
+                    leg.Status = TBSLegStatus.TargetHit;
+                    leg.ExitPrice = leg.CurrentPrice;
+                    leg.ExitTime = DateTime.Now;
+                    leg.ExitReason = $"Target Hit @ P&L={state.CombinedPnL:F2}";
+                }
+                state.TargetHit = true;
+                state.Message = $"Target hit @ P&L {state.CombinedPnL:F2}";
+
+                if (!state.StoxxoExitCalled && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
+                {
+                    ExitStoxxoOrderAsync(state);
+                }
+            }
+        }
+
+        #endregion
+
+        #region Strike and Price Management
+
+        private void UpdateStrikeForState(TBSExecutionState state)
+        {
+            if (state.StrikeLocked) return;
+
+            var underlying = state.Config?.Underlying;
+            if (string.IsNullOrEmpty(underlying)) return;
+
+            decimal atmStrike = MarketAnalyzerLogic.Instance.GetATMStrike(underlying);
+            if (atmStrike <= 0) return;
+
+            if (state.Strike != atmStrike)
+            {
+                state.Strike = atmStrike;
+                UpdateLegSymbols(state, underlying, atmStrike);
+            }
+        }
+
+        private void UpdateLegSymbols(TBSExecutionState state, string underlying, decimal strike)
+        {
+            var expiry = MarketAnalyzerLogic.Instance.SelectedExpiry ?? _selectedExpiry ?? FindNearestExpiry(underlying, state.Config?.DTE ?? 0);
+            if (!expiry.HasValue) return;
+
+            bool isMonthlyExpiry = MarketAnalyzerLogic.Instance.SelectedIsMonthlyExpiry;
+            if (MarketAnalyzerLogic.Instance.SelectedUnderlying != underlying)
+            {
+                var expiries = MarketAnalyzerLogic.Instance.GetCachedExpiries(underlying);
+                isMonthlyExpiry = SymbolHelper.IsMonthlyExpiry(expiry.Value, expiries);
+            }
+
+            string ceSymbol = SymbolHelper.BuildOptionSymbol(underlying, expiry.Value, strike, "CE", isMonthlyExpiry);
+            string peSymbol = SymbolHelper.BuildOptionSymbol(underlying, expiry.Value, strike, "PE", isMonthlyExpiry);
+
+            var ceLeg = state.Legs.FirstOrDefault(l => l.OptionType == "CE");
+            var peLeg = state.Legs.FirstOrDefault(l => l.OptionType == "PE");
+
+            if (ceLeg != null) ceLeg.Symbol = ceSymbol;
+            if (peLeg != null) peLeg.Symbol = peSymbol;
+        }
+
+        private void LockStrikeAndEnter(TBSExecutionState state)
+        {
+            state.StrikeLocked = true;
+            state.ActualEntryTime = DateTime.Now;
+
+            foreach (var leg in state.Legs)
+            {
+                decimal price = GetCurrentPrice(leg.Symbol);
+                if (price > 0)
+                {
+                    leg.EntryPrice = price;
+                    leg.CurrentPrice = price;
+                    leg.Status = TBSLegStatus.Active;
+
+                    if (state.IndividualSLPercent > 0)
+                    {
+                        leg.SLPrice = leg.EntryPrice * (1 + state.IndividualSLPercent);
+                    }
+                }
+            }
+
+            // Calculate target threshold
+            var ceLeg = state.Legs.FirstOrDefault(l => l.OptionType == "CE");
+            var peLeg = state.Legs.FirstOrDefault(l => l.OptionType == "PE");
+            if (ceLeg != null && peLeg != null && ceLeg.EntryPrice > 0 && peLeg.EntryPrice > 0)
+            {
+                state.CombinedEntryPremium = ceLeg.EntryPrice + peLeg.EntryPrice;
+                if (state.TargetPercent > 0)
+                {
+                    state.TargetProfitThreshold = state.CombinedEntryPremium * state.TargetPercent * state.Quantity * state.LotSize;
+                }
+            }
+
+            TBSLogger.Info($"Tranche #{state.TrancheId} Locked strike {state.Strike}");
+        }
+
+        private void RecordExitPrices(TBSExecutionState state)
+        {
+            foreach (var leg in state.Legs)
+            {
+                if (leg.Status == TBSLegStatus.Active)
+                {
+                    decimal exitPrice = GetCurrentPrice(leg.Symbol);
+                    if (exitPrice > 0)
+                    {
+                        leg.ExitPrice = exitPrice;
+                        leg.ExitTime = DateTime.Now;
+                        leg.ExitReason = "Time-based exit";
+                        leg.Status = TBSLegStatus.Exited;
+                    }
+                }
+            }
+        }
+
+        private DateTime? FindNearestExpiry(string underlying, int targetDTE)
+        {
+            var today = DateTime.Today;
+            var targetDate = today.AddDays(targetDTE);
+            while (targetDate.DayOfWeek != DayOfWeek.Thursday)
+                targetDate = targetDate.AddDays(1);
+            return targetDate;
+        }
+
+        private decimal GetCurrentPrice(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol)) return 0;
+            return MarketAnalyzerLogic.Instance.GetPrice(symbol);
+        }
+
+        #endregion
+
+        #region Profit Condition
+
+        private bool ShouldDeployTranche(TBSExecutionState state)
+        {
+            if (!state.ProfitCondition) return true;
+
+            var priorDeployedTranches = _executionStates
+                .Where(t => t.TrancheId < state.TrancheId)
+                .Where(t => t.StoxxoOrderPlaced || t.Status == TBSExecutionStatus.Live || t.Status == TBSExecutionStatus.SquaredOff)
+                .Where(t => !t.SkippedDueToProfitCondition)
+                .Where(t => !t.IsMissed)
+                .ToList();
+
+            if (priorDeployedTranches.Count == 0) return true;
+
+            decimal cumulativePnL = priorDeployedTranches.Sum(t => t.CombinedPnL);
+            return cumulativePnL > 0;
+        }
+
+        #endregion
+
+        #region Stoxxo Integration
+
+        private async void OnStoxxoPollingTimerTick(object sender, EventArgs e)
+        {
+            try
+            {
+                foreach (var state in _executionStates.Where(s => !string.IsNullOrEmpty(s.StoxxoPortfolioName)))
+                {
+                    if (state.Status != TBSExecutionStatus.Live && state.Status != TBSExecutionStatus.SquaredOff)
+                        continue;
+
+                    try
+                    {
+                        var status = await _stoxxoService.GetPortfolioStatus(state.StoxxoPortfolioName);
+                        if (status != StoxxoPortfolioStatus.Unknown)
+                        {
+                            state.StoxxoStatus = status.ToString();
+                        }
+
+                        var mtm = await _stoxxoService.GetPortfolioMTM(state.StoxxoPortfolioName);
+                        state.StoxxoPnL = mtm;
+
+                        if (state.StoxxoReconciled)
+                        {
+                            await UpdateStoxxoLegDetails(state);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        TBSLogger.Debug($"Tranche #{state.TrancheId} Stoxxo poll error: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                TBSLogger.Error($"Stoxxo polling error: {ex.Message}");
+            }
+        }
+
+        private async void PlaceStoxxoOrderAsync(TBSExecutionState state)
+        {
+            try
+            {
+                state.StoxxoOrderPlaced = true;
+
+                var underlying = state.Config?.Underlying ?? "NIFTY";
+                int lots = state.Quantity;
+
+                string combinedLoss = state.CombinedSLPercent > 0
+                    ? StoxxoHelper.FormatPercentage(state.CombinedSLPercent * 100)
+                    : "0";
+
+                string legSL = state.IndividualSLPercent > 0
+                    ? StoxxoHelper.FormatPercentage(state.IndividualSLPercent * 100)
+                    : "0";
+
+                int slToCost = state.HedgeAction?.Contains("hedge_to_cost") == true ? 1 : 0;
+                int startSeconds = StoxxoHelper.TimeSpanToSeconds(state.Config.EntryTime);
+
+                string portLegs = StoxxoHelper.BuildPortLegs(
+                    lots: lots,
+                    slPercent: state.IndividualSLPercent,
+                    strike: "ATM"
+                );
+
+                var result = await _stoxxoService.PlaceMultiLegOrderAdv(
+                    underlying, lots, combinedLoss, legSL, slToCost, startSeconds,
+                    endSeconds: 0, sqOffSeconds: 0, portLegs: portLegs);
+
+                if (!string.IsNullOrEmpty(result))
+                {
+                    state.StoxxoPortfolioName = result;
+                    state.Message = $"Stoxxo order placed: {result}";
+                    TBSLogger.Info($"Tranche #{state.TrancheId} Stoxxo order placed: {result}");
+                }
+                else
+                {
+                    state.Message = "Stoxxo order failed";
+                }
+            }
+            catch (Exception ex)
+            {
+                TBSLogger.Error($"Tranche #{state.TrancheId} PlaceStoxxoOrderAsync error: {ex.Message}");
+                state.Message = $"Stoxxo error: {ex.Message}";
+            }
+        }
+
+        private async void ReconcileStoxxoLegsAsync(TBSExecutionState state)
+        {
+            try
+            {
+                state.StoxxoReconciled = true;
+
+                var legs = await _stoxxoService.GetUserLegs(state.StoxxoPortfolioName, onlyActiveLegs: true);
+                if (legs == null || legs.Count == 0) return;
+
+                MapStoxxoLegsToInternal(state, legs);
+                TBSLogger.Info($"Tranche #{state.TrancheId} Reconciled {legs.Count} Stoxxo legs");
+            }
+            catch (Exception ex)
+            {
+                TBSLogger.Error($"Tranche #{state.TrancheId} ReconcileStoxxoLegsAsync error: {ex.Message}");
+            }
+        }
+
+        private void MapStoxxoLegsToInternal(TBSExecutionState state, List<StoxxoUserLeg> stoxxoLegs)
+        {
+            var sellLegs = stoxxoLegs.Where(l => l.Txn?.Equals("Sell", StringComparison.OrdinalIgnoreCase) == true).ToList();
+
+            var ceLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("CE", StringComparison.OrdinalIgnoreCase) == true);
+            var peLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("PE", StringComparison.OrdinalIgnoreCase) == true);
+
+            foreach (var leg in state.Legs)
+            {
+                var stoxxoLeg = leg.OptionType == "CE" ? ceLeg : peLeg;
+                if (stoxxoLeg != null)
+                {
+                    leg.StoxxoLegID = stoxxoLeg.LegID;
+                    leg.StoxxoQty = stoxxoLeg.EntryFilledQty;
+                    leg.StoxxoEntryPrice = stoxxoLeg.AvgEntryPrice;
+                    leg.StoxxoExitPrice = stoxxoLeg.AvgExitPrice;
+                    leg.StoxxoStatus = stoxxoLeg.Status;
+                }
+            }
+        }
+
+        private async Task UpdateStoxxoLegDetails(TBSExecutionState state)
+        {
+            try
+            {
+                var legs = await _stoxxoService.GetUserLegs(state.StoxxoPortfolioName, onlyActiveLegs: false);
+                if (legs == null || legs.Count == 0) return;
+
+                var sellLegs = legs.Where(l => l.Txn?.Equals("Sell", StringComparison.OrdinalIgnoreCase) == true).ToList();
+
+                foreach (var leg in state.Legs)
+                {
+                    var stoxxoLeg = sellLegs.FirstOrDefault(l =>
+                        l.Instrument?.Equals(leg.OptionType, StringComparison.OrdinalIgnoreCase) == true);
+
+                    if (stoxxoLeg != null)
+                    {
+                        leg.StoxxoEntryPrice = stoxxoLeg.AvgEntryPrice;
+                        leg.StoxxoExitPrice = stoxxoLeg.AvgExitPrice;
+                        leg.StoxxoStatus = stoxxoLeg.Status;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                TBSLogger.Debug($"Tranche #{state.TrancheId} UpdateStoxxoLegDetails error: {ex.Message}");
+            }
+        }
+
+        private async void ModifyStoxxoSLAsync(TBSExecutionState state)
+        {
+            try
+            {
+                state.StoxxoSLModified = true;
+
+                foreach (var leg in state.Legs.Where(l => l.Status == TBSLegStatus.Active))
+                {
+                    string legFilter = $"INS:{leg.OptionType}";
+                    string slValue = leg.EntryPrice.ToString("F2");
+
+                    var success = await _stoxxoService.ModifyPortfolio(
+                        state.StoxxoPortfolioName, "LegSL", slValue, legFilter);
+
+                    if (success)
+                    {
+                        TBSLogger.Info($"Tranche #{state.TrancheId} Stoxxo SL modified for {leg.OptionType}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                TBSLogger.Error($"Tranche #{state.TrancheId} ModifyStoxxoSLAsync error: {ex.Message}");
+            }
+        }
+
+        private async void ExitStoxxoOrderAsync(TBSExecutionState state)
+        {
+            try
+            {
+                state.StoxxoExitCalled = true;
+
+                var success = await _stoxxoService.ExitMultiLegOrder(state.StoxxoPortfolioName);
+
+                if (success)
+                {
+                    state.Message = "Stoxxo exit sent";
+                    TBSLogger.Info($"Tranche #{state.TrancheId} Stoxxo exit successful");
+                }
+                else
+                {
+                    state.Message = "Stoxxo exit failed";
+                }
+            }
+            catch (Exception ex)
+            {
+                TBSLogger.Error($"Tranche #{state.TrancheId} ExitStoxxoOrderAsync error: {ex.Message}");
+                state.Message = $"Stoxxo exit error: {ex.Message}";
+            }
+        }
+
+        #endregion
+
+        #region Option Chain Integration
+
+        /// <summary>
+        /// Called when Option Chain is ready (delay passed)
+        /// </summary>
+        public void OnOptionChainReady()
+        {
+            IsOptionChainReady = true;
+            TBSLogger.Info("[TBSExecutionService] Option Chain ready");
+        }
+
+        /// <summary>
+        /// Called when Option Chain generates options
+        /// </summary>
+        public void OnOptionsGenerated(string underlying, DateTime? expiry)
+        {
+            if (string.IsNullOrEmpty(underlying) || !expiry.HasValue) return;
+
+            SelectedUnderlying = underlying;
+            SelectedExpiry = expiry;
+
+            TBSLogger.Info($"[TBSExecutionService] Options generated: {underlying}, expiry={expiry.Value:dd-MMM-yyyy}");
+        }
+
+        #endregion
+
+        #region INotifyPropertyChanged
+
+        protected void OnPropertyChanged([CallerMemberName] string name = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        }
+
+        protected void OnStateChanged(TBSExecutionState state)
+        {
+            StateChanged?.Invoke(this, state);
+        }
+
+        protected void OnSummaryUpdated()
+        {
+            OnPropertyChanged(nameof(TotalPnL));
+            OnPropertyChanged(nameof(LiveCount));
+            OnPropertyChanged(nameof(MonitoringCount));
+            SummaryUpdated?.Invoke(this, EventArgs.Empty);
+        }
+
+        #endregion
+
+        #region IDisposable
+
+        public void Dispose()
+        {
+            if (_isDisposed) return;
+            _isDisposed = true;
+
+            // Unsubscribe from PriceSyncReady event
+            if (_priceSyncReadyHandler != null)
+            {
+                MarketAnalyzerLogic.Instance.PriceSyncReady -= _priceSyncReadyHandler;
+                _priceSyncReadyHandler = null;
+            }
+
+            StopMonitoring();
+            _executionStates.Clear();
+
+            TBSLogger.Info("[TBSExecutionService] Disposed");
+        }
+
+        #endregion
+    }
+}
