@@ -12,6 +12,7 @@ using System.Xml.Linq;
 using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Tools;
 using ZerodhaDatafeedAdapter;
+using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.SyntheticInstruments;
@@ -1030,7 +1031,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                         {
                             var (row, optionType) = mapping;
                             var (price, timestamp) = kvp.Value;
-                            string timeStr = timestamp.ToString("HH:mm:ss");
+                            // Clamp time to 15:30 if outside market hours (shows last valid market time)
+                            var displayTime = DateTimeHelper.ClampToMarketHours(timestamp);
+                            string timeStr = displayTime.ToString("HH:mm:ss");
 
                             if (optionType == "CE")
                             {

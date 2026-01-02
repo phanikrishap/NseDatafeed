@@ -213,5 +213,57 @@ namespace ZerodhaDatafeedAdapter.Helpers
         }
 
         #endregion
+
+        #region Strike Extraction
+
+        /// <summary>
+        /// Extract strike price from an option symbol.
+        /// Works with Zerodha format options (e.g., NIFTY25JAN24700CE, SENSEX2610185000PE).
+        /// </summary>
+        /// <param name="symbol">The option symbol</param>
+        /// <param name="strike">Output strike price if found</param>
+        /// <returns>True if strike was successfully extracted</returns>
+        public static bool TryExtractStrike(string symbol, out decimal strike)
+        {
+            strike = 0;
+            if (string.IsNullOrEmpty(symbol)) return false;
+
+            try
+            {
+                // Find option type suffix (CE or PE)
+                int optTypeIdx = symbol.LastIndexOf("CE");
+                if (optTypeIdx < 0) optTypeIdx = symbol.LastIndexOf("PE");
+                if (optTypeIdx < 0) return false;
+
+                // Extract numeric characters before the option type
+                string strikeStr = "";
+                for (int i = optTypeIdx - 1; i >= 0 && char.IsDigit(symbol[i]); i--)
+                {
+                    strikeStr = symbol[i] + strikeStr;
+                }
+
+                return decimal.TryParse(strikeStr, out strike);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Extract the option type (CE or PE) from an option symbol.
+        /// </summary>
+        /// <param name="symbol">The option symbol</param>
+        /// <returns>"CE", "PE", or null if not found</returns>
+        public static string GetOptionType(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol)) return null;
+
+            if (symbol.EndsWith("CE")) return "CE";
+            if (symbol.EndsWith("PE")) return "PE";
+            return null;
+        }
+
+        #endregion
     }
 }

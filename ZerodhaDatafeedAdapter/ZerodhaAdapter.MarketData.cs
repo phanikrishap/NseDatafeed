@@ -2,7 +2,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using System;
 using System.Globalization;
-using System.Threading;
+using System.Threading.Tasks;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaAPI.Zerodha.Websockets;
 using ZerodhaDatafeedAdapter.Helpers;
@@ -153,13 +153,13 @@ namespace ZerodhaDatafeedAdapter
                 string capturedOriginalSymbol = originalSymbol;
                 MarketType capturedMarketType = mt;
 
-                // Use dedicated Thread to bypass thread pool starvation
-                var thread = new Thread(() =>
+                // Use Task.Run for async WebSocket subscription
+                _ = Task.Run(async () =>
                 {
                     try
                     {
-                        Logger.Debug($"[SUBSCRIBE] Thread STARTED for {capturedName}");
-                        Connector.Instance.SubscribeToTicks(
+                        Logger.Debug($"[SUBSCRIBE] Task STARTED for {capturedName}");
+                        await Connector.Instance.SubscribeToTicks(
                             capturedNativeSymbol,
                             capturedMarketType,
                             capturedOriginalSymbol,
@@ -169,7 +169,7 @@ namespace ZerodhaDatafeedAdapter
                                 lock (ZerodhaAdapter._lockLiveSymbol)
                                     return !this._marketLiveDataSymbols.Contains(capturedNativeSymbol);
                             }))
-                        ).GetAwaiter().GetResult();
+                        );
                         Logger.Debug($"[SUBSCRIBE] SubscribeToTicks completed for {capturedName}");
                     }
                     catch (Exception ex)
@@ -186,10 +186,7 @@ namespace ZerodhaDatafeedAdapter
                                 $"({this._options.Name}) ZerodhaAdapter.SubscribeToTicks Exception={ex}"));
                     }
                 });
-                thread.IsBackground = true;
-                thread.Name = $"WS_{capturedName}";
-                thread.Start();
-                Logger.Debug($"[SUBSCRIBE] Thread launched for {capturedName}, ThreadId={thread.ManagedThreadId}");
+                Logger.Debug($"[SUBSCRIBE] Task launched for {capturedName}");
             }
         }
 

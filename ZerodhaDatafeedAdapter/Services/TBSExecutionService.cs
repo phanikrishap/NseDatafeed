@@ -10,6 +10,7 @@ using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
+using ZerodhaDatafeedAdapter.Services.TBS;
 
 namespace ZerodhaDatafeedAdapter.Services
 {
@@ -47,7 +48,7 @@ namespace ZerodhaDatafeedAdapter.Services
         #region Fields
 
         private readonly ObservableCollection<TBSExecutionState> _executionStates;
-        private readonly StoxxoService _stoxxoService;
+        private readonly StoxxoBridgeManager _stoxxoBridgeManager;
         private DispatcherTimer _statusTimer;
         private DispatcherTimer _stoxxoPollingTimer;
         private bool _optionChainReady;
@@ -169,7 +170,7 @@ namespace ZerodhaDatafeedAdapter.Services
         private TBSExecutionService()
         {
             _executionStates = new ObservableCollection<TBSExecutionState>();
-            _stoxxoService = StoxxoService.Instance;
+            _stoxxoBridgeManager = new StoxxoBridgeManager();
             _delayCountdown = FALLBACK_DELAY_SECONDS;
 
             // Subscribe to PriceSyncReady event for event-driven initialization
@@ -777,26 +778,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     if (state.Status != TBSExecutionStatus.Live && state.Status != TBSExecutionStatus.SquaredOff)
                         continue;
 
-                    try
-                    {
-                        var status = await _stoxxoService.GetPortfolioStatus(state.StoxxoPortfolioName);
-                        if (status != StoxxoPortfolioStatus.Unknown)
-                        {
-                            state.StoxxoStatus = status.ToString();
-                        }
-
-                        var mtm = await _stoxxoService.GetPortfolioMTM(state.StoxxoPortfolioName);
-                        state.StoxxoPnL = mtm;
-
-                        if (state.StoxxoReconciled)
-                        {
-                            await UpdateStoxxoLegDetails(state);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        TBSLogger.Debug($"Tranche #{state.TrancheId} Stoxxo poll error: {ex.Message}");
-                    }
+                    await _stoxxoBridgeManager.PollAndUpdateStatusAsync(state);
                 }
             }
             catch (Exception ex)
@@ -811,35 +793,12 @@ namespace ZerodhaDatafeedAdapter.Services
             {
                 state.StoxxoOrderPlaced = true;
 
-                var underlying = state.Config?.Underlying ?? "NIFTY";
-                int lots = state.Quantity;
-
-                string combinedLoss = state.CombinedSLPercent > 0
-                    ? StoxxoHelper.FormatPercentage(state.CombinedSLPercent * 100)
-                    : "0";
-
-                string legSL = state.IndividualSLPercent > 0
-                    ? StoxxoHelper.FormatPercentage(state.IndividualSLPercent * 100)
-                    : "0";
-
-                int slToCost = state.HedgeAction?.Contains("hedge_to_cost") == true ? 1 : 0;
-                int startSeconds = StoxxoHelper.TimeSpanToSeconds(state.Config.EntryTime);
-
-                string portLegs = StoxxoHelper.BuildPortLegs(
-                    lots: lots,
-                    slPercent: state.IndividualSLPercent,
-                    strike: "ATM"
-                );
-
-                var result = await _stoxxoService.PlaceMultiLegOrderAdv(
-                    underlying, lots, combinedLoss, legSL, slToCost, startSeconds,
-                    endSeconds: 0, sqOffSeconds: 0, portLegs: portLegs);
+                var result = await _stoxxoBridgeManager.PlaceOrderAsync(state);
 
                 if (!string.IsNullOrEmpty(result))
                 {
                     state.StoxxoPortfolioName = result;
                     state.Message = $"Stoxxo order placed: {result}";
-                    TBSLogger.Info($"Tranche #{state.TrancheId} Stoxxo order placed: {result}");
                 }
                 else
                 {
@@ -858,65 +817,11 @@ namespace ZerodhaDatafeedAdapter.Services
             try
             {
                 state.StoxxoReconciled = true;
-
-                var legs = await _stoxxoService.GetUserLegs(state.StoxxoPortfolioName, onlyActiveLegs: true);
-                if (legs == null || legs.Count == 0) return;
-
-                MapStoxxoLegsToInternal(state, legs);
-                TBSLogger.Info($"Tranche #{state.TrancheId} Reconciled {legs.Count} Stoxxo legs");
+                await _stoxxoBridgeManager.ReconcileLegsAsync(state);
             }
             catch (Exception ex)
             {
                 TBSLogger.Error($"Tranche #{state.TrancheId} ReconcileStoxxoLegsAsync error: {ex.Message}");
-            }
-        }
-
-        private void MapStoxxoLegsToInternal(TBSExecutionState state, List<StoxxoUserLeg> stoxxoLegs)
-        {
-            var sellLegs = stoxxoLegs.Where(l => l.Txn?.Equals("Sell", StringComparison.OrdinalIgnoreCase) == true).ToList();
-
-            var ceLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("CE", StringComparison.OrdinalIgnoreCase) == true);
-            var peLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("PE", StringComparison.OrdinalIgnoreCase) == true);
-
-            foreach (var leg in state.Legs)
-            {
-                var stoxxoLeg = leg.OptionType == "CE" ? ceLeg : peLeg;
-                if (stoxxoLeg != null)
-                {
-                    leg.StoxxoLegID = stoxxoLeg.LegID;
-                    leg.StoxxoQty = stoxxoLeg.EntryFilledQty;
-                    leg.StoxxoEntryPrice = stoxxoLeg.AvgEntryPrice;
-                    leg.StoxxoExitPrice = stoxxoLeg.AvgExitPrice;
-                    leg.StoxxoStatus = stoxxoLeg.Status;
-                }
-            }
-        }
-
-        private async Task UpdateStoxxoLegDetails(TBSExecutionState state)
-        {
-            try
-            {
-                var legs = await _stoxxoService.GetUserLegs(state.StoxxoPortfolioName, onlyActiveLegs: false);
-                if (legs == null || legs.Count == 0) return;
-
-                var sellLegs = legs.Where(l => l.Txn?.Equals("Sell", StringComparison.OrdinalIgnoreCase) == true).ToList();
-
-                foreach (var leg in state.Legs)
-                {
-                    var stoxxoLeg = sellLegs.FirstOrDefault(l =>
-                        l.Instrument?.Equals(leg.OptionType, StringComparison.OrdinalIgnoreCase) == true);
-
-                    if (stoxxoLeg != null)
-                    {
-                        leg.StoxxoEntryPrice = stoxxoLeg.AvgEntryPrice;
-                        leg.StoxxoExitPrice = stoxxoLeg.AvgExitPrice;
-                        leg.StoxxoStatus = stoxxoLeg.Status;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                TBSLogger.Debug($"Tranche #{state.TrancheId} UpdateStoxxoLegDetails error: {ex.Message}");
             }
         }
 
@@ -925,20 +830,7 @@ namespace ZerodhaDatafeedAdapter.Services
             try
             {
                 state.StoxxoSLModified = true;
-
-                foreach (var leg in state.Legs.Where(l => l.Status == TBSLegStatus.Active))
-                {
-                    string legFilter = $"INS:{leg.OptionType}";
-                    string slValue = leg.EntryPrice.ToString("F2");
-
-                    var success = await _stoxxoService.ModifyPortfolio(
-                        state.StoxxoPortfolioName, "LegSL", slValue, legFilter);
-
-                    if (success)
-                    {
-                        TBSLogger.Info($"Tranche #{state.TrancheId} Stoxxo SL modified for {leg.OptionType}");
-                    }
-                }
+                await _stoxxoBridgeManager.ModifySLToCostAsync(state);
             }
             catch (Exception ex)
             {
@@ -952,12 +844,11 @@ namespace ZerodhaDatafeedAdapter.Services
             {
                 state.StoxxoExitCalled = true;
 
-                var success = await _stoxxoService.ExitMultiLegOrder(state.StoxxoPortfolioName);
+                var success = await _stoxxoBridgeManager.ExitOrderAsync(state);
 
                 if (success)
                 {
                     state.Message = "Stoxxo exit sent";
-                    TBSLogger.Info($"Tranche #{state.TrancheId} Stoxxo exit successful");
                 }
                 else
                 {

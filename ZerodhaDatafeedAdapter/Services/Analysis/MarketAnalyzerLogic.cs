@@ -9,6 +9,7 @@ using Newtonsoft.Json;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using ZerodhaAPI.Common.Enums;
+using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 
@@ -390,6 +391,52 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         }
 
         /// <summary>
+        /// Clear all cached prices (call when switching underlyings or on new session)
+        /// </summary>
+        public void ClearPriceHub()
+        {
+            lock (_priceHubLock)
+            {
+                _priceHub.Clear();
+                _priceTimestamps.Clear();
+                _priceSyncFired = false;
+            }
+            Logger.Info("[MarketAnalyzerLogic] Price hub cleared");
+        }
+
+        /// <summary>
+        /// Remove stale prices older than specified age (for memory management)
+        /// </summary>
+        public int PruneStalePrice(TimeSpan maxAge)
+        {
+            var cutoff = DateTime.Now - maxAge;
+            var staleSymbols = new List<string>();
+
+            lock (_priceHubLock)
+            {
+                foreach (var kvp in _priceTimestamps)
+                {
+                    if (kvp.Value < cutoff)
+                    {
+                        staleSymbols.Add(kvp.Key);
+                    }
+                }
+
+                foreach (var symbol in staleSymbols)
+                {
+                    _priceHub.Remove(symbol);
+                    _priceTimestamps.Remove(symbol);
+                }
+            }
+
+            if (staleSymbols.Count > 0)
+            {
+                Logger.Debug($"[MarketAnalyzerLogic] Pruned {staleSymbols.Count} stale prices older than {maxAge.TotalMinutes:F0} minutes");
+            }
+            return staleSymbols.Count;
+        }
+
+        /// <summary>
         /// Get the current ATM strike for an underlying (as calculated by Option Chain)
         /// </summary>
         public decimal GetATMStrike(string underlying)
@@ -427,6 +474,62 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private MarketAnalyzerLogic()
         {
             Logger.Info("[MarketAnalyzerLogic] Constructor: Initializing singleton instance");
+        }
+
+        /// <summary>
+        /// Reset all state for a new trading session.
+        /// Call this when underlying changes or at start of new trading day.
+        /// </summary>
+        public void Reset()
+        {
+            Logger.Info("[MarketAnalyzerLogic] Resetting state for new session");
+
+            // Reset prices
+            GiftNiftyPrice = 0;
+            NiftySpotPrice = 0;
+            SensexSpotPrice = 0;
+            GiftNiftyPriorClose = 0;
+
+            // Reset ticker data
+            ResetTickerData(GiftNiftyTicker);
+            ResetTickerData(NiftyTicker);
+            ResetTickerData(SensexTicker);
+
+            // Clear price hub
+            ClearPriceHub();
+
+            // Clear ATM strikes
+            lock (_atmLock)
+            {
+                _currentATMStrikes.Clear();
+            }
+
+            // Reset selection
+            _selectedUnderlying = null;
+            _selectedExpiry = null;
+            _selectedIsMonthlyExpiry = false;
+
+            // Allow options to be regenerated
+            _optionsAlreadyGenerated = false;
+
+            // Clear instrument list reference
+            _currentInstrumentList = null;
+
+            Logger.Info("[MarketAnalyzerLogic] State reset complete");
+        }
+
+        private void ResetTickerData(TickerData ticker)
+        {
+            if (ticker == null) return;
+            ticker.LastPrice = 0;
+            ticker.NetChange = 0;
+            ticker.NetChangePercent = 0;
+            ticker.Open = 0;
+            ticker.High = 0;
+            ticker.Low = 0;
+            ticker.Close = 0;
+            ticker.ProjectedOpen = 0;
+            ticker.LastUpdateTime = DateTime.MinValue;
         }
 
         /// <summary>
@@ -726,7 +829,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 // Determine if selected expiry is monthly (last expiry of that month)
                 var allExpiries = selectedUnderlying == "NIFTY" ? niftyExpiries : sensexExpiries;
-                bool isMonthlyExpiry = IsMonthlyExpiry(selectedExpiry, allExpiries);
+                bool isMonthlyExpiry = SymbolHelper.IsMonthlyExpiry(selectedExpiry, allExpiries);
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Expiry {selectedExpiry:yyyy-MM-dd} is {(isMonthlyExpiry ? "MONTHLY" : "WEEKLY")}");
 
                 // Cache the selected values for TBS Manager and other consumers
@@ -838,35 +941,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 lot_size = Helpers.SymbolHelper.GetLotSize(underlying), // Get from cache or defaults
                 instrument_token = 0 // Will be looked up by SubscriptionManager
             };
-        }
-
-        /// <summary>
-        /// Determines if an expiry date is a monthly expiry (last expiry of that month).
-        /// Monthly expiries are the last Thursday of the month (or last trading day before that).
-        /// We check if there are any other expiries in the same month after this date.
-        /// </summary>
-        private bool IsMonthlyExpiry(DateTime expiry, List<DateTime> allExpiries)
-        {
-            // Get all expiries in the same month as the target expiry
-            var sameMonthExpiries = allExpiries
-                .Where(e => e.Year == expiry.Year && e.Month == expiry.Month)
-                .OrderBy(e => e)
-                .ToList();
-
-            if (sameMonthExpiries.Count == 0)
-            {
-                // No expiries found - assume monthly (shouldn't happen)
-                Logger.Warn($"[MarketAnalyzerLogic] IsMonthlyExpiry: No expiries found for {expiry:yyyy-MM}, assuming monthly");
-                return true;
-            }
-
-            // The expiry is monthly if it's the LAST one in its month
-            DateTime lastExpiry = sameMonthExpiries.Last();
-            bool isMonthly = expiry.Date == lastExpiry.Date;
-
-            Logger.Debug($"[MarketAnalyzerLogic] IsMonthlyExpiry: {expiry:yyyy-MM-dd} - Month has {sameMonthExpiries.Count} expiries, last is {lastExpiry:yyyy-MM-dd}, isMonthly={isMonthly}");
-
-            return isMonthly;
         }
 
         private DateTime GetNearestExpiry(List<DateTime> expiries)

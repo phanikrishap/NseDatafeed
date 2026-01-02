@@ -1,18 +1,16 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using log4net;
-using log4net.Appender;
-using log4net.Core;
-using log4net.Layout;
-using log4net.Repository.Hierarchy;
 
 namespace ZerodhaDatafeedAdapter.Logging
 {
     /// <summary>
     /// Dedicated logger for critical startup events.
-    /// Writes to a separate log file to ensure startup issues are easily diagnosed.
+    /// Writes to a separate log file (Startup_{date}.log) to ensure startup issues are easily diagnosed.
     /// Critical for automated trading - startup failures mean missed opportunities for the day.
+    ///
+    /// This is a facade over LoggerFactory.Startup that provides backward compatibility
+    /// with existing code while using the unified logging infrastructure.
     ///
     /// Logs include:
     /// - Adapter initialization
@@ -24,145 +22,44 @@ namespace ZerodhaDatafeedAdapter.Logging
     /// </summary>
     public static class StartupLogger
     {
-        private static readonly ILog _log;
-        private static readonly string _logFolderPath;
-        private static readonly string _logFilePath;
-        private static bool _initialized = false;
-        private static readonly object _lockObject = new object();
+        // Use the unified LoggerFactory for actual logging
+        private static ILoggerService _logger => LoggerFactory.Startup;
+
         private static readonly Stopwatch _startupStopwatch = new Stopwatch();
         private static DateTime _adapterStartTime;
+        private static bool _headerWritten = false;
+        private static readonly object _lockObject = new object();
 
         static StartupLogger()
         {
-            try
-            {
-                _adapterStartTime = DateTime.Now;
-                _startupStopwatch.Start();
-
-                // Get the user's Documents folder path
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                _logFolderPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "Logs");
-
-                // Create the log directory if it doesn't exist
-                if (!Directory.Exists(_logFolderPath))
-                {
-                    Directory.CreateDirectory(_logFolderPath);
-                }
-
-                // Create log file name with date - dedicated Startup file
-                string fileName = $"Startup_{DateTime.Now:yyyy-MM-dd}.log";
-                _logFilePath = Path.Combine(_logFolderPath, fileName);
-
-                // Delete existing startup log file on startup to start fresh each session
-                CleanupOldLogFile(_logFilePath);
-
-                // Configure the startup-specific logger
-                ConfigureStartupLogger();
-
-                // Get logger instance with a unique name
-                _log = LogManager.GetLogger("StartupLogger");
-                _initialized = true;
-
-                // Write header
-                WriteSessionHeader();
-            }
-            catch (Exception ex)
-            {
-                // Log to main logger if startup logger fails to initialize
-                Logger.Error($"[StartupLogger] Failed to initialize: {ex.Message}", ex);
-            }
-        }
-
-        /// <summary>
-        /// Delete existing log file on startup to start fresh each trading session
-        /// </summary>
-        private static void CleanupOldLogFile(string logFilePath)
-        {
-            try
-            {
-                if (File.Exists(logFilePath))
-                {
-                    File.Delete(logFilePath);
-                }
-            }
-            catch
-            {
-                // Ignore - file might be locked by another process
-            }
-        }
-
-        private static void ConfigureStartupLogger()
-        {
-            try
-            {
-                var hierarchy = (Hierarchy)LogManager.GetRepository();
-
-                // Create a dedicated appender for Startup logs
-                var roller = new RollingFileAppender
-                {
-                    Name = "StartupRollingFileAppender",
-                    File = _logFilePath,
-                    AppendToFile = true,
-                    RollingStyle = RollingFileAppender.RollingMode.Date,
-                    DatePattern = "yyyyMMdd",
-                    LockingModel = new FileAppender.MinimalLock(),
-                    MaxSizeRollBackups = 10,
-                    MaximumFileSize = "5MB"
-                };
-
-                // Create and set the layout with detailed timestamp for startup events
-                var patternLayout = new PatternLayout
-                {
-                    ConversionPattern = "%date{HH:mm:ss.fff} [%thread] %-5level - %message%newline"
-                };
-                patternLayout.ActivateOptions();
-                roller.Layout = patternLayout;
-
-                // Activate the appender
-                roller.ActivateOptions();
-
-                // Create a specific logger for Startup
-                var startupLogger = hierarchy.GetLogger("StartupLogger") as log4net.Repository.Hierarchy.Logger;
-                if (startupLogger != null)
-                {
-                    startupLogger.RemoveAllAppenders();
-                    startupLogger.AddAppender(roller);
-                    startupLogger.Level = Level.Debug;
-                    startupLogger.Additivity = false; // Don't propagate to root logger
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[StartupLogger] Failed to configure logger: {ex.Message}", ex);
-            }
+            _adapterStartTime = DateTime.Now;
+            _startupStopwatch.Start();
+            WriteSessionHeader();
         }
 
         private static void WriteSessionHeader()
         {
-            if (!_initialized || _log == null) return;
+            lock (_lockObject)
+            {
+                if (_headerWritten) return;
+                _headerWritten = true;
 
-            _log.Info("================================================================================");
-            _log.Info($"  ZERODHA ADAPTER STARTUP LOG - Session Started: {_adapterStartTime:yyyy-MM-dd HH:mm:ss}");
-            _log.Info("================================================================================");
-            _log.Info($"  Machine: {Environment.MachineName}");
-            _log.Info($"  User: {Environment.UserName}");
-            _log.Info($"  OS: {Environment.OSVersion}");
-            _log.Info($"  CLR: {Environment.Version}");
-            _log.Info("================================================================================");
-            _log.Info("");
+                _logger.Info("================================================================================");
+                _logger.Info($"  ZERODHA ADAPTER STARTUP LOG - Session Started: {_adapterStartTime:yyyy-MM-dd HH:mm:ss}");
+                _logger.Info("================================================================================");
+                _logger.Info($"  Machine: {Environment.MachineName}");
+                _logger.Info($"  User: {Environment.UserName}");
+                _logger.Info($"  OS: {Environment.OSVersion}");
+                _logger.Info($"  CLR: {Environment.Version}");
+                _logger.Info("================================================================================");
+                _logger.Info("");
+            }
         }
 
         public static void Initialize()
         {
-            lock (_lockObject)
-            {
-                if (!_initialized)
-                {
-                    ConfigureStartupLogger();
-                    _initialized = true;
-                    Info("StartupLogger initialized");
-                }
-            }
+            // LoggerFactory handles initialization automatically
+            Info("StartupLogger initialized");
         }
 
         /// <summary>
@@ -177,32 +74,27 @@ namespace ZerodhaDatafeedAdapter.Logging
 
         public static void Debug(string message)
         {
-            if (_initialized && _log != null && _log.IsDebugEnabled)
-                _log.Debug($"[{GetElapsedTime()}] {message}");
+            _logger.Debug($"[{GetElapsedTime()}] {message}");
         }
 
         public static void Info(string message)
         {
-            if (_initialized && _log != null && _log.IsInfoEnabled)
-                _log.Info($"[{GetElapsedTime()}] {message}");
+            _logger.Info($"[{GetElapsedTime()}] {message}");
         }
 
         public static void Warn(string message)
         {
-            if (_initialized && _log != null && _log.IsWarnEnabled)
-                _log.Warn($"[{GetElapsedTime()}] {message}");
+            _logger.Warn($"[{GetElapsedTime()}] {message}");
         }
 
         public static void Error(string message)
         {
-            if (_initialized && _log != null)
-                _log.Error($"[{GetElapsedTime()}] {message}");
+            _logger.Error($"[{GetElapsedTime()}] {message}");
         }
 
         public static void Error(string message, Exception exception)
         {
-            if (_initialized && _log != null)
-                _log.Error($"[{GetElapsedTime()}] {message}", exception);
+            _logger.Error($"[{GetElapsedTime()}] {message}", exception);
         }
 
         #endregion
@@ -434,7 +326,7 @@ namespace ZerodhaDatafeedAdapter.Logging
         /// </summary>
         public static string GetLogFilePath()
         {
-            return _logFilePath;
+            return _logger.GetLogFilePath();
         }
 
         /// <summary>
@@ -444,13 +336,14 @@ namespace ZerodhaDatafeedAdapter.Logging
         {
             try
             {
-                if (File.Exists(_logFilePath))
+                string logFilePath = _logger.GetLogFilePath();
+                if (File.Exists(logFilePath))
                 {
-                    Process.Start(_logFilePath);
+                    Process.Start(logFilePath);
                 }
                 else
                 {
-                    Logger.Warn($"[StartupLogger] Log file not found at: {_logFilePath}");
+                    Logger.Warn($"[StartupLogger] Log file not found at: {logFilePath}");
                 }
             }
             catch (Exception ex)

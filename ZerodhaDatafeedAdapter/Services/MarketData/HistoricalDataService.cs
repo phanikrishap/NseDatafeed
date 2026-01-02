@@ -9,6 +9,8 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaDatafeedAdapter.Classes;
+using ZerodhaDatafeedAdapter.Helpers;
+using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.Zerodha;
 using ZerodhaDatafeedAdapter.ViewModels;
@@ -25,6 +27,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private readonly ZerodhaClient _zerodhaClient;
         private readonly InstrumentManager _instrumentManager;
         private readonly HistoricalBarCache _barCache;
+        private static readonly ILoggerService _log = LoggerFactory.GetLogger(LogDomain.MarketData);
 
         // Rate limiting: Zerodha allows ~3 requests/second for historical API
         // We use 6 concurrent requests with 3 second batch delays
@@ -76,8 +79,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             MarketType marketType,
             ViewModelBase viewModelBase)
         {
-            // Log request parameters (to file only, not NinjaTrader control panel)
-            Logger.Debug($"Getting historical data for {symbol}, period: {barsPeriodType}, market type: {marketType}, dates: {fromDate} to {toDate}");
+            _log.Debug($"Getting historical data for {symbol}, period: {barsPeriodType}, market type: {marketType}, dates: {fromDate} to {toDate}");
 
             // Determine interval string based on BarsPeriodType
             string interval = barsPeriodType == BarsPeriodType.Minute ? "minute" : "day";
@@ -87,7 +89,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             if ((toDate - fromDate).TotalDays > MAX_DAYS_PER_REQUEST)
             {
                 effectiveFromDate = toDate.AddDays(-MAX_DAYS_PER_REQUEST);
-                Logger.Warn($"[HistoricalDataService] Date range exceeds {MAX_DAYS_PER_REQUEST} days for {symbol}. Truncating from {fromDate} to {effectiveFromDate}");
+                _log.Warn($"Date range exceeds {MAX_DAYS_PER_REQUEST} days for {symbol}. Truncating from {fromDate} to {effectiveFromDate}");
             }
 
             List<Record> records = new List<Record>();
@@ -101,18 +103,18 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     var cachedRecords = _barCache.GetCachedBars(symbol, interval, effectiveFromDate, toDate);
                     if (cachedRecords != null && cachedRecords.Count > 0)
                     {
-                        Logger.Debug($"[HistoricalDataService] CACHE HIT: {symbol} - {cachedRecords.Count} bars from cache");
+                        _log.Debug($"CACHE HIT: {symbol} - {cachedRecords.Count} bars from cache");
                         return cachedRecords;
                     }
 
-                    Logger.Debug($"[HistoricalDataService] CACHE MISS: {symbol} - fetching from Zerodha API");
+                    _log.Debug($"CACHE MISS: {symbol} - fetching from Zerodha API");
 
                     // Get the instrument token
                     long instrumentToken = await _instrumentManager.GetInstrumentToken(symbol);
 
                     if (instrumentToken == 0)
                     {
-                        NinjaTrader.NinjaScript.NinjaScript.Log($"Error: Could not find instrument token for {symbol}", NinjaTrader.Cbi.LogLevel.Error);
+                        _log.Error($"Could not find instrument token for {symbol}");
                         return records;
                     }
 
@@ -129,21 +131,20 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     if (records.Count > 0)
                     {
                         _barCache.StoreBars(symbol, interval, records);
-                        Logger.Debug($"[HistoricalDataService] Cached {records.Count} bars for {symbol}");
+                        _log.Debug($"Cached {records.Count} bars for {symbol}");
                     }
                 }
                 else
                 {
-                    // Handle tick data if needed
-                    NinjaTrader.NinjaScript.NinjaScript.Log("Tick data not supported for Zerodha", NinjaTrader.Cbi.LogLevel.Warning);
+                    _log.Warn("Tick data not supported for Zerodha historical API");
                 }
             }
             catch (Exception ex)
             {
-                NinjaTrader.NinjaScript.NinjaScript.Log($"Exception in GetHistoricalTrades: {ex.Message}", NinjaTrader.Cbi.LogLevel.Error);
+                _log.Error($"Exception in GetHistoricalTrades for {symbol}: {ex.Message}", ex);
             }
 
-            Logger.Debug($"Returning {records.Count} historical records for {symbol}");
+            _log.Debug($"Returning {records.Count} historical records for {symbol}");
             return records;
         }
 
@@ -158,16 +159,28 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
             try
             {
-                // Check if we need to wait for batch delay
+                int delayMs = 0;
+
+                // Check if we need to wait for batch delay (minimize lock time)
                 lock (_batchLock)
                 {
                     var timeSinceLastBatch = DateTime.Now - _lastBatchTime;
                     if (timeSinceLastBatch.TotalMilliseconds < BATCH_DELAY_MS)
                     {
-                        int delayMs = BATCH_DELAY_MS - (int)timeSinceLastBatch.TotalMilliseconds;
-                        Logger.Debug($"[HistoricalDataService] Rate limiting: waiting {delayMs}ms before request for {symbol}");
-                        Thread.Sleep(delayMs);
+                        delayMs = BATCH_DELAY_MS - (int)timeSinceLastBatch.TotalMilliseconds;
                     }
+                }
+
+                // Delay outside of lock to avoid blocking other threads
+                if (delayMs > 0)
+                {
+                    _log.Debug($"Rate limiting: waiting {delayMs}ms before request for {symbol}");
+                    await Task.Delay(delayMs);
+                }
+
+                // Update last batch time
+                lock (_batchLock)
+                {
                     _lastBatchTime = DateTime.Now;
                 }
             }
@@ -193,14 +206,14 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             {
                 // Format the URL
                 string url = $"https://api.kite.trade/instruments/historical/{instrumentToken}/{interval}?from={fromDateStr}&to={toDateStr}";
-                
+
                 // Make the request
                 HttpResponseMessage response = await client.GetAsync(url);
 
                 if (response.IsSuccessStatusCode)
                 {
                     string content = await response.Content.ReadAsStringAsync();
-                    Logger.Debug($"Received historical response with length: {content.Length} from {fromDateStr} to {toDateStr}");
+                    _log.Debug($"Received historical response with length: {content.Length} from {fromDateStr} to {toDateStr}");
 
                     // Parse the JSON response
                     JObject json = JObject.Parse(content);
@@ -212,30 +225,10 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
                         foreach (JArray candle in candles.Cast<JArray>())
                         {
-                            // Zerodha candle format: [timestamp, open, high, low, close, volume]
-                            if (candle.Count >= 6)
+                            var record = ParseCandleData(candle);
+                            if (record != null)
                             {
-                                // Parse timestamp
-                                string timestampStr = candle[0].ToString(); // "2017-12-15T09:15:00+0530"
-                                DateTime timestamp;
-
-                                // Use DateTimeOffset to properly capture the timezone information
-                                DateTimeOffset dto = DateTimeOffset.Parse(timestampStr);
-                                timestamp = dto.DateTime;
-
-                                // Explicitly specify this as IST time
-                                timestamp = DateTime.SpecifyKind(timestamp, DateTimeKind.Local);
-
-                                // Create record
-                                records.Add(new Record
-                                {
-                                    TimeStamp = timestamp,
-                                    Open = Convert.ToDouble(candle[1]),
-                                    High = Convert.ToDouble(candle[2]),
-                                    Low = Convert.ToDouble(candle[3]),
-                                    Close = Convert.ToDouble(candle[4]),
-                                    Volume = Convert.ToDouble(candle[5])
-                                });
+                                records.Add(record);
                             }
                         }
                     }
@@ -243,7 +236,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 else
                 {
                     string errorContent = await response.Content.ReadAsStringAsync();
-                    NinjaTrader.NinjaScript.NinjaScript.Log($"Error response: {response.StatusCode}, {errorContent}", NinjaTrader.Cbi.LogLevel.Error);
+                    _log.Error($"Historical API error: {response.StatusCode}, {errorContent}");
                 }
             }
 
@@ -251,14 +244,39 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         }
 
         /// <summary>
-        /// Converts a Unix timestamp to local time
+        /// Parses a single candle from Zerodha's JSON array format.
+        /// Zerodha candle format: [timestamp, open, high, low, close, volume]
+        /// Timestamp format: "2017-12-15T09:15:00+0530"
         /// </summary>
-        /// <param name="unixTimestamp">The Unix timestamp</param>
-        /// <returns>The local DateTime</returns>
-        private DateTime UnixSecondsToLocalTime(int unixTimestamp)
+        /// <param name="candle">The JSON array representing a candle</param>
+        /// <returns>A Record object, or null if parsing fails</returns>
+        private Record ParseCandleData(JArray candle)
         {
-            var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            return epoch.AddSeconds(unixTimestamp).ToLocalTime();
+            if (candle == null || candle.Count < 6)
+                return null;
+
+            try
+            {
+                // Parse timestamp using DateTimeHelper for NinjaTrader compatibility
+                string timestampStr = candle[0].ToString();
+                DateTimeOffset dto = DateTimeOffset.Parse(timestampStr);
+                DateTime timestamp = DateTimeHelper.EnsureNinjaTraderDateTime(dto.DateTime);
+
+                return new Record
+                {
+                    TimeStamp = timestamp,
+                    Open = Convert.ToDouble(candle[1]),
+                    High = Convert.ToDouble(candle[2]),
+                    Low = Convert.ToDouble(candle[3]),
+                    Close = Convert.ToDouble(candle[4]),
+                    Volume = Convert.ToDouble(candle[5])
+                };
+            }
+            catch (Exception ex)
+            {
+                _log.Debug($"Error parsing candle data: {ex.Message}");
+                return null;
+            }
         }
     }
 }

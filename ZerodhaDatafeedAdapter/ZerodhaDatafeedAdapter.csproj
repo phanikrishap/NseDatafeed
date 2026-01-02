@@ -222,6 +222,8 @@
     </Compile>
     <Compile Include="LogLevel.cs" />
     <Compile Include="Logging\AppLogger.cs" />
+    <Compile Include="Logging\ILoggerService.cs" />
+    <Compile Include="Logging\LoggerFactory.cs" />
     <Compile Include="Logging\LoggingLevel.cs" />
     <Compile Include="Logging\TBSLogger.cs" />
     <Compile Include="Logging\StartupLogger.cs" />
@@ -236,11 +238,15 @@
     <Compile Include="Services\MarketData\SubscriptionTrackingService.cs" />
     <Compile Include="Services\MarketData\MarketDataService.cs" />
     <Compile Include="Services\MarketData\OptimizedTickProcessor.cs" />
+    <Compile Include="Services\MarketData\BackpressureManager.cs" />
+    <Compile Include="Services\MarketData\ProcessorHealthMonitor.cs" />
     <Compile Include="Services\MarketData\PerformanceMonitor.cs" />
     <Compile Include="Services\Auth\ZerodhaTokenGenerator.cs" />
+    <Compile Include="Services\Analysis\InstrumentBackfillService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerLogic.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerService.cs" />
     <Compile Include="Services\Analysis\SubscriptionManager.cs" />
+    <Compile Include="Services\Analysis\SubscriptionWorkQueue.cs" />
     <Compile Include="Services\Analysis\VWAPDataCache.cs" />
     <Compile Include="Services\Analysis\VWAPCalculatorService.cs" />
     <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerWindow.cs" />
@@ -255,6 +261,7 @@
     <Compile Include="Models\SimulationConfig.cs" />
     <Compile Include="Services\TBSConfigurationService.cs" />
     <Compile Include="Services\TBSExecutionService.cs" />
+    <Compile Include="Services\TBS\StoxxoBridgeManager.cs" />
     <Compile Include="Services\SimulationService.cs" />
     <Compile Include="Services\StoxxoService.cs" />
     <Compile Include="Models\StoxxoModels.cs" />

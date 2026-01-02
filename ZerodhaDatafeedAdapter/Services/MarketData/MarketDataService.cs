@@ -624,9 +624,21 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 }
 
                 // Route to OptimizedTickProcessor (single processing path - no legacy fallback)
-                bool queued = TickProcessor?.QueueTick(symbol, tickData) ?? false;
+                // CRITICAL DEBUG: Log to diagnose tick flow to QueueTick
+                var processor = TickProcessor;
+                if (processor == null)
+                {
+                    Logger.Warn($"[MDS-TICK] TickProcessor is NULL for symbol {symbol}!");
+                }
+
+                bool queued = processor?.QueueTick(symbol, tickData) ?? false;
                 if (!queued)
                 {
+                    // CRITICAL DEBUG: Log when tick is not queued
+                    if ((symbol?.Contains("CE") == true || symbol?.Contains("PE") == true) && !symbol.Contains("SENSEX"))
+                    {
+                        Logger.Warn($"[MDS-TICK] Tick NOT QUEUED for {symbol}: processor={(processor != null ? "OK" : "NULL")}");
+                    }
                     // Backpressure - return to pool and skip synthetic straddle processing
                     ZerodhaTickDataPool.Return(tickData);
                     return;

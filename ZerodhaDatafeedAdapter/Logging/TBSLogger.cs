@@ -1,187 +1,68 @@
 using System;
 using System.IO;
-using log4net;
-using log4net.Appender;
-using log4net.Core;
-using log4net.Layout;
-using log4net.Repository.Hierarchy;
 
 namespace ZerodhaDatafeedAdapter.Logging
 {
     /// <summary>
     /// Dedicated logger for TBS (Time-Based Straddle) Manager.
-    /// Writes to a separate log file to reduce noise in the main log.
+    /// Writes to a separate log file (TBS_{date}.log) to reduce noise in the main log.
+    ///
+    /// This is a facade over LoggerFactory.TBS that provides backward compatibility
+    /// with existing code while using the unified logging infrastructure.
     /// </summary>
     public static class TBSLogger
     {
-        private static readonly ILog _log;
-        private static readonly string _logFolderPath;
-        private static readonly string _logFilePath;
-        private static bool _initialized = false;
-        private static readonly object _lockObject = new object();
-
-        static TBSLogger()
-        {
-            try
-            {
-                // Get the user's Documents folder path
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                _logFolderPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "Logs");
-
-                // Create the log directory if it doesn't exist
-                if (!Directory.Exists(_logFolderPath))
-                {
-                    Directory.CreateDirectory(_logFolderPath);
-                }
-
-                // Create log file name with date - dedicated TBS file
-                string fileName = $"TBS_{DateTime.Now:yyyy-MM-dd}.log";
-                _logFilePath = Path.Combine(_logFolderPath, fileName);
-
-                // Delete existing TBS log file on startup to avoid pileup
-                CleanupOldLogFile(_logFilePath);
-
-                // Configure the TBS-specific logger
-                ConfigureTBSLogger();
-
-                // Get logger instance with a unique name
-                _log = LogManager.GetLogger("TBSLogger");
-                _initialized = true;
-            }
-            catch (Exception ex)
-            {
-                // Log to main logger if TBS logger fails to initialize
-                Logger.Error($"[TBSLogger] Failed to initialize: {ex.Message}", ex);
-            }
-        }
-
-        /// <summary>
-        /// Delete existing log file on startup to avoid log pileup
-        /// </summary>
-        private static void CleanupOldLogFile(string logFilePath)
-        {
-            try
-            {
-                if (File.Exists(logFilePath))
-                {
-                    File.Delete(logFilePath);
-                }
-            }
-            catch
-            {
-                // Ignore - file might be locked by another process
-            }
-        }
-
-        private static void ConfigureTBSLogger()
-        {
-            try
-            {
-                var hierarchy = (Hierarchy)LogManager.GetRepository();
-
-                // Create a dedicated appender for TBS logs
-                var roller = new RollingFileAppender
-                {
-                    Name = "TBSRollingFileAppender",
-                    File = _logFilePath,
-                    AppendToFile = true,
-                    RollingStyle = RollingFileAppender.RollingMode.Date,
-                    DatePattern = "yyyyMMdd",
-                    LockingModel = new FileAppender.MinimalLock(),
-                    MaxSizeRollBackups = 10,
-                    MaximumFileSize = "10MB"
-                };
-
-                // Create and set the layout with more detail for TBS logs
-                var patternLayout = new PatternLayout
-                {
-                    ConversionPattern = "%date{HH:mm:ss.fff} [%thread] %-5level - %message%newline"
-                };
-                patternLayout.ActivateOptions();
-                roller.Layout = patternLayout;
-
-                // Activate the appender
-                roller.ActivateOptions();
-
-                // Create a specific logger for TBS
-                var tbsLogger = hierarchy.GetLogger("TBSLogger") as log4net.Repository.Hierarchy.Logger;
-                if (tbsLogger != null)
-                {
-                    tbsLogger.RemoveAllAppenders();
-                    tbsLogger.AddAppender(roller);
-                    tbsLogger.Level = Level.Debug; // TBS logs at debug level by default
-                    tbsLogger.Additivity = false; // Don't propagate to root logger
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[TBSLogger] Failed to configure logger: {ex.Message}", ex);
-            }
-        }
+        // Use the unified LoggerFactory for actual logging
+        private static ILoggerService _logger => LoggerFactory.TBS;
 
         public static void Initialize()
         {
-            lock (_lockObject)
-            {
-                if (!_initialized)
-                {
-                    ConfigureTBSLogger();
-                    _initialized = true;
-                    Info("TBS Logger initialized");
-                }
-            }
+            // LoggerFactory handles initialization automatically
+            Info("TBS Logger initialized");
         }
 
         #region Log methods
 
-        public static bool IsDebugEnabled => _initialized && _log != null && _log.IsDebugEnabled;
+        public static bool IsDebugEnabled => _logger.IsDebugEnabled;
 
         public static void Debug(string message)
         {
-            if (_initialized && _log != null && _log.IsDebugEnabled)
-                _log.Debug(message);
+            _logger.Debug(message);
         }
 
         public static void Debug(string message, Exception exception)
         {
-            if (_initialized && _log != null && _log.IsDebugEnabled)
-                _log.Debug(message, exception);
+            _logger.Debug(message, exception);
         }
 
         public static void Info(string message)
         {
-            if (_initialized && _log != null && _log.IsInfoEnabled)
-                _log.Info(message);
+            _logger.Info(message);
         }
 
         public static void Info(string message, Exception exception)
         {
-            if (_initialized && _log != null && _log.IsInfoEnabled)
-                _log.Info(message, exception);
+            _logger.Info(message, exception);
         }
 
         public static void Warn(string message)
         {
-            if (_initialized && _log != null && _log.IsWarnEnabled)
-                _log.Warn(message);
+            _logger.Warn(message);
         }
 
         public static void Warn(string message, Exception exception)
         {
-            if (_initialized && _log != null && _log.IsWarnEnabled)
-                _log.Warn(message, exception);
+            _logger.Warn(message, exception);
         }
 
         public static void Error(string message)
         {
-            if (_initialized && _log != null)
-                _log.Error(message);
+            _logger.Error(message);
         }
 
         public static void Error(string message, Exception exception)
         {
-            if (_initialized && _log != null)
-                _log.Error(message, exception);
+            _logger.Error(message, exception);
         }
 
         #endregion
@@ -251,7 +132,7 @@ namespace ZerodhaDatafeedAdapter.Logging
         /// </summary>
         public static string GetLogFilePath()
         {
-            return _logFilePath;
+            return _logger.GetLogFilePath();
         }
 
         /// <summary>
@@ -261,13 +142,14 @@ namespace ZerodhaDatafeedAdapter.Logging
         {
             try
             {
-                if (File.Exists(_logFilePath))
+                string logFilePath = _logger.GetLogFilePath();
+                if (File.Exists(logFilePath))
                 {
-                    System.Diagnostics.Process.Start(_logFilePath);
+                    System.Diagnostics.Process.Start(logFilePath);
                 }
                 else
                 {
-                    Logger.Warn($"[TBSLogger] Log file not found at: {_logFilePath}");
+                    Logger.Warn($"[TBSLogger] Log file not found at: {logFilePath}");
                 }
             }
             catch (Exception ex)

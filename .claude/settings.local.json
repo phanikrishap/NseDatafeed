@@ -64,7 +64,25 @@
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" ls-tree:*)",
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show d04d1f8717bf2486920a3affcf55cb0a7c4533f6:QANinjaAdapter/QAConnectorOptions.cs)",
       "Bash(copy /Y \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\Config\\\\log4net.config\" \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\log4net.config\")",
-      "Bash(del \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\Logging\\\\LogLevel.cs\")"
+      "Bash(del \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\Logging\\\\LogLevel.cs\")",
+      "Bash(Sort-Object LastWriteTime -Descending)",
+      "Bash(Select-Object -First 10 Name, LastWriteTime, Length)",
+      "Bash(powershell: Get-ChildItem \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\Logs\" -File)",
+      "Bash(Select-Object -First 10 Name, LastWriteTime)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show c058b656a9c80adb6894e9fce848f0faefa3c3d7 --name-only)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff c058b656a9c80adb6894e9fce848f0faefa3c3d7 HEAD -- ZerodhaDatafeedAdapter/ZerodhaAdapter.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff c058b656a9c80adb6894e9fce848f0faefa3c3d7 HEAD -- ZerodhaDatafeedAdapter/ZerodhaAdapter.MarketData.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff c058b656a9c80adb6894e9fce848f0faefa3c3d7 HEAD -- ZerodhaDatafeedAdapter/Services/TBS/TBSExecutionService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff c058b656a9c80adb6894e9fce848f0faefa3c3d7 HEAD --name-only)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff c058b656a9c80adb6894e9fce848f0faefa3c3d7 HEAD -- ZerodhaDatafeedAdapter/Connector.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff c058b656a9c80adb6894e9fce848f0faefa3c3d7 HEAD -- ZerodhaDatafeedAdapter/Services/WebSocket/SharedWebSocketService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show c058b656a9c80adb6894e9fce848f0faefa3c3d7:ZerodhaDatafeedAdapter/Connector.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" log -1 --stat)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show 7b50f6ce --name-only)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff c058b656a9c80adb6894e9fce848f0faefa3c3d7 7b50f6ce -- ZerodhaDatafeedAdapter/Services/WebSocket/SharedWebSocketService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff c058b656a9c80adb6894e9fce848f0faefa3c3d7 7b50f6ce -- ZerodhaDatafeedAdapter/Services/MarketData/MarketDataService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff 7b50f6ce HEAD -- ZerodhaDatafeedAdapter/Services/MarketData/MarketDataService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff 7b50f6ce HEAD -- ZerodhaDatafeedAdapter/Services/WebSocket/SharedWebSocketService.cs)"
     ]
   }
 }

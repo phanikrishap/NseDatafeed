@@ -258,15 +258,25 @@ namespace ZerodhaDatafeedAdapter
         {
             StartupLogger.Info("CheckConnection: Verifying Zerodha API connectivity...");
 
-            // Use TCS-based waiting (non-blocking for already-completed tokens)
+            // Wait for TCS to complete using synchronous wait (avoids async/await deadlock on UI thread)
             Logger.Info("[Connector] CheckConnection: Waiting for token validation...");
             try
             {
-                // WaitForTokenReadyAsync returns immediately if already completed
-                var tokenReady = WaitForTokenReadyAsync(timeoutMs: 60000).GetAwaiter().GetResult();
+                // Use synchronous wait with timeout - avoids deadlock that GetAwaiter().GetResult() can cause
+                bool completed = _tokenReadyTcs.Task.Wait(TimeSpan.FromSeconds(60));
+                if (!completed)
+                {
+                    Logger.Error("[Connector] CheckConnection: Token validation timed out after 60 seconds.");
+                    StartupLogger.LogConnectionCheck(false, "Zerodha (token timeout)");
+                    return false;
+                }
+
+                bool tokenReady = _tokenReadyTcs.Task.Result;
+                Logger.Info($"[Connector] CheckConnection: Token validation completed with result={tokenReady}");
+
                 if (!tokenReady)
                 {
-                    Logger.Error("[Connector] CheckConnection: Token validation failed or timed out.");
+                    Logger.Error("[Connector] CheckConnection: Token validation failed.");
                     StartupLogger.LogConnectionCheck(false, "Zerodha (token not ready)");
                     return false;
                 }

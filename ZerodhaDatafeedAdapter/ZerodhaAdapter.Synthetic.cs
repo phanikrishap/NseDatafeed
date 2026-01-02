@@ -1,6 +1,6 @@
 using NinjaTrader.Cbi;
 using System;
-using System.Threading;
+using System.Threading.Tasks;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaAPI.Zerodha.Websockets;
 using ZerodhaDatafeedAdapter.Helpers;
@@ -60,13 +60,13 @@ namespace ZerodhaDatafeedAdapter
                     string capturedOriginalSymbol = originalSymbol;
                     MarketType capturedMarketType = mt;
 
-                    // Use dedicated Thread to bypass thread pool starvation
-                    var thread = new Thread(() =>
+                    // Use Task.Run for async WebSocket subscription
+                    _ = Task.Run(async () =>
                     {
                         try
                         {
-                            Logger.Debug($"[SYNTH-LEG] Thread STARTED for {capturedLegSymbol}");
-                            Connector.Instance.SubscribeToTicks(
+                            Logger.Debug($"[SYNTH-LEG] Task STARTED for {capturedLegSymbol}");
+                            await Connector.Instance.SubscribeToTicks(
                                 capturedLegSymbol,
                                 capturedMarketType,
                                 capturedOriginalSymbol,
@@ -76,7 +76,7 @@ namespace ZerodhaDatafeedAdapter
                                     lock (ZerodhaAdapter._lockLiveSymbol)
                                         return !this._marketLiveDataSymbols.Contains(capturedLegSymbol);
                                 }))
-                            ).GetAwaiter().GetResult();
+                            );
                             Logger.Debug($"[SYNTH-LEG] SubscribeToTicks completed for {capturedLegSymbol}");
                         }
                         catch (Exception ex)
@@ -89,10 +89,7 @@ namespace ZerodhaDatafeedAdapter
                             Logger.Error($"[SYNTH-LEG] Error subscribing to leg {capturedLegSymbol}: {ex.Message}");
                         }
                     });
-                    thread.IsBackground = true;
-                    thread.Name = $"WS_LEG_{capturedLegSymbol}";
-                    thread.Start();
-                    Logger.Debug($"[SYNTH-LEG] Thread launched for {capturedLegSymbol}");
+                    Logger.Debug($"[SYNTH-LEG] Task launched for {capturedLegSymbol}");
                 }
             }
             catch (Exception ex)

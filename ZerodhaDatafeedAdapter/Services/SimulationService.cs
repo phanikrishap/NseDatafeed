@@ -667,7 +667,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     if (straddle < minStraddle)
                     {
                         minStraddle = straddle;
-                        if (TryExtractStrike(symbol, out decimal strike))
+                        if (SymbolHelper.TryExtractStrike(symbol, out decimal strike))
                         {
                             bestStrike = strike;
                         }
@@ -678,34 +678,6 @@ namespace ZerodhaDatafeedAdapter.Services
             if (bestStrike != _config.ATMStrike)
             {
                 MarketAnalyzerLogic.Instance.SetATMStrike(_config.Underlying, bestStrike);
-            }
-        }
-
-        /// <summary>
-        /// Extract strike price from option symbol
-        /// </summary>
-        private bool TryExtractStrike(string symbol, out decimal strike)
-        {
-            strike = 0;
-            if (string.IsNullOrEmpty(symbol)) return false;
-
-            try
-            {
-                int optTypeIdx = symbol.LastIndexOf("CE");
-                if (optTypeIdx < 0) optTypeIdx = symbol.LastIndexOf("PE");
-                if (optTypeIdx < 0) return false;
-
-                string strikeStr = "";
-                for (int i = optTypeIdx - 1; i >= 0 && char.IsDigit(symbol[i]); i--)
-                {
-                    strikeStr = symbol[i] + strikeStr;
-                }
-
-                return decimal.TryParse(strikeStr, out strike);
-            }
-            catch
-            {
-                return false;
             }
         }
 

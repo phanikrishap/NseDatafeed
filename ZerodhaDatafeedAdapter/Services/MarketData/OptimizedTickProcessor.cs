@@ -84,10 +84,14 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         // Performance optimization: Cached TimeZone
         private static readonly TimeZoneInfo IstTimeZone = TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId);
 
-        // Backpressure Management - Tiered Queue Limits
+        // Backpressure Management - Delegated to BackpressureManager
+        private readonly BackpressureManager _backpressureManager;
         private readonly int _warningQueueSize;
         private readonly int _criticalQueueSize;
         private readonly int _maxAcceptableQueueSize;
+
+        // Health Monitoring - Delegated to ProcessorHealthMonitor
+        private readonly ProcessorHealthMonitor _healthMonitor;
 
         // High-performance caches for O(1) lookups
         // IMPORTANT: These are volatile references for atomic swap during updates
@@ -99,6 +103,15 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private readonly HashSet<string> _loggedMissedSymbols = new HashSet<string>(); // Track which symbols we've logged misses for
         private readonly object _loggedMissedSymbolsLock = new object();
         private const int MaxLoggedMissedSymbols = 500; // Limit to prevent unbounded growth
+
+        // TICK CACHE: Store last tick for each instrument to replay when callbacks are registered late
+        // This is critical for post/pre-market when Zerodha sends only ONE snapshot tick per instrument
+        private readonly ConcurrentDictionary<string, ZerodhaTickData> _lastTickCache = new ConcurrentDictionary<string, ZerodhaTickData>();
+        private const int MaxTickCacheSize = 1000; // Limit cache size
+        private long _tickCacheHits = 0; // Track cache replay statistics
+        private long _tickCacheMisses = 0;
+        private readonly HashSet<string> _replayedSymbols = new HashSet<string>(); // Track which symbols got replayed
+        private readonly object _replayedSymbolsLock = new object();
 
         // Performance monitoring
         private readonly PerformanceMonitor _performanceMonitor;
@@ -117,23 +130,8 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private long _optionCallbackFiredCounter = 0; // Track when option callbacks actually fire
         private long _noCallbackLogCounter = 0; // Track subscription exists but no callback cases
 
-        // Backpressure tracking counters
-        private long _ticksDroppedBackpressure = 0;
-        private long _oldestTicksDropped = 0;
-        private long _warningLevelEvents = 0;
-        private long _criticalLevelEvents = 0;
-        private DateTime _lastBackpressureEvent = DateTime.MinValue;
-        private BackpressureState _currentBackpressureState = BackpressureState.Normal;
-
-        // Health monitoring timer (30 second intervals)
-        private readonly System.Timers.Timer _healthMonitoringTimer = new System.Timers.Timer(30000);
-        private long _lastQueuedCount = 0;
-        private long _lastProcessedCount = 0;
-        private long _lastCallbacksExecuted = 0;
-        private long _lastCallbackErrors = 0;
-        private int _lastGC0Count = 0;
-        private int _lastGC1Count = 0;
-        private int _lastGC2Count = 0;
+        // Note: Backpressure tracking moved to BackpressureManager
+        // Note: Health monitoring moved to ProcessorHealthMonitor
 
         // Memory pressure optimization
         private int _lastGCGeneration2Count = 0;
@@ -155,6 +153,9 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             _cancellationTokenSource = new CancellationTokenSource();
             _performanceMonitor = new PerformanceMonitor(TimeSpan.FromSeconds(30));
 
+            // Initialize BackpressureManager (delegated)
+            _backpressureManager = new BackpressureManager(maxQueueSize);
+
             // Initialize Shards with BlockingCollection
             _shards = new Shard[SHARD_COUNT];
             for (int i = 0; i < SHARD_COUNT; i++)
@@ -169,13 +170,46 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 );
             }
 
-            // Initialize health monitoring
-            _healthMonitoringTimer.Elapsed += LogHealthMetrics;
-            _healthMonitoringTimer.AutoReset = true;
-            _healthMonitoringTimer.Start();
+            // Initialize health monitoring (delegated to ProcessorHealthMonitor)
+            _healthMonitor = new ProcessorHealthMonitor(
+                _warningQueueSize,
+                _criticalQueueSize,
+                GetHealthMetricsSnapshot,
+                monitoringIntervalMs: 30000
+            );
+            _healthMonitor.HealthAlertRaised += OnHealthAlert;
+            _healthMonitor.Start();
 
             Logger.Info($"[OTP] OptimizedTickProcessor INITIALIZED with {SHARD_COUNT} shards, BlockingCollection capacity={QUEUE_CAPACITY}");
             Log($"OptimizedTickProcessor: Initialized with {SHARD_COUNT} shards and BlockingCollection queues.");
+        }
+
+        /// <summary>
+        /// Provides metrics snapshot for health monitoring
+        /// </summary>
+        private HealthMetricsSnapshot GetHealthMetricsSnapshot()
+        {
+            var bpMetrics = _backpressureManager.GetMetrics();
+            return new HealthMetricsSnapshot
+            {
+                TicksQueued = Interlocked.Read(ref _ticksQueued),
+                TicksProcessed = Interlocked.Read(ref _ticksProcessed),
+                CallbacksExecuted = Interlocked.Read(ref _callbacksExecuted),
+                CallbackErrors = Interlocked.Read(ref _callbackErrors),
+                TotalCallbackTimeMs = Interlocked.Read(ref _totalCallbackTimeMs),
+                SlowCallbacks = Interlocked.Read(ref _slowCallbacks),
+                VerySlowCallbacks = Interlocked.Read(ref _verySlowCallbacks),
+                TicksDroppedBackpressure = bpMetrics.TicksDropped,
+                BackpressureState = bpMetrics.CurrentState
+            };
+        }
+
+        /// <summary>
+        /// Handle health alerts from the monitor
+        /// </summary>
+        private void OnHealthAlert(object sender, HealthAlertEventArgs e)
+        {
+            Log($"ALERT: {e.Message}");
         }
 
         /// <summary>
@@ -284,115 +318,17 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             {
                 // Queue is full - apply backpressure
                 _performanceMonitor.RecordTickDropped(nativeSymbolName);
-                Interlocked.Increment(ref _ticksDroppedBackpressure);
+                _backpressureManager.RecordTickDropped();
                 return false;
             }
         }
 
         /// <summary>
-        /// Intelligent backpressure management with tiered limits
+        /// Intelligent backpressure management - delegated to BackpressureManager
         /// </summary>
         private (bool shouldQueue, string reason) ApplyBackpressureManagement(long currentQueueDepth, TickProcessingItem item, string symbol)
         {
-            // Update backpressure state
-            var newState = DetermineBackpressureState(currentQueueDepth);
-            if (newState != _currentBackpressureState)
-            {
-                var previousState = _currentBackpressureState;
-                _currentBackpressureState = newState;
-                _lastBackpressureEvent = DateTime.UtcNow;
-
-                Log($"BACKPRESSURE STATE CHANGE: {previousState} -> {newState} (Queue: {currentQueueDepth})");
-
-                // Increment event counters
-                if (newState == BackpressureState.Warning) Interlocked.Increment(ref _warningLevelEvents);
-                if (newState == BackpressureState.Critical) Interlocked.Increment(ref _criticalLevelEvents);
-            }
-
-            switch (_currentBackpressureState)
-            {
-                case BackpressureState.Normal:
-                    return (true, "Normal processing");
-
-                case BackpressureState.Warning:
-                    // At warning level: Apply selective dropping for low-priority symbols
-                    if (IsLowPrioritySymbol(symbol))
-                    {
-                        Interlocked.Increment(ref _ticksDroppedBackpressure);
-                        return (false, $"Dropped low-priority symbol {symbol} at warning level");
-                    }
-                    return (true, "Warning level - high priority symbols only");
-
-                case BackpressureState.Critical:
-                    // At critical level: Apply aggressive dropping and oldest tick removal
-                    if (ShouldDropTickAtCriticalLevel(symbol))
-                    {
-                        Interlocked.Increment(ref _ticksDroppedBackpressure);
-                        return (false, $"Dropped symbol {symbol} at critical level");
-                    }
-
-                    return (true, "Critical level - accepting high priority symbol");
-
-                case BackpressureState.Emergency:
-                    // At emergency level: Drop all but essential ticks
-                    if (!IsEssentialSymbol(symbol))
-                    {
-                        Interlocked.Increment(ref _ticksDroppedBackpressure);
-                        return (false, $"Emergency: Only essential symbols accepted, dropped {symbol}");
-                    }
-
-                    return (true, "Emergency level - essential symbol accepted");
-
-                default:
-                    // Absolute maximum: reject everything
-                    Interlocked.Increment(ref _ticksDroppedBackpressure);
-                    return (false, $"Queue at maximum capacity ({currentQueueDepth}), rejected {symbol}");
-            }
-        }
-
-        /// <summary>
-        /// Determine backpressure state based on queue depth
-        /// </summary>
-        private BackpressureState DetermineBackpressureState(long queueDepth)
-        {
-            if (queueDepth >= _maxQueueSize) return BackpressureState.Maximum;
-            if (queueDepth >= _maxAcceptableQueueSize) return BackpressureState.Emergency;
-            if (queueDepth >= _criticalQueueSize) return BackpressureState.Critical;
-            if (queueDepth >= _warningQueueSize) return BackpressureState.Warning;
-            return BackpressureState.Normal;
-        }
-
-
-        /// <summary>
-        /// Determine if symbol is low priority for dropping
-        /// </summary>
-        private bool IsLowPrioritySymbol(string symbol)
-        {
-            return string.IsNullOrEmpty(symbol) ||
-                   symbol.Contains("TEST") ||
-                   symbol.Contains("DEMO");
-        }
-
-        /// <summary>
-        /// Determine if tick should be dropped at critical level
-        /// </summary>
-        private bool ShouldDropTickAtCriticalLevel(string symbol)
-        {
-            // At critical level, be more aggressive - drop 30% of non-essential ticks
-            return !IsEssentialSymbol(symbol) && (symbol.GetHashCode() % 10 < 3);
-        }
-
-        /// <summary>
-        /// Determine if symbol is essential and should never be dropped
-        /// </summary>
-        private bool IsEssentialSymbol(string symbol)
-        {
-            if (string.IsNullOrEmpty(symbol)) return false;
-
-            // Major indices and high-volume stocks might be essential
-            return symbol.Contains("NIFTY") ||
-                   symbol.Contains("SENSEX") ||
-                   symbol.Contains("BANKNIFTY");
+            return _backpressureManager.EvaluateTick(currentQueueDepth, symbol);
         }
 
 
@@ -409,16 +345,21 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             // Check memory pressure before expensive cache update
             CheckMemoryPressure();
 
+            // Log every cache update at INFO level for debugging
+            Logger.Info($"[OTP] UpdateSubscriptionCache CALLED with {subscriptions?.Count ?? 0} items. Current cache has {_subscriptionCache.Count} subs, {_callbackCache.Count} callbacks");
+
             // CRITICAL DEBUG: Log cache update
-            if (subscriptions.Count < 2 && subscriptions.Count > 0)
+            if (subscriptions == null || subscriptions.Count == 0)
+            {
+                 Logger.Warn("[OTP] UpdateSubscriptionCache called with empty/null subscriptions - skipping to preserve existing cache");
+                 return;
+            }
+
+            if (subscriptions.Count < 5)
             {
                  // Suspicious: updating cache with very few items?
                  Logger.Debug($"[OTP-CACHE] UpdateSubscriptionCache called with only {subscriptions.Count} items! Possible cache stomp.");
                  foreach(var key in subscriptions.Keys) Logger.Debug($"[OTP-CACHE] Key: {key}");
-            }
-            else
-            {
-                 Logger.Debug($"[OTP-CACHE] UpdateSubscriptionCache called with {subscriptions.Count} items.");
             }
 
             // Build NEW caches without touching the current ones
@@ -498,7 +439,11 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
             if (skippedUninitializedCount > 0)
             {
-                Logger.Warn($"[OTP] Skipped {skippedUninitializedCount} uninitialized instrument callbacks");
+                Logger.Info($"[OTP] Skipped {skippedUninitializedCount} uninitialized instrument callbacks - they will be retried");
+            }
+            else
+            {
+                Logger.Info($"[OTP] All instrument callbacks are initialized - no skips");
             }
 
             // ATOMIC SWAP: Replace old caches with new ones in a single operation
@@ -510,7 +455,11 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             }
 
             Log($"OptimizedTickProcessor: Updated caches - {newSubscriptionCache.Count} subscriptions (memory pressure: {_isUnderMemoryPressure})");
-            Logger.Debug($"[OTP] Updated caches - {newSubscriptionCache.Count} subscriptions, {newCallbackCache.Count} callback entries, {_uninitializedSymbols.Count} pending init");
+            Logger.Info($"[OTP] Updated caches - {newSubscriptionCache.Count} subscriptions, {newCallbackCache.Count} callback entries, {_uninitializedSymbols.Count} pending init");
+
+            // TICK CACHE REPLAY: Replay cached ticks for newly registered callbacks
+            // This is critical for post/pre-market when ticks arrive before callbacks are registered
+            ReplayCachedTicksForNewCallbacks(newCallbackCache);
 
             // Force GC if under pressure and cache is large
             if (_isUnderMemoryPressure && newSubscriptionCache.Count > 100)
@@ -539,6 +488,292 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
             Log($"OptimizedTickProcessor: Updated L2 caches - {newL2Cache.Count} subscriptions");
         }
+
+        #region Tick Cache for Post/Pre-Market Replay
+
+        /// <summary>
+        /// Caches the last tick for a symbol. Used to replay when callbacks are registered late.
+        /// This is critical for post/pre-market when Zerodha sends only ONE snapshot tick per instrument.
+        /// </summary>
+        private void CacheLastTick(string symbol, ZerodhaTickData tickData)
+        {
+            if (string.IsNullOrEmpty(symbol) || tickData == null || tickData.LastTradePrice <= 0)
+                return;
+
+            // CRITICAL DEBUG: Log EVERY option tick entering CacheLastTick (first 20)
+            if ((symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX"))
+            {
+                long count = Interlocked.Increment(ref _cacheLastTickLogCounter);
+                if (count <= 20)
+                {
+                    Logger.Info($"[OTP-CACHE-ENTRY] #{count} CacheLastTick for '{symbol}': LTP={tickData.LastTradePrice}, callbackCache has {_callbackCache.Count} entries, hasCallback={_callbackCache.ContainsKey(symbol)}");
+                }
+            }
+
+            // Create a copy of the tick data to cache (avoid holding reference to pooled object)
+            var cachedTick = new ZerodhaTickData
+            {
+                InstrumentIdentifier = tickData.InstrumentIdentifier,
+                InstrumentToken = tickData.InstrumentToken,
+                LastTradePrice = tickData.LastTradePrice,
+                LastTradeQty = tickData.LastTradeQty,
+                TotalQtyTraded = tickData.TotalQtyTraded,
+                BuyQty = tickData.BuyQty,
+                SellQty = tickData.SellQty,
+                Open = tickData.Open,
+                High = tickData.High,
+                Low = tickData.Low,
+                Close = tickData.Close,
+                OpenInterest = tickData.OpenInterest,
+                ExchangeTimestamp = tickData.ExchangeTimestamp
+            };
+
+            // Copy BidDepth and AskDepth (BuyPrice/SellPrice are computed from these)
+            if (tickData.BidDepth != null && tickData.BidDepth.Length > 0)
+            {
+                cachedTick.BidDepth[0].Price = tickData.BidDepth[0].Price;
+                cachedTick.BidDepth[0].Quantity = tickData.BidDepth[0].Quantity;
+            }
+            if (tickData.AskDepth != null && tickData.AskDepth.Length > 0)
+            {
+                cachedTick.AskDepth[0].Price = tickData.AskDepth[0].Price;
+                cachedTick.AskDepth[0].Quantity = tickData.AskDepth[0].Quantity;
+            }
+
+            _lastTickCache[symbol] = cachedTick;
+
+            // Log option tick caching for debugging post-market LTP issues
+            if ((symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX"))
+            {
+                if (_lastTickCache.Count <= 10 || _lastTickCache.Count % 50 == 0)
+                {
+                    Logger.Info($"[OTP-CACHE] Cached tick for {symbol}: LTP={tickData.LastTradePrice}, CacheSize={_lastTickCache.Count}");
+                }
+            }
+
+            // IMMEDIATE REPLAY: If callback exists but hasn't been replayed yet, replay now
+            // This handles the case where ticks arrive AFTER callbacks are registered
+            TryImmediateReplay(symbol, cachedTick);
+
+            // Prevent unbounded growth - trim if needed
+            if (_lastTickCache.Count > MaxTickCacheSize)
+            {
+                // Remove oldest entries (simple approach: just remove some random ones)
+                int toRemove = _lastTickCache.Count - MaxTickCacheSize + 100; // Remove 100 extra to avoid frequent trims
+                var keysToRemove = _lastTickCache.Keys.Take(toRemove).ToList();
+                foreach (var key in keysToRemove)
+                {
+                    _lastTickCache.TryRemove(key, out _);
+                }
+                Logger.Debug($"[OTP-CACHE] Trimmed tick cache from {_lastTickCache.Count + toRemove} to {_lastTickCache.Count} entries");
+            }
+        }
+
+        /// <summary>
+        /// Tries to immediately replay a cached tick to registered callbacks.
+        /// Called when a tick is cached and we want to check if callbacks exist for it.
+        /// This handles the case where ticks arrive AFTER callbacks are registered.
+        /// </summary>
+        private void TryImmediateReplay(string symbol, ZerodhaTickData cachedTick)
+        {
+            if (string.IsNullOrEmpty(symbol) || cachedTick == null || cachedTick.LastTradePrice <= 0)
+                return;
+
+            // Check if we've already replayed for this symbol
+            bool alreadyReplayed;
+            lock (_replayedSymbolsLock)
+            {
+                alreadyReplayed = _replayedSymbols.Contains(symbol);
+                if (!alreadyReplayed)
+                {
+                    _replayedSymbols.Add(symbol);
+                }
+            }
+
+            if (alreadyReplayed)
+                return;
+
+            // Check if a callback exists for this symbol
+            if (!_callbackCache.TryGetValue(symbol, out var callbacks) || callbacks == null || callbacks.Count == 0)
+                return;
+
+            // We have a callback and haven't replayed - do immediate replay
+            DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, IstTimeZone);
+
+            // Log for debugging post-market LTP issues
+            bool isOption = (symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX");
+            if (isOption)
+            {
+                Logger.Info($"[OTP-IMMED-REPLAY] Immediate replay for {symbol}: LTP={cachedTick.LastTradePrice}, callbacks={callbacks.Count}");
+            }
+
+            foreach (var callbackInfo in callbacks)
+            {
+                try
+                {
+                    if (callbackInfo?.Callback == null || callbackInfo.Instrument?.MasterInstrument == null)
+                        continue;
+
+                    var callback = callbackInfo.Callback;
+
+                    // Fire LastPrice callback
+                    callback(MarketDataType.Last, cachedTick.LastTradePrice, Math.Max(1, cachedTick.LastTradeQty), now, 0L);
+
+                    // Also fire bid/ask if available
+                    if (cachedTick.BuyPrice > 0)
+                        callback(MarketDataType.Bid, cachedTick.BuyPrice, cachedTick.BuyQty, now, 0L);
+                    if (cachedTick.SellPrice > 0)
+                        callback(MarketDataType.Ask, cachedTick.SellPrice, cachedTick.SellQty, now, 0L);
+
+                    // Fire daily stats if available
+                    if (cachedTick.TotalQtyTraded > 0)
+                        callback(MarketDataType.DailyVolume, cachedTick.TotalQtyTraded, cachedTick.TotalQtyTraded, now, 0L);
+                    if (cachedTick.High > 0)
+                        callback(MarketDataType.DailyHigh, cachedTick.High, 0L, now, 0L);
+                    if (cachedTick.Low > 0)
+                        callback(MarketDataType.DailyLow, cachedTick.Low, 0L, now, 0L);
+                    if (cachedTick.OpenInterest > 0)
+                        callback(MarketDataType.OpenInterest, cachedTick.OpenInterest, cachedTick.OpenInterest, now, 0L);
+
+                    Interlocked.Increment(ref _tickCacheHits);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Debug($"[OTP-IMMED-REPLAY] Error replaying to callback for {symbol}: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Replays cached ticks for newly registered callbacks.
+        /// Called when subscription cache is updated with new callbacks.
+        /// This ensures symbols that received ticks BEFORE their callback was registered still get data.
+        /// </summary>
+        private void ReplayCachedTicksForNewCallbacks(ConcurrentDictionary<string, List<SubscriptionCallback>> newCallbackCache)
+        {
+            // Log entry for debugging
+            Logger.Info($"[OTP-REPLAY] ReplayCachedTicksForNewCallbacks called: callbackCache={newCallbackCache?.Count ?? 0}, tickCache={_lastTickCache.Count}");
+
+            if (newCallbackCache == null || newCallbackCache.Count == 0 || _lastTickCache.Count == 0)
+            {
+                Logger.Info($"[OTP-REPLAY] Early exit: callbacks={newCallbackCache?.Count ?? 0}, tickCache={_lastTickCache.Count}");
+                return;
+            }
+
+            int replayedCount = 0;
+            DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, IstTimeZone);
+
+            foreach (var kvp in newCallbackCache)
+            {
+                string symbol = kvp.Key;
+                var callbacks = kvp.Value;
+
+                if (callbacks == null || callbacks.Count == 0)
+                    continue;
+
+                // Check if we have a cached tick for this symbol
+                if (!_lastTickCache.TryGetValue(symbol, out var cachedTick))
+                {
+                    Interlocked.Increment(ref _tickCacheMisses);
+                    continue;
+                }
+
+                // Check if we've already replayed for this symbol in this session
+                bool alreadyReplayed;
+                lock (_replayedSymbolsLock)
+                {
+                    alreadyReplayed = _replayedSymbols.Contains(symbol);
+                    if (!alreadyReplayed)
+                    {
+                        _replayedSymbols.Add(symbol);
+                    }
+                }
+
+                if (alreadyReplayed)
+                    continue;
+
+                // Replay the cached tick to all callbacks
+                Interlocked.Increment(ref _tickCacheHits);
+                replayedCount++;
+
+                foreach (var callbackInfo in callbacks)
+                {
+                    try
+                    {
+                        if (callbackInfo?.Callback == null || callbackInfo.Instrument?.MasterInstrument == null)
+                            continue;
+
+                        var callback = callbackInfo.Callback;
+
+                        // Fire LastPrice callback
+                        if (cachedTick.LastTradePrice > 0)
+                        {
+                            callback(MarketDataType.Last, cachedTick.LastTradePrice, Math.Max(1, cachedTick.LastTradeQty), now, 0L);
+
+                            // Also fire bid/ask if available
+                            if (cachedTick.BuyPrice > 0)
+                                callback(MarketDataType.Bid, cachedTick.BuyPrice, cachedTick.BuyQty, now, 0L);
+                            if (cachedTick.SellPrice > 0)
+                                callback(MarketDataType.Ask, cachedTick.SellPrice, cachedTick.SellQty, now, 0L);
+                        }
+
+                        // Fire daily stats if available
+                        if (cachedTick.TotalQtyTraded > 0)
+                            callback(MarketDataType.DailyVolume, cachedTick.TotalQtyTraded, cachedTick.TotalQtyTraded, now, 0L);
+                        if (cachedTick.High > 0)
+                            callback(MarketDataType.DailyHigh, cachedTick.High, 0L, now, 0L);
+                        if (cachedTick.Low > 0)
+                            callback(MarketDataType.DailyLow, cachedTick.Low, 0L, now, 0L);
+                        if (cachedTick.Open > 0)
+                            callback(MarketDataType.Opening, cachedTick.Open, 0L, now, 0L);
+                        if (cachedTick.Close > 0)
+                            callback(MarketDataType.LastClose, cachedTick.Close, 0L, now, 0L);
+                        if (cachedTick.OpenInterest > 0)
+                            callback(MarketDataType.OpenInterest, cachedTick.OpenInterest, cachedTick.OpenInterest, now, 0L);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Debug($"[OTP-REPLAY] Error replaying cached tick for {symbol}: {ex.Message}");
+                    }
+                }
+
+                // Log option replays
+                if ((symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX") && !symbol.Contains("BANKNIFTY"))
+                {
+                    Logger.Info($"[OTP-REPLAY] Replayed cached tick for {symbol}: LTP={cachedTick.LastTradePrice}");
+                }
+            }
+
+            if (replayedCount > 0)
+            {
+                Logger.Info($"[OTP-REPLAY] Replayed {replayedCount} cached ticks for newly registered callbacks (cache hits={_tickCacheHits}, misses={_tickCacheMisses})");
+            }
+        }
+
+        /// <summary>
+        /// Clears the replayed symbols tracking (call when Option Chain is closed/reopened).
+        /// </summary>
+        public void ClearReplayedSymbolsTracking()
+        {
+            lock (_replayedSymbolsLock)
+            {
+                _replayedSymbols.Clear();
+            }
+            Logger.Debug("[OTP-REPLAY] Cleared replayed symbols tracking");
+        }
+
+        /// <summary>
+        /// Gets tick cache statistics for diagnostics.
+        /// </summary>
+        public (int cacheSize, long hits, long misses, int replayedCount) GetTickCacheStats()
+        {
+            lock (_replayedSymbolsLock)
+            {
+                return (_lastTickCache.Count, _tickCacheHits, _tickCacheMisses, _replayedSymbols.Count);
+            }
+        }
+
+        #endregion
 
         /// <summary>
         /// Detect memory pressure and adjust behavior
@@ -650,6 +885,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         /// Uses shard-local state for thread-safe volume delta calculations.
         /// </summary>
         private long _optionProcessSingleTickCounter = 0; // Diagnostic counter
+        private long _cacheLastTickLogCounter = 0; // Diagnostic counter for CacheLastTick logging
 
         private void ProcessSingleTick(TickProcessingItem item, Shard shard)
         {
@@ -686,6 +922,14 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     return;
                 }
 
+                // TICK CACHE: Always cache the last tick for each symbol
+                // This is critical for post/pre-market when Zerodha sends only ONE snapshot tick
+                // The tick will be replayed when a callback is registered later
+                if (item.TickData.LastTradePrice > 0)
+                {
+                    CacheLastTick(ntSymbolName, item.TickData);
+                }
+
                 // Fast subscription lookup using cache (O(1))
                 if (!_subscriptionCache.TryGetValue(ntSymbolName, out var subscription))
                 {
@@ -709,10 +953,10 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
                     if (shouldLog)
                     {
-                        Logger.Info($"[OTP-MISS] No subscription for option '{ntSymbolName}'. SubscriptionCache has {_subscriptionCache.Count} entries. First 5: {string.Join(", ", _subscriptionCache.Keys.Take(5))}");
+                        Logger.Info($"[OTP-MISS] No subscription for option '{ntSymbolName}' - tick CACHED for later replay. SubscriptionCache has {_subscriptionCache.Count} entries.");
                     }
 
-                    return; // No subscription found
+                    return; // No subscription found - but tick is cached for later replay
                 }
 
                 // CRITICAL DEBUG: Log ALL SENSEX option ticks to verify data flow
@@ -726,23 +970,27 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 // Fast callback lookup using pre-built cache (O(1))
                 if (!_callbackCache.TryGetValue(ntSymbolName, out var callbacks) || callbacks?.Count == 0)
                 {
-                    // DIAGNOSTIC: Log when subscription exists but no callbacks (every 100th occurrence)
+                    // DIAGNOSTIC: Log when subscription exists but no callbacks (first 20, then every 100th)
                     if ((ntSymbolName.Contains("CE") || ntSymbolName.Contains("PE")) && !ntSymbolName.Contains("SENSEX"))
                     {
-                        if (Interlocked.Increment(ref _noCallbackLogCounter) % 100 == 1)
+                        long count = Interlocked.Increment(ref _noCallbackLogCounter);
+                        if (count <= 20 || count % 100 == 1)
                         {
-                            Logger.Info($"[OTP-NOCB] Subscription exists but NO CALLBACKS for {ntSymbolName}! SubscriptionCache={_subscriptionCache.Count}, CallbackCache={_callbackCache.Count}");
+                            Logger.Info($"[OTP-NOCB] #{count} Subscription exists but NO CALLBACKS for '{ntSymbolName}'! SubscriptionCache={_subscriptionCache.Count}, CallbackCache={_callbackCache.Count}");
                         }
                     }
                     return; // No callbacks found
                 }
 
                 // Invoke callbacks
-                // CRITICAL DEBUG: Log invocation
-                if (ntSymbolName.Contains("SENSEX") && ntSymbolName.Contains("CE") && item.TickData.LastTradePrice > 0)
+                // CRITICAL DEBUG: Log first 10 option callback invocations
+                if ((ntSymbolName.Contains("CE") || ntSymbolName.Contains("PE")) && !ntSymbolName.Contains("SENSEX"))
                 {
-                     if (DateTime.Now.Millisecond < 50) // sample
-                        Logger.Info($"[OTP-CALLBACK] Invoking {callbacks.Count} callbacks for {ntSymbolName}");
+                    long invokeCount = Interlocked.Increment(ref _optionCallbackFiredCounter);
+                    if (invokeCount <= 10)
+                    {
+                        Logger.Info($"[OTP-INVOKE] #{invokeCount} Invoking {callbacks.Count} callbacks for '{ntSymbolName}' LTP={item.TickData.LastTradePrice}");
+                    }
                 }
 
                 // Get shard-local state for this symbol (used for volume delta and price tracking)
@@ -920,12 +1168,16 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     // Process last trade with timing
                     // For indices: fire callback when price changes (no volume requirement)
                     // For regular instruments: fire callback when volume changes
-                    bool shouldFireCallback = (volumeDelta > 0) || (isIndex && priceChanged);
+                    // PRE/POST MARKET: Always fire callback since we only get 1 snapshot tick per instrument
+                    //                  (Zerodha sends last traded price on connect, no volume delta expected)
+                    // NOTE: GIFT NIFTY & spot indices get pre-market data from 9:00 AM, others from 9:15 AM
+                    bool isOutsideMarketHours = !DateTimeHelper.IsMarketOpenForSymbol(symbolName);
+                    bool shouldFireCallback = (volumeDelta > 0) || (isIndex && priceChanged) || isOutsideMarketHours;
 
-                    // Debug logging for indices
-                    if (isIndex && Logger.IsDebugEnabled)
+                    // Debug logging for indices or outside market hours
+                    if ((isIndex || isOutsideMarketHours) && Logger.IsDebugEnabled)
                     {
-                        Logger.Debug($"[OTP] INDEX callback check: shouldFire={shouldFireCallback}, lastPrice={tickData.LastTradePrice}, volumeDelta={volumeDelta}, isIndex={isIndex}, priceChanged={priceChanged}");
+                        Logger.Debug($"[OTP] Callback check: shouldFire={shouldFireCallback}, lastPrice={tickData.LastTradePrice}, volumeDelta={volumeDelta}, isIndex={isIndex}, priceChanged={priceChanged}, outsideMarket={isOutsideMarketHours}");
                     }
 
                     if (tickData.LastTradePrice > 0 && shouldFireCallback)
@@ -1091,8 +1343,11 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             sb.AppendLine($"Callback Errors: {Interlocked.Read(ref _callbackErrors)}");
             sb.AppendLine($"Slow Callbacks (>1ms): {Interlocked.Read(ref _slowCallbacks)}");
             sb.AppendLine($"Very Slow Callbacks (>5ms): {Interlocked.Read(ref _verySlowCallbacks)}");
-            sb.AppendLine($"Backpressure State: {_currentBackpressureState}");
-            sb.AppendLine($"Ticks Dropped (Backpressure): {Interlocked.Read(ref _ticksDroppedBackpressure)}");
+
+            // Get backpressure metrics from BackpressureManager
+            var bpMetrics = _backpressureManager.GetMetrics();
+            sb.AppendLine($"Backpressure State: {bpMetrics.CurrentState}");
+            sb.AppendLine($"Ticks Dropped (Backpressure): {bpMetrics.TicksDropped}");
             sb.AppendLine("=== End Diagnostic Info ===");
 
             return sb.ToString();
@@ -1106,164 +1361,8 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             return _performanceMonitor.GetSymbolMetrics(symbol);
         }
 
-        /// <summary>
-        /// Comprehensive health monitoring (every 30 seconds)
-        /// </summary>
-        private void LogHealthMetrics(object sender, System.Timers.ElapsedEventArgs e)
-        {
-            try
-            {
-                // Current metrics
-                var currentQueued = Interlocked.Read(ref _ticksQueued);
-                var currentProcessed = Interlocked.Read(ref _ticksProcessed);
-                var currentCallbacksExecuted = Interlocked.Read(ref _callbacksExecuted);
-                var currentCallbackErrors = Interlocked.Read(ref _callbackErrors);
-
-                // Calculate rates (per 30 seconds)
-                var queuedRate = currentQueued - _lastQueuedCount;
-                var processedRate = currentProcessed - _lastProcessedCount;
-                var callbacksRate = currentCallbacksExecuted - _lastCallbacksExecuted;
-                var errorsRate = currentCallbackErrors - _lastCallbackErrors;
-
-                // Queue health
-                var queueDepth = currentQueued - currentProcessed;
-                var processingEfficiency = queuedRate > 0 ? (processedRate * 100.0 / queuedRate) : 100.0;
-
-                // Callback health
-                var totalCallbacks = currentCallbacksExecuted + currentCallbackErrors;
-                var callbackSuccessRate = totalCallbacks > 0 ? (currentCallbacksExecuted * 100.0 / totalCallbacks) : 0.0;
-
-                // Memory metrics
-                var currentGC0 = GC.CollectionCount(0);
-                var currentGC1 = GC.CollectionCount(1);
-                var currentGC2 = GC.CollectionCount(2);
-                var gc0Rate = currentGC0 - _lastGC0Count;
-                var gc1Rate = currentGC1 - _lastGC1Count;
-                var gc2Rate = currentGC2 - _lastGC2Count;
-                var totalMemoryMB = GC.GetTotalMemory(false) / 1024 / 1024;
-
-                // Backpressure metrics
-                var ticksDroppedBP = Interlocked.Read(ref _ticksDroppedBackpressure);
-                var oldestDropped = Interlocked.Read(ref _oldestTicksDropped);
-                var warningEvents = Interlocked.Read(ref _warningLevelEvents);
-                var criticalEvents = Interlocked.Read(ref _criticalLevelEvents);
-
-                // Callback timing metrics
-                var avgCallbackTime = currentCallbacksExecuted > 0 ?
-                    (double)Interlocked.Read(ref _totalCallbackTimeMs) / currentCallbacksExecuted : 0.0;
-                var slowCallbacks = Interlocked.Read(ref _slowCallbacks);
-                var verySlowCallbacks = Interlocked.Read(ref _verySlowCallbacks);
-                var slowCallbackPercentage = currentCallbacksExecuted > 0 ?
-                    (slowCallbacks * 100.0 / currentCallbacksExecuted) : 0.0;
-
-                // Determine overall health status
-                var healthStatus = AssessHealthStatus(queueDepth, callbackSuccessRate, processingEfficiency, gc2Rate);
-
-                Log(
-                    $"HEALTH REPORT {healthStatus}\n" +
-                    $"   Queue: {queueDepth} pending | {queuedRate}/30s in, {processedRate}/30s out | {processingEfficiency:F1}% efficiency\n" +
-                    $"   Callbacks: {callbacksRate}/30s | {callbackSuccessRate:F1}% success | {avgCallbackTime:F3}ms avg | {slowCallbackPercentage:F1}% slow (>1ms)\n" +
-                    $"   Backpressure: {_currentBackpressureState} | {ticksDroppedBP} dropped | {oldestDropped} aged out | Events: W{warningEvents}/C{criticalEvents}\n" +
-                    $"   Memory: {totalMemoryMB}MB | GC: {gc0Rate}/0, {gc1Rate}/1, {gc2Rate}/2\n" +
-                    $"   Totals: {currentQueued:N0} queued, {currentProcessed:N0} processed, {currentCallbacksExecuted:N0} callbacks");
-
-                // Issue health alerts if needed
-                LogHealthAlerts(queueDepth, callbackSuccessRate, processingEfficiency, gc2Rate, totalMemoryMB);
-
-                // Periodic cleanup of _loggedMissedSymbols to prevent unbounded growth
-                // Clear every 15 minutes (30 cycles * 30 seconds) or when nearing limit
-                CleanupLoggedMissedSymbols();
-
-                // Update previous counts for next iteration
-                _lastQueuedCount = currentQueued;
-                _lastProcessedCount = currentProcessed;
-                _lastCallbacksExecuted = currentCallbacksExecuted;
-                _lastCallbackErrors = currentCallbackErrors;
-                _lastGC0Count = currentGC0;
-                _lastGC1Count = currentGC1;
-                _lastGC2Count = currentGC2;
-            }
-            catch (Exception ex)
-            {
-                Log($"Error in health monitoring: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Assess overall health status based on key metrics
-        /// </summary>
-        private string AssessHealthStatus(long queueDepth, double callbackSuccessRate, double processingEfficiency, int gc2Rate)
-        {
-            // Critical issues
-            if (_currentBackpressureState >= BackpressureState.Emergency || queueDepth > _criticalQueueSize ||
-                callbackSuccessRate < 95.0 || processingEfficiency < 80.0 || gc2Rate > 2)
-            {
-                return "CRITICAL";
-            }
-
-            // Warning issues
-            if (_currentBackpressureState >= BackpressureState.Warning || queueDepth > _warningQueueSize ||
-                callbackSuccessRate < 98.0 || processingEfficiency < 95.0 || gc2Rate > 1)
-            {
-                return "WARNING";
-            }
-
-            // All good
-            return "HEALTHY";
-        }
-
-        /// <summary>
-        /// Log specific health alerts for actionable issues
-        /// </summary>
-        private void LogHealthAlerts(long queueDepth, double callbackSuccessRate, double processingEfficiency, int gc2Rate, long memoryMB)
-        {
-            var alerts = new List<string>();
-
-            // Backpressure alerts
-            if (_currentBackpressureState >= BackpressureState.Warning)
-            {
-                alerts.Add($"BACKPRESSURE {_currentBackpressureState}: Queue depth {queueDepth} exceeded threshold");
-            }
-
-            // Queue depth alerts
-            if (queueDepth > _criticalQueueSize)
-            {
-                alerts.Add($"CRITICAL QUEUE DEPTH: {queueDepth} items pending (threshold: {_criticalQueueSize})");
-            }
-            else if (queueDepth > _warningQueueSize)
-            {
-                alerts.Add($"HIGH QUEUE DEPTH: {queueDepth} items pending (threshold: {_warningQueueSize})");
-            }
-
-            // Callback performance alerts
-            if (callbackSuccessRate < 95.0)
-            {
-                alerts.Add($"LOW CALLBACK SUCCESS: {callbackSuccessRate:F1}% (target: >95%)");
-            }
-
-            // Processing efficiency alerts
-            if (processingEfficiency < 80.0)
-            {
-                alerts.Add($"LOW PROCESSING EFFICIENCY: {processingEfficiency:F1}% (target: >95%)");
-            }
-
-            // Memory pressure alerts
-            if (gc2Rate > 2)
-            {
-                alerts.Add($"HIGH GC PRESSURE: {gc2Rate} Gen2 collections in 30s (target: <=1)");
-            }
-
-            if (memoryMB > 500)
-            {
-                alerts.Add($"HIGH MEMORY USAGE: {memoryMB}MB (consider monitoring)");
-            }
-
-            // Log all alerts
-            foreach (var alert in alerts)
-            {
-                Log($"ALERT: {alert}");
-            }
-        }
+        // Note: Health monitoring has been delegated to ProcessorHealthMonitor
+        // Note: Backpressure logic has been delegated to BackpressureManager
 
         /// <summary>
         /// Calculate optimal batch size based on current conditions
@@ -1343,8 +1442,10 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
             try
             {
-                _healthMonitoringTimer?.Stop();
-                _healthMonitoringTimer?.Dispose();
+                // Dispose health monitor (delegated)
+                _healthMonitor?.Stop();
+                _healthMonitor?.Dispose();
+
                 _performanceMonitor?.Dispose();
 
                 // Dispose resources
