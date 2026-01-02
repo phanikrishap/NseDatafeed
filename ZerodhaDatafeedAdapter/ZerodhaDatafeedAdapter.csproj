@@ -224,6 +224,7 @@
     <Compile Include="Logging\AppLogger.cs" />
     <Compile Include="Logging\LoggingLevel.cs" />
     <Compile Include="Logging\TBSLogger.cs" />
+    <Compile Include="Logging\StartupLogger.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="ZerodhaLogger.cs" />
     <Compile Include="TickVolumeLogger.cs" />

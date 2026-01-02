@@ -32,6 +32,12 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 - **Multi-Callback Support**: Multiple subscribers (Chart, Option Chain, Market Analyzer) can receive the same tick data
 - **Intelligent Throttling**: UI updates throttled to prevent overwhelming the display
 
+### Reliability & Diagnostics
+- **TaskCompletionSource Pattern**: Robust async signaling for token/connection ready states - late subscribers never miss events
+- **Event-Driven Token Validation**: WebSocket waits for valid token before connecting
+- **State Machine Transitions**: Proper state management in SharedWebSocketService with safe transitions
+- **Dedicated Startup Logger**: Critical startup events logged to separate file for easy diagnosis
+
 ## Architecture
 
 ```
@@ -79,10 +85,10 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 | Component | Description |
 |-----------|-------------|
 | **ZerodhaAdapter** | NinjaTrader adapter interface - handles Subscribe/Unsubscribe calls |
-| **Connector** | Service orchestration and singleton access hub |
+| **Connector** | Service orchestration, token validation, singleton access hub with TaskCompletionSource pattern |
 | **L1Subscription** | Thread-safe multi-callback container - allows multiple consumers per symbol |
 | **OptimizedTickProcessor** | High-performance tick processing with sharded parallelism and tiered backpressure |
-| **SharedWebSocketService** | Single shared WebSocket connection for all market data |
+| **SharedWebSocketService** | Single shared WebSocket connection with state machine and TCS-based connection signaling |
 | **SubscriptionManager** | Manages option chain subscriptions and BarsRequests |
 | **MarketAnalyzerLogic** | Calculates projected opens, generates option chains, hosts PriceHub and ATM tracking |
 | **OptionChainWindow** | WPF UI for displaying real-time option chain data |
@@ -90,6 +96,8 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 | **TBSConfigurationService** | Reads straddle configurations from Excel file |
 | **SubscriptionTrackingService** | Reference counting and sticky subscriptions |
 | **InstrumentManager** | Handles symbol mapping, token lookup, and NT instrument creation |
+| **StartupLogger** | Dedicated logger for critical startup events - token validation, WebSocket, first tick |
+| **TBSLogger** | Dedicated logger for TBS Manager events |
 
 ### Data Flow
 
@@ -193,6 +201,13 @@ Configure in NinjaTrader adapter settings:
 
 Logs are stored in: `Documents\NinjaTrader 8\ZerodhaAdapter\Logs\`
 
+**Log Files:**
+| File | Purpose |
+|------|---------|
+| `ZerodhaAdapter_YYYY-MM-DD.log` | Main application log |
+| `Startup_YYYY-MM-DD.log` | **Critical startup events** - token validation, WebSocket connection, first tick |
+| `TBS_YYYY-MM-DD.log` | TBS Manager specific events |
+
 To change log level, create/edit: `Documents\NinjaTrader 8\ZerodhaAdapter\log4net.config`
 
 ```xml
@@ -219,6 +234,49 @@ To change log level, create/edit: `Documents\NinjaTrader 8\ZerodhaAdapter\log4ne
 Logger.SetLogLevel("DEBUG");  // Enable debug logging
 Logger.SetLogLevel("INFO");   // Return to normal logging
 ```
+
+### Startup Logger
+
+The dedicated startup logger (`Startup_YYYY-MM-DD.log`) captures critical initialization events for easy diagnosis of market open failures:
+
+**Sample Output:**
+```
+================================================================================
+  ZERODHA ADAPTER STARTUP LOG - Session Started: 2026-01-02 10:21:24
+================================================================================
+  Machine: DESKTOP-24367O2
+  User: Phani Krishna
+  OS: Microsoft Windows NT 10.0.19045.0
+  CLR: 4.0.30319.42000
+================================================================================
+
+[+5ms] ========== ADAPTER INITIALIZATION ==========
+[+5ms] ZerodhaDatafeedAdapter v2.0.1 initializing...
+[+257ms] [MILESTONE] Core services initialized
+[+277ms] Configuration loaded successfully
+[+278ms] ========== TOKEN VALIDATION ==========
+[+280ms] Access token is VALID | Token validated successfully
+[+2574ms] [WebSocket] Connecting | Starting WebSocket connection...
+[+2578ms] [WebSocket] Token Ready | Access token validated
+[+4735ms] ========== WEBSOCKET CONNECTED ==========
+[+4757ms] [Subscribe] INDEX NIFTY (token=256265) - SUCCESS
+[+4988ms] ========== FIRST TICK RECEIVED ==========
+[+4988ms] Data flow confirmed! First tick: NIFTY2610626500CE @ 10.85
+[+4988ms] Time to first tick: 4988ms from adapter start
+```
+
+**Key Events Logged:**
+- Adapter initialization and version
+- Configuration load success/failure
+- Token validation result (critical for automated trading)
+- WebSocket connection phases
+- All symbol subscriptions
+- **First tick received** - proof of data flow
+
+**When to Check:**
+- Market open and no data flowing → Check for "FIRST TICK RECEIVED"
+- WebSocket issues → Check for "WEBSOCKET CONNECTED" or "CRITICAL ERROR"
+- Token problems → Check "TOKEN VALIDATION" section
 
 ## Market Analyzer AddOn
 
@@ -300,7 +358,23 @@ These instruments:
 
 ## Troubleshooting
 
+### Quick Diagnosis with Startup Log
+
+**First step for any startup issue**: Check `Startup_YYYY-MM-DD.log` in `Documents\NinjaTrader 8\ZerodhaAdapter\Logs\`
+
+| Symptom | What to Look For |
+|---------|------------------|
+| No data at market open | "FIRST TICK RECEIVED" section missing |
+| WebSocket not connecting | "WEBSOCKET CONNECTED" missing or "CRITICAL ERROR" present |
+| Token issues | "TOKEN VALIDATION" shows failure |
+| Subscriptions failing | "[Subscribe]" entries show QUEUED instead of SUCCESS |
+
 ### Common Issues
+
+**No market data at market open:**
+1. Check `Startup_YYYY-MM-DD.log` for "FIRST TICK RECEIVED"
+2. If missing, check for WebSocket or token errors above it
+3. Token validation must show "VALID" for data to flow
 
 **UI stops updating after "Done" status:**
 - Fixed in v1.x: Multi-callback support ensures SubscriptionManager callback persists
@@ -311,7 +385,13 @@ These instruments:
 
 **WebSocket disconnects:**
 - Check `[SharedWS]` logs for reconnection attempts
+- Check Startup log for "CRITICAL ERROR" entries
 - Verify internet connectivity and Zerodha API status
+
+**Token validation failures:**
+- Check Startup log "TOKEN VALIDATION" section
+- Verify Zerodha credentials are valid
+- Token may need manual refresh via Zerodha login
 
 ### Debug Logging
 

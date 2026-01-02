@@ -19,6 +19,7 @@ using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.WebSocket;
 using ZerodhaDatafeedAdapter;
 using ZerodhaDatafeedAdapter.Classes;
+using ZerodhaDatafeedAdapter.Logging;
 
 namespace ZerodhaDatafeedAdapter.Services.MarketData
 {
@@ -520,8 +521,10 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         }
 
         /// <summary>
-        /// Ensures the shared WebSocket service is initialized and connected
+        /// Ensures the shared WebSocket service is initialized and connected.
+        /// Uses WaitForConnectionAsync for more reliable connection establishment.
         /// </summary>
+        private bool _connectionMilestoneLogged = false; // Only log milestone once per session
         private async Task EnsureSharedWebSocketInitializedAsync(ConcurrentDictionary<string, L1Subscription> l1Subscriptions)
         {
             if (_sharedWebSocketInitialized && _sharedWebSocketService?.IsConnected == true)
@@ -536,32 +539,73 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     // Wire up tick handler
                     _sharedWebSocketService.TickReceived += OnSharedWebSocketTickReceived;
 
-                    Logger.Debug("[TICK-SHARED] SharedWebSocketService initialized and tick handler connected");
+                    // Subscribe to connection events for better reliability
+                    _sharedWebSocketService.ConnectionReady += OnSharedWebSocketConnectionReady;
+                    _sharedWebSocketService.ConnectionLost += OnSharedWebSocketConnectionLost;
+
+                    Logger.Debug("[TICK-SHARED] SharedWebSocketService initialized and handlers connected");
+                    StartupLogger.LogMarketDataServiceInit(true, "SharedWebSocketService handlers connected");
                 }
             }
 
-            // Ensure connected
-            bool connected = await _sharedWebSocketService.EnsureConnectedAsync();
+            // Use WaitForConnectionAsync for more reliable connection with proper timeout
+            // This will initiate connection if needed and wait for it to complete
+            bool connected = await _sharedWebSocketService.WaitForConnectionAsync(timeoutMs: 15000);
             _sharedWebSocketInitialized = connected;
 
             if (connected)
             {
-                Logger.Debug("[TICK-SHARED] SharedWebSocketService connected successfully");
+                Logger.Info("[TICK-SHARED] SharedWebSocketService connected successfully");
+                // Only log milestone once to avoid spam from concurrent subscription threads
+                if (!_connectionMilestoneLogged)
+                {
+                    _connectionMilestoneLogged = true;
+                    StartupLogger.LogMilestone("MarketDataService WebSocket connected - ready for subscriptions");
+                }
             }
             else
             {
-                Logger.Error("[TICK-SHARED] SharedWebSocketService failed to connect");
+                Logger.Error("[TICK-SHARED] SharedWebSocketService failed to connect within timeout - subscriptions may be queued");
+                StartupLogger.Warn("MarketDataService WebSocket connection timeout - subscriptions queued for retry");
+                // Even if initial connection fails, subscriptions will be queued and processed when connection succeeds
             }
+        }
+
+        /// <summary>
+        /// Called when WebSocket connection becomes ready - can trigger resubscriptions if needed
+        /// </summary>
+        private void OnSharedWebSocketConnectionReady()
+        {
+            Logger.Info("[TICK-SHARED] ConnectionReady event received - WebSocket is now ready for subscriptions");
+            _sharedWebSocketInitialized = true;
+        }
+
+        /// <summary>
+        /// Called when WebSocket connection is lost
+        /// </summary>
+        private void OnSharedWebSocketConnectionLost()
+        {
+            Logger.Warn("[TICK-SHARED] ConnectionLost event received - WebSocket disconnected, will auto-reconnect");
+            _sharedWebSocketInitialized = false;
         }
 
         /// <summary>
         /// Handles ticks received from the shared WebSocket service
         /// </summary>
         private long _optionTickReceiveCounter = 0; // Diagnostic counter
+        private bool _firstTickLogged = false; // Track if first tick has been logged for startup diagnostics
+
         private void OnSharedWebSocketTickReceived(string symbol, ZerodhaTickData tickData)
         {
             try
             {
+                // STARTUP DIAGNOSTIC: Log first tick received as proof of data flow
+                if (!_firstTickLogged && tickData?.LastTradePrice > 0)
+                {
+                    _firstTickLogged = true;
+                    StartupLogger.LogFirstTickReceived(symbol, tickData.LastTradePrice);
+                }
+
                 // DIAGNOSTIC: Log option ticks at entry point
                 if ((symbol?.Contains("CE") == true || symbol?.Contains("PE") == true) && !symbol.Contains("SENSEX") && !symbol.Contains("BANKNIFTY"))
                 {

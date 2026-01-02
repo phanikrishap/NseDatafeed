@@ -8,6 +8,7 @@ using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.MarketData;
 using ZerodhaDatafeedAdapter.Services.Zerodha;
 using ZerodhaDatafeedAdapter.ViewModels;
+using ZerodhaDatafeedAdapter.Logging;
 using log4net;
 using NinjaTrader.Adapter;
 using NinjaTrader.Cbi;
@@ -21,6 +22,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Xml.Linq;
@@ -42,8 +44,74 @@ namespace ZerodhaDatafeedAdapter
         private readonly HistoricalDataService _historicalDataService;
         private readonly MarketDataService _marketDataService;
 
-        // Task to track token validation completion
-        private Task<bool> _tokenValidationTask;
+        // TaskCompletionSource pattern for robust token ready signaling
+        // Unlike events, late subscribers can await this and get the result
+        private readonly TaskCompletionSource<bool> _tokenReadyTcs = new TaskCompletionSource<bool>();
+        private readonly CancellationTokenSource _tokenValidationCts = new CancellationTokenSource();
+
+        /// <summary>
+        /// Task that completes when token validation is done.
+        /// Late subscribers can await this - unlike events, they won't miss it.
+        /// </summary>
+        public Task<bool> WhenTokenReady => _tokenReadyTcs.Task;
+
+        /// <summary>
+        /// Gets whether the access token is ready and valid.
+        /// Thread-safe property backed by TaskCompletionSource.
+        /// </summary>
+        public bool IsTokenReady => _tokenReadyTcs.Task.IsCompleted && _tokenReadyTcs.Task.Result;
+
+        /// <summary>
+        /// Waits for token to be ready with optional timeout.
+        /// Returns true if token is valid, false if invalid or timeout.
+        /// Uses TaskCompletionSource pattern - safe for late callers.
+        /// </summary>
+        /// <param name="timeoutMs">Timeout in milliseconds (default 60 seconds)</param>
+        /// <param name="cancellationToken">Optional cancellation token</param>
+        public async Task<bool> WaitForTokenReadyAsync(int timeoutMs = 60000, CancellationToken cancellationToken = default)
+        {
+            // Fast path - already completed
+            if (_tokenReadyTcs.Task.IsCompleted)
+            {
+                Logger.Debug("[Connector] WaitForTokenReadyAsync: Token already ready");
+                return _tokenReadyTcs.Task.Result;
+            }
+
+            Logger.Info("[Connector] WaitForTokenReadyAsync: Waiting for token validation...");
+            try
+            {
+                using (var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _tokenValidationCts.Token))
+                {
+                    var timeoutTask = Task.Delay(timeoutMs, linkedCts.Token);
+                    var completedTask = await Task.WhenAny(_tokenReadyTcs.Task, timeoutTask);
+
+                    if (completedTask == timeoutTask)
+                    {
+                        if (linkedCts.Token.IsCancellationRequested)
+                        {
+                            Logger.Warn("[Connector] WaitForTokenReadyAsync: Cancelled");
+                            return false;
+                        }
+                        Logger.Warn($"[Connector] WaitForTokenReadyAsync: Timeout after {timeoutMs}ms");
+                        return false;
+                    }
+
+                    var result = await _tokenReadyTcs.Task;
+                    Logger.Info($"[Connector] WaitForTokenReadyAsync: Token validation completed, result={result}");
+                    return result;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Logger.Warn("[Connector] WaitForTokenReadyAsync: Cancelled");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[Connector] WaitForTokenReadyAsync error: {ex.Message}");
+                return false;
+            }
+        }
 
         /// <summary>
         /// Gets the version of the adapter
@@ -106,31 +174,43 @@ namespace ZerodhaDatafeedAdapter
             Logger.Initialize();
             Logger.Info($"ZerodhaDatafeedAdapter v{Version} initializing...");
 
+            // Initialize dedicated startup logger for critical startup events
+            StartupLogger.LogAdapterInit(Version);
+
             _configManager = ConfigurationManager.Instance;
             _zerodhaClient = ZerodhaClient.Instance;
             _instrumentManager = InstrumentManager.Instance;
             _historicalDataService = HistoricalDataService.Instance;
             _marketDataService = MarketDataService.Instance;
+            StartupLogger.LogMilestone("Core services initialized");
 
             // Load configuration
             if (!_configManager.LoadConfiguration())
             {
+                StartupLogger.LogConfigurationLoad(false);
                 // Handle configuration failure
                 MessageBox.Show("Using default API keys. Please check your configuration file.",
                     "Configuration Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
+            else
+            {
+                StartupLogger.LogConfigurationLoad(true);
+            }
 
-            // Ensure valid access token - store the task so CheckConnection can wait for it
-            _tokenValidationTask = Task.Run(async () =>
+            // Ensure valid access token using TaskCompletionSource pattern
+            // Late subscribers can await WhenTokenReady and will get the result
+            _ = Task.Run(async () =>
             {
                 try
                 {
+                    StartupLogger.LogTokenValidationStart();
                     Logger.Info("Checking access token validity...");
                     var tokenResult = await _configManager.EnsureValidTokenAsync();
 
                     if (tokenResult)
                     {
                         Logger.Info("Access token is valid.");
+                        StartupLogger.LogTokenValidationResult(true, "Token validated successfully");
                         NinjaTrader.NinjaScript.NinjaScript.Log(
                             "[ZerodhaAdapter] Zerodha access token is valid.",
                             NinjaTrader.Cbi.LogLevel.Information);
@@ -138,51 +218,106 @@ namespace ZerodhaDatafeedAdapter
                     else
                     {
                         Logger.Info("Failed to obtain valid access token. Manual login may be required.");
+                        StartupLogger.LogTokenValidationResult(false, "Manual login may be required");
+                        StartupLogger.LogCriticalError("Token Validation",
+                            "Failed to obtain valid access token",
+                            "WebSocket connections will fail. Manual Zerodha login required.");
                         NinjaTrader.NinjaScript.NinjaScript.Log(
                             "[ZerodhaAdapter] WARNING: Failed to obtain valid Zerodha access token. Manual login may be required.",
                             NinjaTrader.Cbi.LogLevel.Warning);
                     }
-                    return tokenResult;
+
+                    // Signal token ready via TaskCompletionSource (safe for late subscribers)
+                    Logger.Info($"[Connector] Setting TokenReady via TCS with result={tokenResult}");
+                    _tokenReadyTcs.TrySetResult(tokenResult);
                 }
                 catch (Exception ex)
                 {
                     var innerMessage = ex.InnerException?.Message ?? ex.Message;
                     Logger.Error($"Token validation error: {innerMessage}");
+                    StartupLogger.LogTokenValidationResult(false, innerMessage);
+                    StartupLogger.LogCriticalError("Token Validation",
+                        $"Exception during token validation: {innerMessage}",
+                        "Trading will not be possible until token is manually refreshed.");
                     NinjaTrader.NinjaScript.NinjaScript.Log(
                         $"[ZerodhaAdapter] Token validation error: {innerMessage}",
                         NinjaTrader.Cbi.LogLevel.Error);
-                    return false;
+
+                    // Signal failure via TaskCompletionSource
+                    _tokenReadyTcs.TrySetResult(false);
                 }
             });
         }
 
         /// <summary>
         /// Checks the connection to the Zerodha API.
-        /// Waits for token validation to complete first if it's still running.
+        /// Waits for token validation to complete first using TaskCompletionSource.
         /// </summary>
         /// <returns>True if the connection is valid, false otherwise</returns>
         public bool CheckConnection()
         {
-            // Wait for token validation to complete before checking connection
-            if (_tokenValidationTask != null && !_tokenValidationTask.IsCompleted)
+            StartupLogger.Info("CheckConnection: Verifying Zerodha API connectivity...");
+
+            // Use TCS-based waiting (non-blocking for already-completed tokens)
+            Logger.Info("[Connector] CheckConnection: Waiting for token validation...");
+            try
             {
-                Logger.Info("Waiting for token validation to complete before checking connection...");
-                try
+                // WaitForTokenReadyAsync returns immediately if already completed
+                var tokenReady = WaitForTokenReadyAsync(timeoutMs: 60000).GetAwaiter().GetResult();
+                if (!tokenReady)
                 {
-                    // Wait with a timeout of 60 seconds for auto token generation
-                    bool completed = _tokenValidationTask.Wait(TimeSpan.FromSeconds(60));
-                    if (!completed)
-                    {
-                        Logger.Error("Token validation timed out after 60 seconds.");
-                        return false;
-                    }
-                    Logger.Info($"Token validation completed with result: {_tokenValidationTask.Result}");
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"Error waiting for token validation: {ex.Message}");
+                    Logger.Error("[Connector] CheckConnection: Token validation failed or timed out.");
+                    StartupLogger.LogConnectionCheck(false, "Zerodha (token not ready)");
                     return false;
                 }
+                Logger.Info("[Connector] CheckConnection: Token is ready, checking Zerodha connection...");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[Connector] CheckConnection: Error waiting for token validation: {ex.Message}");
+                StartupLogger.Error($"CheckConnection failed: {ex.Message}");
+                return false;
+            }
+
+            if (!_zerodhaClient.CheckConnection())
+            {
+                StartupLogger.LogConnectionCheck(false, "Zerodha API");
+                return false;
+            }
+
+            StartupLogger.LogConnectionCheck(true, "Zerodha API");
+            this.IsConnected = true;
+            return true;
+        }
+
+        /// <summary>
+        /// Async version of CheckConnection for proper async/await usage.
+        /// Preferred over CheckConnection() to avoid blocking.
+        /// </summary>
+        /// <param name="cancellationToken">Optional cancellation token</param>
+        /// <returns>True if the connection is valid, false otherwise</returns>
+        public async Task<bool> CheckConnectionAsync(CancellationToken cancellationToken = default)
+        {
+            Logger.Info("[Connector] CheckConnectionAsync: Waiting for token validation...");
+            try
+            {
+                var tokenReady = await WaitForTokenReadyAsync(timeoutMs: 60000, cancellationToken);
+                if (!tokenReady)
+                {
+                    Logger.Error("[Connector] CheckConnectionAsync: Token validation failed or timed out.");
+                    return false;
+                }
+                Logger.Info("[Connector] CheckConnectionAsync: Token is ready, checking Zerodha connection...");
+            }
+            catch (OperationCanceledException)
+            {
+                Logger.Warn("[Connector] CheckConnectionAsync: Cancelled");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[Connector] CheckConnectionAsync: Error waiting for token validation: {ex.Message}");
+                return false;
             }
 
             if (!_zerodhaClient.CheckConnection())

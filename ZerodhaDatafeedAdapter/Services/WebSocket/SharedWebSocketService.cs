@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using ZerodhaDatafeedAdapter.Helpers;
+using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.MarketData;
 using ZerodhaDatafeedAdapter.Services.Configuration;
@@ -57,6 +58,52 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
 
         // Event for tick data
         public event Action<string, ZerodhaTickData> TickReceived;
+
+        // Event fired when WebSocket connection is established and ready for subscriptions
+        // Subscribers can use this to trigger pending subscriptions reliably
+        public event Action ConnectionReady;
+
+        // Event fired when WebSocket connection is lost
+        public event Action ConnectionLost;
+
+        // TaskCompletionSource for robust connection ready signaling (replaces fire-once events)
+        // Unlike events, late subscribers can await this and get the result
+        private TaskCompletionSource<bool> _connectionReadyTcs = new TaskCompletionSource<bool>();
+        private readonly object _tcsLock = new object();
+
+        /// <summary>
+        /// Task that completes when connection is established.
+        /// Late subscribers can await this - unlike events, they won't miss it.
+        /// </summary>
+        public Task<bool> WhenConnectionReady => _connectionReadyTcs.Task;
+
+        /// <summary>
+        /// Resets the connection ready TCS for new connection attempts.
+        /// Called when connection is lost to allow new wait cycles.
+        /// </summary>
+        private void ResetConnectionReadyTcs()
+        {
+            lock (_tcsLock)
+            {
+                // Only reset if already completed (allows new wait cycle)
+                if (_connectionReadyTcs.Task.IsCompleted)
+                {
+                    _connectionReadyTcs = new TaskCompletionSource<bool>();
+                    Logger.Debug("[SharedWS] ConnectionReady TCS reset for new connection cycle");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Signals connection ready via TCS (thread-safe, idempotent)
+        /// </summary>
+        private void SignalConnectionReady(bool success)
+        {
+            lock (_tcsLock)
+            {
+                _connectionReadyTcs.TrySetResult(success);
+            }
+        }
 
         /// <summary>
         /// Gets the singleton instance
@@ -109,12 +156,34 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
         }
 
         /// <summary>
-        /// Forces state transition (use carefully - mainly for cleanup)
+        /// Forces state transition (use sparingly - mainly for cleanup/dispose)
+        /// Logs a warning since this bypasses normal state machine validation.
         /// </summary>
         private void ForceState(WebSocketConnectionState newState)
         {
             var oldState = (WebSocketConnectionState)Interlocked.Exchange(ref _connectionState, (int)newState);
             Logger.Info($"[SharedWS] State: {oldState} -> {newState} (forced)");
+        }
+
+        /// <summary>
+        /// Transitions to Disconnected state from any valid source state.
+        /// Returns true if transition succeeded.
+        /// </summary>
+        private bool TransitionToDisconnected()
+        {
+            var current = CurrentState;
+            // Valid transitions to Disconnected: Connecting, Connected, Reconnecting
+            if (current == WebSocketConnectionState.Connected ||
+                current == WebSocketConnectionState.Connecting ||
+                current == WebSocketConnectionState.Reconnecting)
+            {
+                return TryTransition(current, WebSocketConnectionState.Disconnected);
+            }
+            // Already disconnected or disposing - no-op
+            if (current == WebSocketConnectionState.Disconnected)
+                return true;
+            // Disposing - don't change state
+            return false;
         }
 
         /// <summary>
@@ -125,6 +194,70 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                                                   CurrentState == WebSocketConnectionState.Reconnecting;
 
         #endregion
+
+        /// <summary>
+        /// Waits for WebSocket connection to be ready with timeout.
+        /// Uses TaskCompletionSource pattern - safe for late callers.
+        /// Returns true if connected, false if timeout or failure.
+        /// </summary>
+        /// <param name="timeoutMs">Timeout in milliseconds (default 30 seconds)</param>
+        /// <param name="cancellationToken">Optional cancellation token</param>
+        public async Task<bool> WaitForConnectionAsync(int timeoutMs = 30000, CancellationToken cancellationToken = default)
+        {
+            // Fast path - already connected
+            if (IsConnected && _connectionReadyTcs.Task.IsCompleted && _connectionReadyTcs.Task.Result)
+            {
+                Logger.Debug("[SharedWS] WaitForConnectionAsync: Already connected (fast path)");
+                return true;
+            }
+
+            // First, try to initiate connection if not already connecting
+            if (CurrentState == WebSocketConnectionState.Disconnected)
+            {
+                Logger.Info("[SharedWS] WaitForConnectionAsync: Initiating connection...");
+                _ = EnsureConnectedAsync();
+            }
+
+            // Wait using TCS with timeout
+            Logger.Info($"[SharedWS] WaitForConnectionAsync: Waiting up to {timeoutMs}ms for connection...");
+            try
+            {
+                using (var timeoutCts = new CancellationTokenSource(timeoutMs))
+                using (var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token))
+                {
+                    var timeoutTask = Task.Delay(Timeout.Infinite, linkedCts.Token);
+                    var completedTask = await Task.WhenAny(_connectionReadyTcs.Task, timeoutTask);
+
+                    if (completedTask == _connectionReadyTcs.Task)
+                    {
+                        var result = await _connectionReadyTcs.Task;
+                        Logger.Info($"[SharedWS] WaitForConnectionAsync: TCS completed with result={result}");
+                        return result;
+                    }
+                    else
+                    {
+                        // Check if it was user cancellation vs timeout
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            Logger.Warn("[SharedWS] WaitForConnectionAsync: Cancelled by caller");
+                            return false;
+                        }
+                        Logger.Warn($"[SharedWS] WaitForConnectionAsync: Timeout after {timeoutMs}ms, state={CurrentState}");
+                        return false;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Logger.Warn("[SharedWS] WaitForConnectionAsync: Cancelled");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SharedWS] WaitForConnectionAsync error: {ex.Message}");
+                return false;
+            }
+        }
 
         /// <summary>
         /// Ensures the WebSocket connection is established
@@ -165,6 +298,11 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
         /// </summary>
         private async Task<bool> ConnectAsync(bool isReconnect = false)
         {
+            StartupLogger.LogWebSocketPhase(isReconnect ? "Reconnecting" : "Connecting", true, "Starting WebSocket connection...");
+
+            // Reset TCS for new connection cycle (allows new waiters)
+            ResetConnectionReadyTcs();
+
             // Attempt state transition: Disconnected -> Connecting (or Disconnected -> Reconnecting)
             var targetState = isReconnect ? WebSocketConnectionState.Reconnecting : WebSocketConnectionState.Connecting;
             if (!TryTransition(WebSocketConnectionState.Disconnected, targetState))
@@ -173,17 +311,18 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 // If already connected, return success
                 if (current == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
                     return true;
-                // If already connecting, wait for it
+                // If already connecting, wait for it via TCS
                 if (current == WebSocketConnectionState.Connecting || current == WebSocketConnectionState.Reconnecting)
                 {
-                    Logger.Debug("[SharedWS] Connection already in progress, waiting...");
-                    await _connectionSemaphore.WaitAsync();
-                    _connectionSemaphore.Release();
-                    return CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open;
+                    Logger.Debug("[SharedWS] Connection already in progress, waiting via TCS...");
+                    return await WaitForConnectionAsync(timeoutMs: 30000);
                 }
                 // If disposing, reject
                 if (current == WebSocketConnectionState.Disposing)
+                {
+                    SignalConnectionReady(false);
                     return false;
+                }
             }
 
             // Use semaphore to prevent concurrent connection attempts
@@ -194,6 +333,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 // Double-check after acquiring semaphore
                 if (CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
                 {
+                    SignalConnectionReady(true);
                     return true;
                 }
 
@@ -219,15 +359,45 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 }
                 _connectionCts = new CancellationTokenSource();
 
+                // CRITICAL: Wait for token to be ready before connecting
+                // WebSocket URL includes the access token - must be valid!
+                StartupLogger.LogWebSocketPhase("Token Wait", true, "Waiting for access token...");
+                Logger.Info("[SharedWS] Waiting for access token to be ready...");
+                var tokenReady = await Connector.Instance.WaitForTokenReadyAsync(timeoutMs: 30000);
+                if (!tokenReady)
+                {
+                    Logger.Error("[SharedWS] Access token not ready after 30s - cannot connect WebSocket");
+                    StartupLogger.LogWebSocketFailed("Access token not ready after 30s timeout");
+                    StartupLogger.LogCriticalError("WebSocket",
+                        "Cannot connect WebSocket - access token not ready",
+                        "No market data will be received. Check token generation.");
+                    TransitionToDisconnected();
+                    SignalConnectionReady(false);
+                    return false;
+                }
+                StartupLogger.LogWebSocketPhase("Token Ready", true, "Access token validated");
+                Logger.Info("[SharedWS] Access token is ready, proceeding with WebSocket connection...");
+
                 Logger.Info("[SharedWS] Connecting to Zerodha WebSocket...");
+                StartupLogger.LogWebSocketPhase("Connecting", true, "Establishing WebSocket connection...");
 
                 _sharedWebSocket = _webSocketManager.CreateWebSocketClient();
                 await _webSocketManager.ConnectAsync(_sharedWebSocket);
 
-                // Transition to Connected state
-                ForceState(WebSocketConnectionState.Connected);
+                // Transition to Connected state using proper state machine
+                // Try both Connecting -> Connected and Reconnecting -> Connected
+                if (!TryTransition(WebSocketConnectionState.Connecting, WebSocketConnectionState.Connected))
+                {
+                    if (!TryTransition(WebSocketConnectionState.Reconnecting, WebSocketConnectionState.Connected))
+                    {
+                        // Fallback: Force state only if above transitions failed (shouldn't happen)
+                        Logger.Warn("[SharedWS] State transition to Connected failed, forcing state");
+                        ForceState(WebSocketConnectionState.Connected);
+                    }
+                }
 
                 Logger.Info($"[SharedWS] Connected successfully. State={_sharedWebSocket.State}");
+                StartupLogger.LogWebSocketConnected(_subscriptions.Count);
 
                 // Start message processing loop
                 _messageLoopTask = Task.Run(() => ProcessMessagesAsync(_connectionCts.Token));
@@ -238,12 +408,31 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 // Process any pending subscriptions
                 await ProcessPendingSubscriptionsAsync();
 
+                // Signal connection ready via TCS (idempotent, safe for late callers)
+                SignalConnectionReady(true);
+
+                // Fire ConnectionReady event for backward compatibility
+                Logger.Info("[SharedWS] Firing ConnectionReady event and signaling TCS");
+                try
+                {
+                    ConnectionReady?.Invoke();
+                }
+                catch (Exception eventEx)
+                {
+                    Logger.Error($"[SharedWS] ConnectionReady event handler error: {eventEx.Message}");
+                }
+
                 return true;
             }
             catch (Exception ex)
             {
                 Logger.Error($"[SharedWS] Connection failed: {ex.Message}", ex);
-                ForceState(WebSocketConnectionState.Disconnected);
+                StartupLogger.LogWebSocketFailed(ex.Message);
+                StartupLogger.LogCriticalError("WebSocket",
+                    $"WebSocket connection exception: {ex.Message}",
+                    "No market data will be received until connection is established.");
+                TransitionToDisconnected();
+                SignalConnectionReady(false);
                 return false;
             }
             finally
@@ -276,6 +465,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 if (CurrentState != WebSocketConnectionState.Connected || _sharedWebSocket?.State != WebSocketState.Open)
                 {
                     Logger.Info($"[SharedWS] Connection not ready (state={CurrentState}), queueing subscription for {symbol}");
+                    StartupLogger.LogSubscription(symbol, instrumentToken, isIndex, false);
                     _pendingSubscriptions.Enqueue((symbol, instrumentToken));
 
                     // Try to connect
@@ -288,6 +478,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 await SendModeAsync(new List<int> { instrumentToken }, "quote");
 
                 Logger.Info($"[SharedWS] Subscribed to {symbol} (token={instrumentToken})");
+                StartupLogger.LogSubscription(symbol, instrumentToken, isIndex, true);
                 return true;
             }
             catch (Exception ex)
@@ -529,10 +720,21 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             {
                 ArrayPool<byte>.Shared.Return(buffer);
 
-                // Transition to Disconnected (if not already disposing)
+                // Transition to Disconnected using proper state machine (if not already disposing)
                 if (CurrentState != WebSocketConnectionState.Disposing)
                 {
-                    ForceState(WebSocketConnectionState.Disconnected);
+                    TransitionToDisconnected();
+
+                    // Fire ConnectionLost event to notify subscribers
+                    Logger.Info("[SharedWS] Firing ConnectionLost event");
+                    try
+                    {
+                        ConnectionLost?.Invoke();
+                    }
+                    catch (Exception eventEx)
+                    {
+                        Logger.Error($"[SharedWS] ConnectionLost event handler error: {eventEx.Message}");
+                    }
                 }
                 Logger.Info("[SharedWS] Message processing loop ended");
 
