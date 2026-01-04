@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using NinjaTrader.Cbi;
@@ -26,8 +27,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         private readonly ConcurrentQueue<MappedInstrument> _subscriptionQueue = new ConcurrentQueue<MappedInstrument>();
         private readonly ConcurrentQueue<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)> _historicalDataQueue = new ConcurrentQueue<(MappedInstrument, string, Instrument)>();
-        private bool _isProcessing = false;
-        private bool _isProcessingHistorical = false;
+        // Use int for Interlocked operations (0=false, 1=true)
+        private int _isProcessing = 0;
+        private int _isProcessingHistorical = 0;
         private int _processedCount = 0;
         private int _totalQueued = 0;
 
@@ -54,7 +56,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         // Queue for instruments ready for BarsRequest and WebSocket subscription (after caching)
         private readonly ConcurrentQueue<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)> _readyForStreamingQueue =
             new ConcurrentQueue<(MappedInstrument, string, Instrument)>();
-        private bool _isProcessingStreaming = false;
+        // Use int for Interlocked operations (0=false, 1=true)
+        private int _isProcessingStreaming = 0;
 
         // Event for UI updates
         public event Action<string, double> OptionPriceUpdated;
@@ -73,8 +76,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         // Event to notify UI of historical data status (symbol, status like "Done (123)" or "No Data")
         public event Action<string, string> OptionStatusUpdated;
 
-        // Flag to track if we've subscribed to the event-driven tick feed
-        private bool _subscribedToTickEvents = false;
+        // Flag to track if we've subscribed to the event-driven tick feed (0=false, 1=true)
+        // Use int for Interlocked.CompareExchange atomic operations
+        private int _subscribedToTickEvents = 0;
 
         private SubscriptionManager()
         {
@@ -85,10 +89,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <summary>
         /// Subscribe to the event-driven tick feed from OptimizedTickProcessor.
         /// This is the reliable path for option price updates that bypasses callback chain issues.
+        /// Uses Interlocked.CompareExchange to prevent double-subscription race condition.
         /// </summary>
         private void SubscribeToTickEvents()
         {
-            if (_subscribedToTickEvents) return;
+            // Atomic check-and-set: only proceed if we're the first to change 0 -> 1
+            if (Interlocked.CompareExchange(ref _subscribedToTickEvents, 1, 0) != 0)
+            {
+                return; // Another thread already subscribed or is subscribing
+            }
 
             try
             {
@@ -96,16 +105,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 if (tickProcessor != null)
                 {
                     tickProcessor.OptionTickReceived += OnOptionTickReceived;
-                    _subscribedToTickEvents = true;
                     Logger.Info("[SubscriptionManager] Subscribed to OptimizedTickProcessor.OptionTickReceived event");
                 }
                 else
                 {
+                    // Reset flag so we can retry later
+                    Interlocked.Exchange(ref _subscribedToTickEvents, 0);
                     Logger.Warn("[SubscriptionManager] TickProcessor not available yet - will retry on first subscription");
                 }
             }
             catch (Exception ex)
             {
+                // Reset flag on failure so we can retry
+                Interlocked.Exchange(ref _subscribedToTickEvents, 0);
                 Logger.Error($"[SubscriptionManager] Failed to subscribe to tick events: {ex.Message}");
             }
         }
@@ -130,7 +142,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             Logger.Info($"[SubscriptionManager] QueueSubscription(): Received {instruments.Count} instruments to queue");
 
             // Ensure we're subscribed to tick events (retry if not done during construction)
-            if (!_subscribedToTickEvents)
+            // Volatile read to check if subscription succeeded
+            if (Interlocked.CompareExchange(ref _subscribedToTickEvents, 0, 0) == 0)
             {
                 SubscribeToTickEvents();
             }
@@ -146,7 +159,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             Logger.Info($"[SubscriptionManager] QueueSubscription(): Queue size is now {_subscriptionQueue.Count}");
 
-            if (!_isProcessing)
+            // Atomic check-and-set: only start processor if we're the first to change 0 -> 1
+            if (Interlocked.CompareExchange(ref _isProcessing, 1, 0) == 0)
             {
                 Logger.Info("[SubscriptionManager] QueueSubscription(): Starting queue processor...");
                 Task.Run(ProcessQueue);
@@ -163,7 +177,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private async Task ProcessQueue()
         {
             Logger.Info("[SubscriptionManager] ProcessQueue(): Started processing");
-            _isProcessing = true;
+            // Note: _isProcessing already set to 1 by caller via Interlocked.CompareExchange
 
             while (_subscriptionQueue.TryDequeue(out var instrument))
             {
@@ -184,7 +198,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 }
             }
 
-            _isProcessing = false;
+            Interlocked.Exchange(ref _isProcessing, 0);
             Logger.Info($"[SubscriptionManager] ProcessQueue(): Completed all {_processedCount} instruments");
         }
 
@@ -323,8 +337,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     Logger.Info($"[SubscriptionManager] SubscribeToInstrument({ntName}): Queueing for batched historical data fetch");
                     _historicalDataQueue.Enqueue((instrument, ntName, ntInstrument));
 
-                    // Start historical data processor if not already running
-                    if (!_isProcessingHistorical)
+                    // Start historical data processor if not already running (atomic check-and-set)
+                    if (Interlocked.CompareExchange(ref _isProcessingHistorical, 1, 0) == 0)
                     {
                         Logger.Info("[SubscriptionManager] Starting historical data batch processor...");
                         _ = Task.Run(ProcessHistoricalDataQueue);
@@ -347,15 +361,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private async Task ProcessHistoricalDataQueue()
         {
             Logger.Info("[SubscriptionManager] ProcessHistoricalDataQueue(): Started batch processor");
-            _isProcessingHistorical = true;
+            // Note: _isProcessingHistorical already set to 1 by caller via Interlocked.CompareExchange
 
             int batchNumber = 0;
             int totalProcessed = 0;
 
-            while (!_historicalDataQueue.IsEmpty || _isProcessing)
+            while (!_historicalDataQueue.IsEmpty || Interlocked.CompareExchange(ref _isProcessing, 0, 0) != 0)
             {
                 // Wait for subscription processing to complete first before starting historical fetch
-                if (_isProcessing)
+                if (Interlocked.CompareExchange(ref _isProcessing, 0, 0) != 0)
                 {
                     Logger.Debug("[SubscriptionManager] ProcessHistoricalDataQueue(): Waiting for subscription processing to complete...");
                     await Task.Delay(1000);
@@ -393,7 +407,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 }
             }
 
-            _isProcessingHistorical = false;
+            Interlocked.Exchange(ref _isProcessingHistorical, 0);
             Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Completed all batches. Total instruments processed: {totalProcessed}");
 
             // NOTE: BarsRequest + WebSocket subscription is now handled in real-time by ProcessStreamingQueue
@@ -444,8 +458,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     // Queue for immediate streaming (BarsRequest + WebSocket)
                     _readyForStreamingQueue.Enqueue((mappedInst, ntSymbol, instrument));
 
-                    // Start streaming processor if not running
-                    if (!_isProcessingStreaming)
+                    // Start streaming processor if not running (atomic check-and-set)
+                    if (Interlocked.CompareExchange(ref _isProcessingStreaming, 1, 0) == 0)
                     {
                         _ = Task.Run(ProcessStreamingQueue);
                     }
@@ -499,9 +513,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// </summary>
         private async Task ProcessStreamingQueue()
         {
-            if (_isProcessingStreaming) return;
-            _isProcessingStreaming = true;
-
+            // Note: _isProcessingStreaming already set to 1 by caller via Interlocked.CompareExchange
             Logger.Info("[SubscriptionManager] ProcessStreamingQueue(): Started event-driven streaming processor");
 
             DateTime fromDate = DateTime.Now.AddDays(-3);
@@ -521,7 +533,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     {
                         batch.Add(item);
                     }
-                    else if (!_isProcessingHistorical && _readyForStreamingQueue.IsEmpty)
+                    else if (Interlocked.CompareExchange(ref _isProcessingHistorical, 0, 0) == 0 && _readyForStreamingQueue.IsEmpty)
                     {
                         // Historical processing done and queue empty - process remaining batch
                         break;
@@ -555,7 +567,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 await Task.Delay(200);
             }
 
-            _isProcessingStreaming = false;
+            Interlocked.Exchange(ref _isProcessingStreaming, 0);
             Logger.Info($"[SubscriptionManager] ProcessStreamingQueue(): Completed. Total instruments streamed: {totalStreamed}");
 
             // Process any straddle symbols that accumulated

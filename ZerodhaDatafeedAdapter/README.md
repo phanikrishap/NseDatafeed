@@ -37,6 +37,8 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 - **Event-Driven Token Validation**: WebSocket waits for valid token before connecting
 - **State Machine Transitions**: Proper state management in SharedWebSocketService with safe transitions
 - **Dedicated Startup Logger**: Critical startup events logged to separate file for easy diagnosis
+- **Atomic Flag Operations**: All processing flags use `Interlocked.CompareExchange` to prevent race conditions
+- **Event-Driven Option Prices**: `OptionTickReceived` event ensures reliable price updates regardless of subscription timing
 
 ## Architecture
 
@@ -105,8 +107,46 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 2. **Parse** → Tick data parsed into `ZerodhaTickData` object
 3. **Queue** → Tick queued in `OptimizedTickProcessor`
 4. **Process** → Sharded workers process ticks in parallel
-5. **Callbacks** → ALL registered callbacks invoked (Chart, Option Chain, etc.)
-6. **NinjaTrader** → Data fed to NinjaTrader's market data system
+5. **Cache & Event** → Tick cached in `_lastTickCache` AND `OptionTickReceived` event fired
+6. **Callbacks** → ALL registered callbacks invoked (Chart, Option Chain, etc.)
+7. **NinjaTrader** → Data fed to NinjaTrader's market data system
+
+### Event-Driven Option Price Updates
+
+The adapter uses a reliable event-driven architecture for option prices that bypasses callback chain timing issues:
+
+```
+WebSocket Tick
+    │
+    ▼
+OptimizedTickProcessor.CacheLastTick()
+    │
+    ├───► Cache tick in _lastTickCache
+    │
+    └───► Fire OptionTickReceived event (for CE/PE symbols)
+              │
+              ▼
+         SubscriptionManager.OnOptionTickReceived()
+              │
+              └───► Fire OptionPriceUpdated event
+                         │
+                         ▼
+                    OptionChainWindow.OnOptionPriceUpdated()
+```
+
+**Why Event-Driven?**
+- **Reliable**: No timing dependencies on callback registration order
+- **Simple**: Direct event subscription, no complex callback chains
+- **Robust**: Works regardless of when UI subscribes (pre-market, post-market, mid-session)
+
+**Previous Problem Solved:**
+The callback-based approach had timing issues where:
+1. OptionChainTabPage registered callback #1 via `SubscribeForPersistence`
+2. Tick arrived and was replayed to callback #1
+3. SubscriptionManager registered callback #2 later
+4. Callback #2 never received the tick (already marked as "replayed")
+
+The event-driven approach fires `OptionTickReceived` for EVERY tick, ensuring all subscribers receive updates regardless of registration timing.
 
 ### Multi-Callback Architecture
 

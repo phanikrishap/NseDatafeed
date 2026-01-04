@@ -626,12 +626,10 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     // Create a unique key for this specific callback (symbol + callback hashcode)
                     string callbackKey = $"{symbol}_{callbackInfo.Callback.GetHashCode()}";
 
-                    // Check if THIS SPECIFIC callback has already received its initial tick
-                    if (_initializedCallbacks.ContainsKey(callbackKey))
-                        continue; // This callback already got its tick
-
-                    // Mark this callback as initialized BEFORE firing to prevent double-firing
-                    _initializedCallbacks[callbackKey] = true;
+                    // ATOMIC check-and-set: TryAdd returns false if key already exists
+                    // This prevents race condition where two threads both see "not exists" and both fire
+                    if (!_initializedCallbacks.TryAdd(callbackKey, true))
+                        continue; // Another thread already initialized this callback
 
                     var callback = callbackInfo.Callback;
 
@@ -719,12 +717,11 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                         // Create unique key for this specific callback
                         string callbackKey = $"{symbol}_{callbackInfo.Callback.GetHashCode()}";
 
-                        // Check if THIS SPECIFIC callback has already received a tick
-                        if (_initializedCallbacks.ContainsKey(callbackKey))
-                            continue; // This callback already got its tick
+                        // ATOMIC check-and-set: TryAdd returns false if key already exists
+                        // This prevents race condition where two threads both fire the same callback
+                        if (!_initializedCallbacks.TryAdd(callbackKey, true))
+                            continue; // Another thread already initialized this callback
 
-                        // Mark this callback as initialized BEFORE firing
-                        _initializedCallbacks[callbackKey] = true;
                         symbolHadNewCallbacks = true;
                         callbacksFired++;
 
