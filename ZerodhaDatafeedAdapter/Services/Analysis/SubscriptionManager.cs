@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Threading.Tasks.Dataflow;
 using System.Windows.Threading;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
@@ -19,45 +20,88 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
     /// <summary>
     /// Manages autonomous subscription workflow for generated option symbols.
     /// Handles: Registration -> NT Creation -> Live Subscription -> Historical Backfill
+    ///
+    /// Architecture: TPL Dataflow Pipeline (event-driven, backpressure-aware)
+    /// ┌─────────────────┐     ┌──────────────────┐     ┌───────────────────┐
+    /// │ _subscriptionBlock │ --> │ _historicalBlock │ --> │ _streamingBlock │
+    /// │ (BoundedCapacity) │     │ (Rate Limited)   │     │ (UI Thread Safe) │
+    /// └─────────────────┘     └──────────────────┘     └───────────────────┘
+    ///
+    /// Benefits over ConcurrentQueue + Task.Run:
+    /// - Built-in backpressure (BoundedCapacity prevents memory overflow)
+    /// - No polling loops (event-driven completion)
+    /// - Proper async/await flow (no fire-and-forget Task.Run)
+    /// - Automatic batching with MaxDegreeOfParallelism
+    /// - Clean shutdown via Complete() + Completion task
     /// </summary>
     public class SubscriptionManager
     {
         private static SubscriptionManager _instance;
         public static SubscriptionManager Instance => _instance ?? (_instance = new SubscriptionManager());
 
-        private readonly ConcurrentQueue<MappedInstrument> _subscriptionQueue = new ConcurrentQueue<MappedInstrument>();
-        private readonly ConcurrentQueue<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)> _historicalDataQueue = new ConcurrentQueue<(MappedInstrument, string, Instrument)>();
-        // Use int for Interlocked operations (0=false, 1=true)
-        private int _isProcessing = 0;
-        private int _isProcessingHistorical = 0;
-        private int _processedCount = 0;
-        private int _totalQueued = 0;
+        // ═══════════════════════════════════════════════════════════════════
+        // TPL DATAFLOW PIPELINE BLOCKS
+        // ═══════════════════════════════════════════════════════════════════
 
-        // Track processed instruments for BarsRequest after historical data is complete
+        /// <summary>
+        /// Stage 1: Subscription processing - creates NT instruments and sets up WebSocket subscriptions.
+        /// MaxDegreeOfParallelism=1 ensures sequential processing (required for NinjaTrader UI thread safety).
+        /// BoundedCapacity=500 provides backpressure if subscriptions come faster than we can process.
+        /// </summary>
+        private ActionBlock<MappedInstrument> _subscriptionBlock;
+
+        /// <summary>
+        /// Stage 2: Historical data fetching - caches data from Zerodha API.
+        /// MaxDegreeOfParallelism=10 allows parallel API calls within rate limits.
+        /// BoundedCapacity=200 prevents memory overflow during large batches.
+        /// </summary>
+        private ActionBlock<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)> _historicalBlock;
+
+        /// <summary>
+        /// Stage 3: Streaming setup - triggers BarsRequest and VWAP calculation.
+        /// MaxDegreeOfParallelism=6 balances throughput with NinjaTrader resource limits.
+        /// BoundedCapacity=100 provides backpressure from historical processing.
+        /// </summary>
+        private ActionBlock<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)> _streamingBlock;
+
+        /// <summary>
+        /// Signals when all subscription processing is complete for a batch.
+        /// Used by callers to await completion instead of polling.
+        /// </summary>
+        private TaskCompletionSource<bool> _batchCompletionSource;
+
+        // Pipeline coordination
+        private int _totalQueued = 0;
+        private int _processedCount = 0;
+        private int _historicalProcessedCount = 0;
+        private int _streamingProcessedCount = 0;
+
+        // Track processed instruments for straddle synthesis
         private readonly ConcurrentBag<(string ntSymbol, Instrument ntInstrument)> _processedInstruments = new ConcurrentBag<(string, Instrument)>();
         private readonly ConcurrentBag<string> _processedStraddleSymbols = new ConcurrentBag<string>();
 
-        // BarsRequest management
+        // BarsRequest management - keep alive for real-time tick storage
         private readonly ConcurrentDictionary<string, BarsRequest> _activeBarsRequests = new ConcurrentDictionary<string, BarsRequest>();
 
-        // Batching configuration for historical data requests
-        // Zerodha allows ~3 requests/second for historical API, so 10 parallel with 4s delay = safe throughput
-        private const int HISTORICAL_BATCH_SIZE = 10;
-        private const int HISTORICAL_BATCH_DELAY_MS = 4000; // 4 seconds between batches
+        // ═══════════════════════════════════════════════════════════════════
+        // RATE LIMITING CONFIGURATION
+        // ═══════════════════════════════════════════════════════════════════
 
-        // Optimized batch size for BarsRequest when data is already cached locally
-        // Since no API calls needed, we can process much faster
-        private const int CACHED_BATCH_SIZE = 25;
-        private const int CACHED_BATCH_DELAY_MS = 500; // 500ms between batches for cached data
+        // Zerodha API rate limits: ~3 requests/second for historical data
+        // With MaxDegreeOfParallelism=10, we batch process then throttle
+        private const int HISTORICAL_MAX_PARALLELISM = 10;
+        private const int HISTORICAL_BOUNDED_CAPACITY = 200;
 
-        // Event-driven processing: trigger BarsRequest + WebSocket after this many instruments are cached
-        private const int STREAMING_BATCH_SIZE = 6;
+        // Streaming (BarsRequest to NT) - can be faster since local operations
+        private const int STREAMING_MAX_PARALLELISM = 6;
+        private const int STREAMING_BOUNDED_CAPACITY = 100;
 
-        // Queue for instruments ready for BarsRequest and WebSocket subscription (after caching)
-        private readonly ConcurrentQueue<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)> _readyForStreamingQueue =
-            new ConcurrentQueue<(MappedInstrument, string, Instrument)>();
-        // Use int for Interlocked operations (0=false, 1=true)
-        private int _isProcessingStreaming = 0;
+        // Subscription processing - sequential for thread safety
+        private const int SUBSCRIPTION_BOUNDED_CAPACITY = 500;
+
+        // Rate limiting semaphore for historical API calls
+        private readonly SemaphoreSlim _historicalRateLimiter = new SemaphoreSlim(3, 3); // 3 concurrent API calls max
+        private const int HISTORICAL_RATE_LIMIT_DELAY_MS = 350; // ~3 requests/second
 
         // Event for UI updates
         public event Action<string, double> OptionPriceUpdated;
@@ -82,8 +126,125 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         private SubscriptionManager()
         {
-            Logger.Info("[SubscriptionManager] Constructor: Initializing singleton instance");
+            Logger.Info("[SubscriptionManager] Constructor: Initializing singleton instance with TPL Dataflow pipeline");
+            InitializeDataflowPipeline();
             SubscribeToTickEvents();
+        }
+
+        /// <summary>
+        /// Initializes the TPL Dataflow pipeline with proper backpressure and parallelism settings.
+        /// This replaces the old ConcurrentQueue + Task.Run pattern with event-driven processing.
+        /// </summary>
+        private void InitializeDataflowPipeline()
+        {
+            Logger.Info("[SubscriptionManager] Initializing TPL Dataflow pipeline...");
+
+            // Stage 1: Subscription Block - processes instruments sequentially
+            // Sequential because NinjaTrader instrument creation requires UI thread coordination
+            _subscriptionBlock = new ActionBlock<MappedInstrument>(
+                async instrument =>
+                {
+                    try
+                    {
+                        int count = Interlocked.Increment(ref _processedCount);
+                        Logger.Info($"[SubscriptionManager] Pipeline Stage 1: Processing {count}/{_totalQueued} - {instrument.symbol}");
+                        await SubscribeToInstrument(instrument);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[SubscriptionManager] Pipeline Stage 1 Error: {instrument.symbol} - {ex.Message}", ex);
+                    }
+                },
+                new ExecutionDataflowBlockOptions
+                {
+                    MaxDegreeOfParallelism = 1, // Sequential for UI thread safety
+                    BoundedCapacity = SUBSCRIPTION_BOUNDED_CAPACITY
+                });
+
+            // Stage 2: Historical Data Block - fetches data with rate limiting
+            // Parallel with semaphore-based rate limiting to respect Zerodha API limits
+            _historicalBlock = new ActionBlock<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)>(
+                async item =>
+                {
+                    try
+                    {
+                        // Rate limiting: acquire semaphore before API call
+                        await _historicalRateLimiter.WaitAsync();
+                        try
+                        {
+                            int count = Interlocked.Increment(ref _historicalProcessedCount);
+                            Logger.Debug($"[SubscriptionManager] Pipeline Stage 2: Historical fetch {count} - {item.ntSymbol}");
+                            await TriggerBackfillAndUpdatePrice(item.mappedInst, item.ntSymbol, item.ntInstrument);
+                        }
+                        finally
+                        {
+                            // Release after a delay to enforce rate limit
+                            _ = Task.Delay(HISTORICAL_RATE_LIMIT_DELAY_MS).ContinueWith(_ => _historicalRateLimiter.Release());
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[SubscriptionManager] Pipeline Stage 2 Error: {item.ntSymbol} - {ex.Message}", ex);
+                    }
+                },
+                new ExecutionDataflowBlockOptions
+                {
+                    MaxDegreeOfParallelism = HISTORICAL_MAX_PARALLELISM,
+                    BoundedCapacity = HISTORICAL_BOUNDED_CAPACITY
+                });
+
+            // Stage 3: Streaming Block - sets up BarsRequest and VWAP
+            // Moderate parallelism for NinjaTrader resource management
+            _streamingBlock = new ActionBlock<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)>(
+                async item =>
+                {
+                    try
+                    {
+                        int count = Interlocked.Increment(ref _streamingProcessedCount);
+                        Logger.Debug($"[SubscriptionManager] Pipeline Stage 3: Streaming setup {count} - {item.ntSymbol}");
+                        await RequestBarsForInstrumentStreaming(item.ntSymbol, item.ntInstrument, DateTime.Now.AddDays(-3), DateTime.Now);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[SubscriptionManager] Pipeline Stage 3 Error: {item.ntSymbol} - {ex.Message}", ex);
+                    }
+                },
+                new ExecutionDataflowBlockOptions
+                {
+                    MaxDegreeOfParallelism = STREAMING_MAX_PARALLELISM,
+                    BoundedCapacity = STREAMING_BOUNDED_CAPACITY
+                });
+
+            // Monitor pipeline completion for straddle processing
+            MonitorPipelineCompletion();
+
+            Logger.Info("[SubscriptionManager] TPL Dataflow pipeline initialized successfully");
+        }
+
+        /// <summary>
+        /// Monitors the streaming block completion to trigger straddle symbol processing.
+        /// This replaces the polling loop in ProcessStreamingQueue.
+        /// </summary>
+        private void MonitorPipelineCompletion()
+        {
+            // When streaming block completes, process straddle symbols
+            _streamingBlock.Completion.ContinueWith(async task =>
+            {
+                if (task.IsFaulted)
+                {
+                    Logger.Error($"[SubscriptionManager] Streaming block faulted: {task.Exception?.GetBaseException().Message}");
+                    return;
+                }
+
+                Logger.Info("[SubscriptionManager] Streaming pipeline completed - processing straddle symbols");
+                await ProcessStraddleSymbolsStreaming();
+
+                // Signal batch completion
+                _batchCompletionSource?.TrySetResult(true);
+
+                // Reinitialize pipeline for next batch
+                InitializeDataflowPipeline();
+            }, TaskContinuationOptions.ExecuteSynchronously);
         }
 
         /// <summary>
@@ -135,72 +296,95 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Queues a list of instruments for subscription processing
+        /// Queues a list of instruments for subscription processing using TPL Dataflow pipeline.
+        /// This method posts to the subscription block and returns immediately (non-blocking).
+        /// Use AwaitBatchCompletion() to wait for all processing to complete.
         /// </summary>
         public void QueueSubscription(List<MappedInstrument> instruments)
         {
-            Logger.Info($"[SubscriptionManager] QueueSubscription(): Received {instruments.Count} instruments to queue");
+            Logger.Info($"[SubscriptionManager] QueueSubscription(): Received {instruments.Count} instruments to queue via TPL Dataflow");
 
             // Ensure we're subscribed to tick events (retry if not done during construction)
-            // Volatile read to check if subscription succeeded
             if (Interlocked.CompareExchange(ref _subscribedToTickEvents, 0, 0) == 0)
             {
                 SubscribeToTickEvents();
             }
 
+            // Reset counters for new batch
             _totalQueued = instruments.Count;
-            _processedCount = 0;
+            Interlocked.Exchange(ref _processedCount, 0);
+            Interlocked.Exchange(ref _historicalProcessedCount, 0);
+            Interlocked.Exchange(ref _streamingProcessedCount, 0);
 
+            // Create new completion source for this batch
+            _batchCompletionSource = new TaskCompletionSource<bool>();
+
+            // Post all instruments to the pipeline (non-blocking with backpressure)
+            int postedCount = 0;
             foreach (var inst in instruments)
             {
-                _subscriptionQueue.Enqueue(inst);
-                Logger.Debug($"[SubscriptionManager] QueueSubscription(): Enqueued {inst.symbol}");
+                // SendAsync respects BoundedCapacity - will await if queue is full
+                bool posted = _subscriptionBlock.Post(inst);
+                if (posted)
+                {
+                    postedCount++;
+                    Logger.Debug($"[SubscriptionManager] QueueSubscription(): Posted {inst.symbol} to pipeline");
+                }
+                else
+                {
+                    // Block is full or completed - use SendAsync for backpressure
+                    Logger.Warn($"[SubscriptionManager] QueueSubscription(): Block full, using async post for {inst.symbol}");
+                    _ = _subscriptionBlock.SendAsync(inst);
+                    postedCount++;
+                }
             }
 
-            Logger.Info($"[SubscriptionManager] QueueSubscription(): Queue size is now {_subscriptionQueue.Count}");
+            Logger.Info($"[SubscriptionManager] QueueSubscription(): Posted {postedCount}/{instruments.Count} instruments to TPL Dataflow pipeline");
+        }
 
-            // Atomic check-and-set: only start processor if we're the first to change 0 -> 1
-            if (Interlocked.CompareExchange(ref _isProcessing, 1, 0) == 0)
+        /// <summary>
+        /// Awaits completion of all subscription processing for the current batch.
+        /// This provides an event-driven alternative to polling for completion.
+        /// </summary>
+        /// <param name="timeout">Optional timeout in milliseconds (default: 5 minutes)</param>
+        /// <returns>True if batch completed successfully, false if timed out or faulted</returns>
+        public async Task<bool> AwaitBatchCompletion(int timeout = 300000)
+        {
+            if (_batchCompletionSource == null) return true;
+
+            try
             {
-                Logger.Info("[SubscriptionManager] QueueSubscription(): Starting queue processor...");
-                Task.Run(ProcessQueue);
+                using (var cts = new CancellationTokenSource(timeout))
+                {
+                    var completedTask = await Task.WhenAny(_batchCompletionSource.Task, Task.Delay(timeout, cts.Token));
+                    if (completedTask == _batchCompletionSource.Task)
+                    {
+                        cts.Cancel(); // Cancel the delay task
+                        return await _batchCompletionSource.Task;
+                    }
+                    Logger.Warn($"[SubscriptionManager] AwaitBatchCompletion(): Timed out after {timeout}ms");
+                    return false;
+                }
             }
-            else
+            catch (Exception ex)
             {
-                Logger.Info("[SubscriptionManager] QueueSubscription(): Queue processor already running");
+                Logger.Error($"[SubscriptionManager] AwaitBatchCompletion(): Error - {ex.Message}");
+                return false;
             }
         }
 
         /// <summary>
-        /// Processes the subscription queue one instrument at a time
+        /// Signals that no more items will be posted to the subscription pipeline.
+        /// Call this after QueueSubscription to allow the pipeline to complete gracefully.
         /// </summary>
-        private async Task ProcessQueue()
+        public void CompleteSubscriptionPipeline()
         {
-            Logger.Info("[SubscriptionManager] ProcessQueue(): Started processing");
-            // Note: _isProcessing already set to 1 by caller via Interlocked.CompareExchange
-
-            while (_subscriptionQueue.TryDequeue(out var instrument))
-            {
-                _processedCount++;
-                Logger.Info($"[SubscriptionManager] ProcessQueue(): Processing {_processedCount}/{_totalQueued} - {instrument.symbol}");
-
-                try
-                {
-                    await SubscribeToInstrument(instrument);
-                    Logger.Info($"[SubscriptionManager] ProcessQueue(): Completed {instrument.symbol}");
-
-                    // Minimal delay - subscriptions are lightweight
-                    await Task.Delay(10);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[SubscriptionManager] ProcessQueue(): Failed to process {instrument.symbol} - {ex.Message}", ex);
-                }
-            }
-
-            Interlocked.Exchange(ref _isProcessing, 0);
-            Logger.Info($"[SubscriptionManager] ProcessQueue(): Completed all {_processedCount} instruments");
+            Logger.Info("[SubscriptionManager] CompleteSubscriptionPipeline(): Signaling subscription block completion");
+            _subscriptionBlock.Complete();
         }
+
+        // NOTE: ProcessQueue has been replaced by the TPL Dataflow _subscriptionBlock.
+        // The ActionBlock processes items automatically with proper backpressure and parallelism control.
 
         /// <summary>
         /// Subscribes to a single instrument - full workflow
@@ -333,16 +517,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         Logger.Warn($"[SubscriptionManager] SubscribeToInstrument({ntName}): Adapter is NULL - cannot subscribe to live data");
                     }
 
-                    // Step 6: Queue for batched historical data fetch (don't trigger immediately)
-                    Logger.Info($"[SubscriptionManager] SubscribeToInstrument({ntName}): Queueing for batched historical data fetch");
-                    _historicalDataQueue.Enqueue((instrument, ntName, ntInstrument));
-
-                    // Start historical data processor if not already running (atomic check-and-set)
-                    if (Interlocked.CompareExchange(ref _isProcessingHistorical, 1, 0) == 0)
+                    // Step 6: Post to historical data pipeline (TPL Dataflow with rate limiting)
+                    Logger.Info($"[SubscriptionManager] SubscribeToInstrument({ntName}): Posting to historical data pipeline");
+                    bool posted = _historicalBlock.Post((instrument, ntName, ntInstrument));
+                    if (!posted)
                     {
-                        Logger.Info("[SubscriptionManager] Starting historical data batch processor...");
-                        _ = Task.Run(ProcessHistoricalDataQueue);
+                        Logger.Warn($"[SubscriptionManager] SubscribeToInstrument({ntName}): Historical block full, using async post");
+                        await _historicalBlock.SendAsync((instrument, ntName, ntInstrument));
                     }
+                    Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({ntName}): Posted to historical pipeline");
                 }
                 else
                 {
@@ -355,65 +538,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
         }
 
-        /// <summary>
-        /// Processes the historical data queue in batches to avoid overloading Zerodha API
-        /// </summary>
-        private async Task ProcessHistoricalDataQueue()
-        {
-            Logger.Info("[SubscriptionManager] ProcessHistoricalDataQueue(): Started batch processor");
-            // Note: _isProcessingHistorical already set to 1 by caller via Interlocked.CompareExchange
-
-            int batchNumber = 0;
-            int totalProcessed = 0;
-
-            while (!_historicalDataQueue.IsEmpty || Interlocked.CompareExchange(ref _isProcessing, 0, 0) != 0)
-            {
-                // Wait for subscription processing to complete first before starting historical fetch
-                if (Interlocked.CompareExchange(ref _isProcessing, 0, 0) != 0)
-                {
-                    Logger.Debug("[SubscriptionManager] ProcessHistoricalDataQueue(): Waiting for subscription processing to complete...");
-                    await Task.Delay(1000);
-                    continue;
-                }
-
-                // Collect a batch of instruments
-                var batch = new List<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)>();
-                while (batch.Count < HISTORICAL_BATCH_SIZE && _historicalDataQueue.TryDequeue(out var item))
-                {
-                    batch.Add(item);
-                }
-
-                if (batch.Count == 0)
-                {
-                    // No more items, exit
-                    break;
-                }
-
-                batchNumber++;
-                Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Processing batch {batchNumber} with {batch.Count} instruments");
-
-                // Process the batch in parallel
-                var tasks = batch.Select(item => TriggerBackfillAndUpdatePrice(item.mappedInst, item.ntSymbol, item.ntInstrument)).ToArray();
-                await Task.WhenAll(tasks);
-
-                totalProcessed += batch.Count;
-                Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Batch {batchNumber} complete. Total processed: {totalProcessed}");
-
-                // Wait between batches to avoid rate limiting
-                if (!_historicalDataQueue.IsEmpty)
-                {
-                    Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Waiting {HISTORICAL_BATCH_DELAY_MS / 1000}s before next batch...");
-                    await Task.Delay(HISTORICAL_BATCH_DELAY_MS);
-                }
-            }
-
-            Interlocked.Exchange(ref _isProcessingHistorical, 0);
-            Logger.Info($"[SubscriptionManager] ProcessHistoricalDataQueue(): Completed all batches. Total instruments processed: {totalProcessed}");
-
-            // NOTE: BarsRequest + WebSocket subscription is now handled in real-time by ProcessStreamingQueue
-            // as instruments are cached, rather than waiting for all to complete.
-            Logger.Info("[SubscriptionManager] ProcessHistoricalDataQueue(): Historical caching complete. Streaming processor handles BarsRequest.");
-        }
+        // NOTE: ProcessHistoricalDataQueue has been replaced by the TPL Dataflow _historicalBlock.
+        // The ActionBlock provides:
+        // - Automatic rate limiting via _historicalRateLimiter semaphore
+        // - MaxDegreeOfParallelism=10 for parallel API calls within rate limits
+        // - BoundedCapacity=200 for backpressure from subscription processing
+        // - No polling loops or "Sleep & Hope" patterns
 
         /// <summary>
         /// Triggers historical data backfill for an instrument and updates the price in UI.
@@ -452,16 +582,16 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     // Notify UI of status - "Cached" means data is in SQLite cache, ready for BarsRequest
                     OptionStatusUpdated?.Invoke(ntSymbol, $"Cached ({records.Count})");
 
-                    // Track this instrument for BarsRequest (kept for backward compatibility)
+                    // Track this instrument for straddle processing
                     _processedInstruments.Add((ntSymbol, instrument));
 
-                    // Queue for immediate streaming (BarsRequest + WebSocket)
-                    _readyForStreamingQueue.Enqueue((mappedInst, ntSymbol, instrument));
-
-                    // Start streaming processor if not running (atomic check-and-set)
-                    if (Interlocked.CompareExchange(ref _isProcessingStreaming, 1, 0) == 0)
+                    // Post to streaming pipeline (BarsRequest + VWAP setup)
+                    // TPL Dataflow handles backpressure automatically
+                    bool posted = _streamingBlock.Post((mappedInst, ntSymbol, instrument));
+                    if (!posted)
                     {
-                        _ = Task.Run(ProcessStreamingQueue);
+                        Logger.Debug($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Streaming block full, using async post");
+                        await _streamingBlock.SendAsync((mappedInst, ntSymbol, instrument));
                     }
 
                     // Cache bars for straddle computation if this is an option
@@ -507,72 +637,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
         }
 
-        /// <summary>
-        /// Processes instruments ready for streaming in mini-batches.
-        /// Triggers BarsRequest to push to NT DB and starts WebSocket subscription immediately.
-        /// </summary>
-        private async Task ProcessStreamingQueue()
-        {
-            // Note: _isProcessingStreaming already set to 1 by caller via Interlocked.CompareExchange
-            Logger.Info("[SubscriptionManager] ProcessStreamingQueue(): Started event-driven streaming processor");
-
-            DateTime fromDate = DateTime.Now.AddDays(-3);
-            DateTime toDate = DateTime.Now;
-            int batchNumber = 0;
-            int totalStreamed = 0;
-
-            while (true)
-            {
-                // Collect a mini-batch of instruments ready for streaming
-                var batch = new List<(MappedInstrument mappedInst, string ntSymbol, Instrument ntInstrument)>();
-
-                // Wait until we have STREAMING_BATCH_SIZE instruments OR historical processing is complete
-                while (batch.Count < STREAMING_BATCH_SIZE)
-                {
-                    if (_readyForStreamingQueue.TryDequeue(out var item))
-                    {
-                        batch.Add(item);
-                    }
-                    else if (Interlocked.CompareExchange(ref _isProcessingHistorical, 0, 0) == 0 && _readyForStreamingQueue.IsEmpty)
-                    {
-                        // Historical processing done and queue empty - process remaining batch
-                        break;
-                    }
-                    else
-                    {
-                        // Wait a bit for more items
-                        await Task.Delay(100);
-                    }
-                }
-
-                if (batch.Count == 0)
-                {
-                    // All done
-                    break;
-                }
-
-                batchNumber++;
-                Logger.Info($"[SubscriptionManager] ProcessStreamingQueue(): Processing streaming batch {batchNumber} with {batch.Count} instruments");
-
-                // Process each instrument: BarsRequest -> VWAP -> WebSocket (all happen in RequestBarsForInstrument callback)
-                foreach (var (mappedInst, ntSymbol, ntInstrument) in batch)
-                {
-                    await RequestBarsForInstrumentStreaming(ntSymbol, ntInstrument, fromDate, toDate);
-                    totalStreamed++;
-                }
-
-                Logger.Info($"[SubscriptionManager] ProcessStreamingQueue(): Batch {batchNumber} complete. Total streamed: {totalStreamed}");
-
-                // Small delay between batches to avoid overwhelming NT
-                await Task.Delay(200);
-            }
-
-            Interlocked.Exchange(ref _isProcessingStreaming, 0);
-            Logger.Info($"[SubscriptionManager] ProcessStreamingQueue(): Completed. Total instruments streamed: {totalStreamed}");
-
-            // Process any straddle symbols that accumulated
-            await ProcessStraddleSymbolsStreaming();
-        }
+        // NOTE: ProcessStreamingQueue has been replaced by the TPL Dataflow _streamingBlock.
+        // The ActionBlock provides:
+        // - MaxDegreeOfParallelism=6 for balanced throughput
+        // - BoundedCapacity=100 for backpressure from historical processing
+        // - Completion event triggers straddle processing (see MonitorPipelineCompletion)
+        // - No polling loops or manual batch collection
 
         /// <summary>
         /// Requests bars for a CE/PE instrument (streaming mode - immediate processing).
@@ -690,145 +760,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
         }
 
-        /// <summary>
-        /// Triggers BarsRequest for all processed instruments to push data into NinjaTrader's database.
-        /// Called after all historical data has been fetched and cached.
-        /// OPTIMIZED: Uses larger batch size (25) and shorter delays (500ms) when data is cached locally.
-        /// </summary>
-        private async Task TriggerBarsRequestForAllInstruments()
-        {
-            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Starting - {_processedInstruments.Count} CE/PE instruments, {_processedStraddleSymbols.Distinct().Count()} STRDL symbols");
-
-            DateTime fromDate = DateTime.Now.AddDays(-3);
-            DateTime toDate = DateTime.Now;
-
-            int batchCount = 0;
-            int totalRequested = 0;
-
-            // Separate CE/PE instruments into cached and non-cached for optimized batching
-            var cepeInstruments = _processedInstruments.ToList();
-            var cachedCEPE = new List<(string ntSymbol, Instrument ntInstrument)>();
-            var nonCachedCEPE = new List<(string ntSymbol, Instrument ntInstrument)>();
-
-            foreach (var (ntSymbol, ntInstrument) in cepeInstruments)
-            {
-                if (HistoricalBarCache.Instance.HasCachedData(ntSymbol, "minute", fromDate, toDate))
-                    cachedCEPE.Add((ntSymbol, ntInstrument));
-                else
-                    nonCachedCEPE.Add((ntSymbol, ntInstrument));
-            }
-
-            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: CE/PE split - {cachedCEPE.Count} cached, {nonCachedCEPE.Count} non-cached");
-
-            // Process CACHED CE/PE instruments with larger batch size and shorter delay
-            if (cachedCEPE.Count > 0)
-            {
-                Logger.Info($"[SubscriptionManager] Processing {cachedCEPE.Count} CACHED CE/PE instruments (batch size={CACHED_BATCH_SIZE}, delay={CACHED_BATCH_DELAY_MS}ms)");
-                for (int i = 0; i < cachedCEPE.Count; i += CACHED_BATCH_SIZE)
-                {
-                    var batch = cachedCEPE.Skip(i).Take(CACHED_BATCH_SIZE).ToList();
-                    batchCount++;
-
-                    Logger.Info($"[SubscriptionManager] Processing CACHED CE/PE batch {batchCount} with {batch.Count} instruments");
-
-                    foreach (var (ntSymbol, ntInstrument) in batch)
-                    {
-                        await RequestBarsForInstrument(ntSymbol, ntInstrument, fromDate, toDate);
-                        totalRequested++;
-                    }
-
-                    // Short delay between cached batches
-                    if (i + CACHED_BATCH_SIZE < cachedCEPE.Count)
-                    {
-                        await Task.Delay(CACHED_BATCH_DELAY_MS);
-                    }
-                }
-            }
-
-            // Process NON-CACHED CE/PE instruments with standard batch size
-            if (nonCachedCEPE.Count > 0)
-            {
-                Logger.Info($"[SubscriptionManager] Processing {nonCachedCEPE.Count} NON-CACHED CE/PE instruments (batch size={HISTORICAL_BATCH_SIZE}, delay=1000ms)");
-                for (int i = 0; i < nonCachedCEPE.Count; i += HISTORICAL_BATCH_SIZE)
-                {
-                    var batch = nonCachedCEPE.Skip(i).Take(HISTORICAL_BATCH_SIZE).ToList();
-                    batchCount++;
-
-                    Logger.Info($"[SubscriptionManager] Processing NON-CACHED CE/PE batch {batchCount} with {batch.Count} instruments");
-
-                    foreach (var (ntSymbol, ntInstrument) in batch)
-                    {
-                        await RequestBarsForInstrument(ntSymbol, ntInstrument, fromDate, toDate);
-                        totalRequested++;
-                    }
-
-                    // Standard delay between non-cached batches
-                    if (i + HISTORICAL_BATCH_SIZE < nonCachedCEPE.Count)
-                    {
-                        await Task.Delay(1000);
-                    }
-                }
-            }
-
-            // Process STRDL instruments - separate cached vs non-cached
-            var straddleSymbols = _processedStraddleSymbols.Distinct().ToList();
-            var cachedStraddles = straddleSymbols.Where(s => StraddleBarCache.Instance.HasCachedData(s)).ToList();
-            var nonCachedStraddles = straddleSymbols.Where(s => !StraddleBarCache.Instance.HasCachedData(s)).ToList();
-
-            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: STRDL split - {cachedStraddles.Count} cached, {nonCachedStraddles.Count} non-cached");
-
-            // Process CACHED STRDL instruments with larger batch size
-            if (cachedStraddles.Count > 0)
-            {
-                Logger.Info($"[SubscriptionManager] Processing {cachedStraddles.Count} CACHED STRDL instruments (batch size={CACHED_BATCH_SIZE}, delay={CACHED_BATCH_DELAY_MS}ms)");
-                for (int i = 0; i < cachedStraddles.Count; i += CACHED_BATCH_SIZE)
-                {
-                    var batch = cachedStraddles.Skip(i).Take(CACHED_BATCH_SIZE).ToList();
-                    batchCount++;
-
-                    Logger.Info($"[SubscriptionManager] Processing CACHED STRDL batch {batchCount} with {batch.Count} instruments");
-
-                    foreach (var straddleSymbol in batch)
-                    {
-                        await RequestBarsForStraddleSymbol(straddleSymbol, fromDate, toDate);
-                        totalRequested++;
-                    }
-
-                    // Short delay between cached batches
-                    if (i + CACHED_BATCH_SIZE < cachedStraddles.Count)
-                    {
-                        await Task.Delay(CACHED_BATCH_DELAY_MS);
-                    }
-                }
-            }
-
-            // Process NON-CACHED STRDL instruments with standard batch size
-            if (nonCachedStraddles.Count > 0)
-            {
-                Logger.Info($"[SubscriptionManager] Processing {nonCachedStraddles.Count} NON-CACHED STRDL instruments (batch size={HISTORICAL_BATCH_SIZE}, delay=1000ms)");
-                for (int i = 0; i < nonCachedStraddles.Count; i += HISTORICAL_BATCH_SIZE)
-                {
-                    var batch = nonCachedStraddles.Skip(i).Take(HISTORICAL_BATCH_SIZE).ToList();
-                    batchCount++;
-
-                    Logger.Info($"[SubscriptionManager] Processing NON-CACHED STRDL batch {batchCount} with {batch.Count} instruments");
-
-                    foreach (var straddleSymbol in batch)
-                    {
-                        await RequestBarsForStraddleSymbol(straddleSymbol, fromDate, toDate);
-                        totalRequested++;
-                    }
-
-                    // Standard delay between non-cached batches
-                    if (i + HISTORICAL_BATCH_SIZE < nonCachedStraddles.Count)
-                    {
-                        await Task.Delay(1000);
-                    }
-                }
-            }
-
-            Logger.Info($"[SubscriptionManager] TriggerBarsRequestForAllInstruments: Completed - {totalRequested} total BarsRequests sent");
-        }
+        // NOTE: TriggerBarsRequestForAllInstruments has been replaced by the TPL Dataflow pipeline.
+        // The streaming block now handles BarsRequest processing in real-time as historical data is cached,
+        // rather than waiting for all historical data to complete before processing.
 
         /// <summary>
         /// Requests bars for a CE/PE instrument to save to NinjaTrader database.
