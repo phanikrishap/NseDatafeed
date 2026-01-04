@@ -8,6 +8,23 @@ namespace ZerodhaDatafeedAdapter.Models.MarketData
     public class ZerodhaTickData
     {
         /// <summary>
+        /// Constructor that initializes the DepthEntry arrays with actual objects.
+        /// This is necessary because the arrays are initialized as arrays of null references.
+        /// </summary>
+        public ZerodhaTickData()
+        {
+            // Initialize BidDepth and AskDepth arrays with actual DepthEntry objects
+            for (int i = 0; i < BidDepth.Length; i++)
+            {
+                BidDepth[i] = new DepthEntry();
+            }
+            for (int i = 0; i < AskDepth.Length; i++)
+            {
+                AskDepth[i] = new DepthEntry();
+            }
+        }
+
+        /// <summary>
         /// The instrument token
         /// </summary>
         public int InstrumentToken { get; set; }

@@ -607,7 +607,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 }
 
                 // DIAGNOSTIC: Log option ticks at entry point
-                if ((symbol?.Contains("CE") == true || symbol?.Contains("PE") == true) && !symbol.Contains("SENSEX") && !symbol.Contains("BANKNIFTY"))
+                if (symbol != null && (symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX") && !symbol.Contains("BANKNIFTY"))
                 {
                     if (Interlocked.Increment(ref _optionTickReceiveCounter) % 100 == 1)
                     {
@@ -677,44 +677,15 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private bool IsIndexSymbol(string symbol) => Helpers.SymbolHelper.IsIndexSymbol(symbol);
 
         /// <summary>
-        /// Monitors for chart close and cleans up subscription using reference counting
+        /// Exit monitoring is DISABLED - all subscriptions are sticky by design.
+        /// Once subscribed, connections stay active for the entire session.
+        /// This prevents NinjaTrader's aggressive UnsubscribeMarketData calls from killing data feeds.
         /// </summary>
         private void StartExitMonitoringForSharedSubscription(string symbol, string consumerId, WebSocketConnectionFunc webSocketConnectionFunc)
         {
-            Task.Run(async () =>
-            {
-                while (true)
-                {
-                    try
-                    {
-                        if (webSocketConnectionFunc.ExitFunction())
-                        {
-                            // Remove reference using SubscriptionTrackingService
-                            bool shouldUnsubscribe = SubscriptionTrackingService.Instance.RemoveReference(symbol, consumerId);
-
-                            if (shouldUnsubscribe)
-                            {
-                                // This was the last reference - actually unsubscribe from WebSocket
-                                Logger.Debug($"[TICK-SHARED] Exit detected for {symbol}, last reference removed - unsubscribing from WebSocket");
-                                _sharedWebSocketService?.UnsubscribeAsync(symbol);
-                            }
-                            else
-                            {
-                                int remainingRefs = SubscriptionTrackingService.Instance.GetReferenceCount(symbol);
-                                Logger.Debug($"[TICK-SHARED] Exit detected for {symbol}, consumer={consumerId} removed, {remainingRefs} references remaining");
-                            }
-                            break;
-                        }
-                        await Task.Delay(500);
-                    }
-                    catch
-                    {
-                        // On error, still try to remove reference
-                        SubscriptionTrackingService.Instance.RemoveReference(symbol, consumerId);
-                        break;
-                    }
-                }
-            });
+            // ALL subscriptions are sticky - no exit monitoring needed
+            // Subscriptions persist for the entire session regardless of ExitFunction state
+            Logger.Debug($"[TICK-SHARED] Exit monitoring DISABLED (all subscriptions are sticky): {symbol}");
         }
 
         /// <summary>

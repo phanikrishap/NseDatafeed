@@ -1,4 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
+using log4net;
+using Newtonsoft.Json.Linq;
 using ZerodhaDatafeedAdapter.Classes;
 
 namespace ZerodhaDatafeedAdapter.Helpers
@@ -9,8 +13,86 @@ namespace ZerodhaDatafeedAdapter.Helpers
     /// </summary>
     public static class DateTimeHelper
     {
+        private static readonly ILog Logger = LogManager.GetLogger(typeof(DateTimeHelper));
+
         // Cached TimeZone for performance (avoid repeated FindSystemTimeZoneById calls)
         private static readonly TimeZoneInfo IstTimeZone = TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId);
+
+        // Holiday calendar - loaded from holidayCalendar.json
+        private static readonly HashSet<DateTime> _holidays = new HashSet<DateTime>();
+        private static bool _holidaysLoaded = false;
+        private static readonly object _holidayLoadLock = new object();
+
+        /// <summary>
+        /// Loads the holiday calendar from the JSON file.
+        /// Called automatically on first use of holiday-aware methods.
+        /// </summary>
+        public static void LoadHolidayCalendar()
+        {
+            if (_holidaysLoaded) return;
+
+            lock (_holidayLoadLock)
+            {
+                if (_holidaysLoaded) return;
+
+                try
+                {
+                    string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                    string holidayFilePath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "holidayCalendar.json");
+
+                    if (File.Exists(holidayFilePath))
+                    {
+                        string json = File.ReadAllText(holidayFilePath);
+                        var calendarData = JObject.Parse(json);
+                        var holidays = calendarData["holidays"] as JArray;
+
+                        if (holidays != null)
+                        {
+                            foreach (var holiday in holidays)
+                            {
+                                string dateStr = holiday["date"]?.ToString();
+                                if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out DateTime holidayDate))
+                                {
+                                    _holidays.Add(holidayDate.Date);
+                                }
+                            }
+                            Logger.Info($"[HOLIDAY-CAL] Loaded {_holidays.Count} holidays from {holidayFilePath}");
+                        }
+                    }
+                    else
+                    {
+                        Logger.Warn($"[HOLIDAY-CAL] Holiday calendar not found at {holidayFilePath}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[HOLIDAY-CAL] Error loading holiday calendar: {ex.Message}");
+                }
+                finally
+                {
+                    _holidaysLoaded = true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks if a given date is a trading holiday.
+        /// </summary>
+        public static bool IsHoliday(DateTime date)
+        {
+            LoadHolidayCalendar();
+            return _holidays.Contains(date.Date);
+        }
+
+        /// <summary>
+        /// Checks if a given date is a non-trading day (weekend or holiday).
+        /// </summary>
+        public static bool IsNonTradingDay(DateTime date)
+        {
+            return date.DayOfWeek == DayOfWeek.Saturday ||
+                   date.DayOfWeek == DayOfWeek.Sunday ||
+                   IsHoliday(date);
+        }
 
         /// <summary>
         /// Ensures DateTime has proper Kind for NinjaTrader compatibility.
@@ -131,8 +213,8 @@ namespace ZerodhaDatafeedAdapter.Helpers
             var now = NowIst;
             var timeOfDay = now.TimeOfDay;
 
-            // Check if it's a weekday (Monday=1, Friday=5)
-            if (now.DayOfWeek == DayOfWeek.Saturday || now.DayOfWeek == DayOfWeek.Sunday)
+            // Check if it's a non-trading day (weekend or holiday)
+            if (IsNonTradingDay(now))
                 return false;
 
             return timeOfDay >= MarketOpenTime && timeOfDay <= MarketCloseTime;
@@ -148,8 +230,8 @@ namespace ZerodhaDatafeedAdapter.Helpers
             var now = NowIst;
             var timeOfDay = now.TimeOfDay;
 
-            // Check if it's a weekday
-            if (now.DayOfWeek == DayOfWeek.Saturday || now.DayOfWeek == DayOfWeek.Sunday)
+            // Check if it's a non-trading day (weekend or holiday)
+            if (IsNonTradingDay(now))
                 return false;
 
             // Indices get data from 9:00 AM (pre-market) to 3:30 PM
@@ -191,8 +273,8 @@ namespace ZerodhaDatafeedAdapter.Helpers
             var istTime = ConvertToIst(dateTime);
             var timeOfDay = istTime.TimeOfDay;
 
-            // Check if it's a weekday
-            if (istTime.DayOfWeek == DayOfWeek.Saturday || istTime.DayOfWeek == DayOfWeek.Sunday)
+            // Check if it's a non-trading day (weekend or holiday)
+            if (IsNonTradingDay(istTime))
                 return false;
 
             return timeOfDay >= MarketOpenTime && timeOfDay <= MarketCloseTime;
@@ -200,13 +282,14 @@ namespace ZerodhaDatafeedAdapter.Helpers
 
         /// <summary>
         /// Checks if current time is pre-market (before 9:15 AM IST on a trading day).
+        /// Returns false on holidays and weekends.
         /// </summary>
         public static bool IsPreMarket()
         {
             var now = NowIst;
 
-            // Weekends are not pre-market
-            if (now.DayOfWeek == DayOfWeek.Saturday || now.DayOfWeek == DayOfWeek.Sunday)
+            // Non-trading days are not pre-market
+            if (IsNonTradingDay(now))
                 return false;
 
             return now.TimeOfDay < MarketOpenTime;
@@ -214,13 +297,14 @@ namespace ZerodhaDatafeedAdapter.Helpers
 
         /// <summary>
         /// Checks if current time is post-market (after 3:30 PM IST on a trading day).
+        /// Returns false on holidays and weekends.
         /// </summary>
         public static bool IsPostMarket()
         {
             var now = NowIst;
 
-            // Weekends are not post-market
-            if (now.DayOfWeek == DayOfWeek.Saturday || now.DayOfWeek == DayOfWeek.Sunday)
+            // Non-trading days are not post-market
+            if (IsNonTradingDay(now))
                 return false;
 
             return now.TimeOfDay > MarketCloseTime;

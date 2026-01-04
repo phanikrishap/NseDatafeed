@@ -50,9 +50,9 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         /// <param name="consumerId">Unique ID of the consumer (chart, option chain, etc.)</param>
         /// <param name="instrumentToken">The instrument token for WebSocket subscription</param>
         /// <param name="isIndex">Whether this is an index symbol</param>
-        /// <param name="isSticky">If true, subscription will never be unsubscribed even if refcount=0</param>
+        /// <param name="isSticky">If true, subscription will never be unsubscribed even if refcount=0. DEFAULT=true for all subscriptions.</param>
         /// <returns>True if this is the first reference and WebSocket subscription should be created</returns>
-        public bool AddReference(string symbol, string consumerId, int instrumentToken = 0, bool isIndex = false, bool isSticky = false)
+        public bool AddReference(string symbol, string consumerId, int instrumentToken = 0, bool isIndex = false, bool isSticky = true)
         {
             lock (_operationLock)
             {
@@ -160,6 +160,18 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 return info.ReferenceCount;
             }
             return 0;
+        }
+
+        /// <summary>
+        /// Checks if a subscription is sticky (should never be unsubscribed).
+        /// </summary>
+        public bool IsSticky(string symbol)
+        {
+            if (_subscriptions.TryGetValue(symbol, out var info))
+            {
+                return info.IsSticky;
+            }
+            return false;
         }
 
         /// <summary>

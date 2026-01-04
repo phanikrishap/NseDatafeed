@@ -73,9 +73,53 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         // Event to notify UI of historical data status (symbol, status like "Done (123)" or "No Data")
         public event Action<string, string> OptionStatusUpdated;
 
+        // Flag to track if we've subscribed to the event-driven tick feed
+        private bool _subscribedToTickEvents = false;
+
         private SubscriptionManager()
         {
             Logger.Info("[SubscriptionManager] Constructor: Initializing singleton instance");
+            SubscribeToTickEvents();
+        }
+
+        /// <summary>
+        /// Subscribe to the event-driven tick feed from OptimizedTickProcessor.
+        /// This is the reliable path for option price updates that bypasses callback chain issues.
+        /// </summary>
+        private void SubscribeToTickEvents()
+        {
+            if (_subscribedToTickEvents) return;
+
+            try
+            {
+                var tickProcessor = MarketDataService.Instance.TickProcessor;
+                if (tickProcessor != null)
+                {
+                    tickProcessor.OptionTickReceived += OnOptionTickReceived;
+                    _subscribedToTickEvents = true;
+                    Logger.Info("[SubscriptionManager] Subscribed to OptimizedTickProcessor.OptionTickReceived event");
+                }
+                else
+                {
+                    Logger.Warn("[SubscriptionManager] TickProcessor not available yet - will retry on first subscription");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SubscriptionManager] Failed to subscribe to tick events: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Event handler for option ticks from OptimizedTickProcessor.
+        /// Directly fires OptionPriceUpdated to update the UI.
+        /// </summary>
+        private void OnOptionTickReceived(string symbol, double price)
+        {
+            if (string.IsNullOrEmpty(symbol) || price <= 0) return;
+
+            // Forward to UI via OptionPriceUpdated event
+            OptionPriceUpdated?.Invoke(symbol, price);
         }
 
         /// <summary>
@@ -84,6 +128,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public void QueueSubscription(List<MappedInstrument> instruments)
         {
             Logger.Info($"[SubscriptionManager] QueueSubscription(): Received {instruments.Count} instruments to queue");
+
+            // Ensure we're subscribed to tick events (retry if not done during construction)
+            if (!_subscribedToTickEvents)
+            {
+                SubscribeToTickEvents();
+            }
 
             _totalQueued = instruments.Count;
             _processedCount = 0;
@@ -252,10 +302,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             // Update UI with live prices
                             if (type == MarketDataType.Last && price > 0)
                             {
-                                // DIAGNOSTIC: Log every callback firing for options (sampled)
-                                if ((symbolForClosure.Contains("CE") || symbolForClosure.Contains("PE")) && DateTime.Now.Second % 10 == 0)
+                                // DIAGNOSTIC: Log first 50 option callbacks to verify they fire
+                                bool isOption = symbolForClosure.Contains("CE") || symbolForClosure.Contains("PE");
+                                if (isOption)
                                 {
-                                    Logger.Debug($"[SM-DIAG] LiveData CALLBACK: {symbolForClosure} = {price}, size={size}");
+                                    Logger.Info($"[SM-CALLBACK] {symbolForClosure} = {price} (type={type})");
                                 }
                                 OptionPriceUpdated?.Invoke(symbolForClosure, price);
                             }

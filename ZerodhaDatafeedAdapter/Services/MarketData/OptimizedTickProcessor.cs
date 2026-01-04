@@ -110,8 +110,9 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private const int MaxTickCacheSize = 1000; // Limit cache size
         private long _tickCacheHits = 0; // Track cache replay statistics
         private long _tickCacheMisses = 0;
-        private readonly HashSet<string> _replayedSymbols = new HashSet<string>(); // Track which symbols got replayed
-        private readonly object _replayedSymbolsLock = new object();
+        // Track which specific callbacks have received their initial tick (keyed by symbol + callback hashcode)
+        // This allows NEW callbacks to receive cached ticks even if other callbacks for the same symbol already did
+        private readonly ConcurrentDictionary<string, bool> _initializedCallbacks = new ConcurrentDictionary<string, bool>();
 
         // Performance monitoring
         private readonly PerformanceMonitor _performanceMonitor;
@@ -129,6 +130,13 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private long _optionTickLogCounter = 0; // For diagnostic logging
         private long _optionCallbackFiredCounter = 0; // Track when option callbacks actually fire
         private long _noCallbackLogCounter = 0; // Track subscription exists but no callback cases
+
+        /// <summary>
+        /// Event-driven tick notification for option prices.
+        /// Fires for every option tick with (symbol, ltp) - allows SubscriptionManager to update UI directly.
+        /// This is the reliable, event-driven path that bypasses callback chain issues.
+        /// </summary>
+        public event Action<string, double> OptionTickReceived;
 
         // Note: Backpressure tracking moved to BackpressureManager
         // Note: Health monitoring moved to ProcessorHealthMonitor
@@ -529,25 +537,45 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             };
 
             // Copy BidDepth and AskDepth (BuyPrice/SellPrice are computed from these)
-            if (tickData.BidDepth != null && tickData.BidDepth.Length > 0)
+            // NOTE: The new ZerodhaTickData has arrays of null DepthEntry references,
+            // so we need to create DepthEntry objects before setting their properties
+            if (tickData.BidDepth != null && tickData.BidDepth.Length > 0 && tickData.BidDepth[0] != null)
             {
-                cachedTick.BidDepth[0].Price = tickData.BidDepth[0].Price;
-                cachedTick.BidDepth[0].Quantity = tickData.BidDepth[0].Quantity;
+                cachedTick.BidDepth[0] = new Models.DepthEntry
+                {
+                    Price = tickData.BidDepth[0].Price,
+                    Quantity = tickData.BidDepth[0].Quantity
+                };
             }
-            if (tickData.AskDepth != null && tickData.AskDepth.Length > 0)
+            if (tickData.AskDepth != null && tickData.AskDepth.Length > 0 && tickData.AskDepth[0] != null)
             {
-                cachedTick.AskDepth[0].Price = tickData.AskDepth[0].Price;
-                cachedTick.AskDepth[0].Quantity = tickData.AskDepth[0].Quantity;
+                cachedTick.AskDepth[0] = new Models.DepthEntry
+                {
+                    Price = tickData.AskDepth[0].Price,
+                    Quantity = tickData.AskDepth[0].Quantity
+                };
             }
 
             _lastTickCache[symbol] = cachedTick;
 
             // Log option tick caching for debugging post-market LTP issues
-            if ((symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX"))
+            bool isOption = (symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX");
+            if (isOption)
             {
                 if (_lastTickCache.Count <= 10 || _lastTickCache.Count % 50 == 0)
                 {
                     Logger.Info($"[OTP-CACHE] Cached tick for {symbol}: LTP={tickData.LastTradePrice}, CacheSize={_lastTickCache.Count}");
+                }
+
+                // EVENT-DRIVEN: Fire OptionTickReceived for reliable, direct price updates
+                // This bypasses the complex callback chain and ensures SubscriptionManager always gets the price
+                try
+                {
+                    OptionTickReceived?.Invoke(symbol, tickData.LastTradePrice);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Debug($"[OTP-EVENT] Error firing OptionTickReceived for {symbol}: {ex.Message}");
                 }
             }
 
@@ -573,39 +601,20 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         /// Tries to immediately replay a cached tick to registered callbacks.
         /// Called when a tick is cached and we want to check if callbacks exist for it.
         /// This handles the case where ticks arrive AFTER callbacks are registered.
+        /// Uses per-callback tracking so NEW callbacks for the same symbol still get the cached tick.
         /// </summary>
         private void TryImmediateReplay(string symbol, ZerodhaTickData cachedTick)
         {
             if (string.IsNullOrEmpty(symbol) || cachedTick == null || cachedTick.LastTradePrice <= 0)
                 return;
 
-            // Check if we've already replayed for this symbol
-            bool alreadyReplayed;
-            lock (_replayedSymbolsLock)
-            {
-                alreadyReplayed = _replayedSymbols.Contains(symbol);
-                if (!alreadyReplayed)
-                {
-                    _replayedSymbols.Add(symbol);
-                }
-            }
-
-            if (alreadyReplayed)
-                return;
-
-            // Check if a callback exists for this symbol
+            // Check if callbacks exist for this symbol
             if (!_callbackCache.TryGetValue(symbol, out var callbacks) || callbacks == null || callbacks.Count == 0)
-                return;
+                return; // No callbacks yet
 
-            // We have a callback and haven't replayed - do immediate replay
             DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, IstTimeZone);
-
-            // Log for debugging post-market LTP issues
             bool isOption = (symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX");
-            if (isOption)
-            {
-                Logger.Info($"[OTP-IMMED-REPLAY] Immediate replay for {symbol}: LTP={cachedTick.LastTradePrice}, callbacks={callbacks.Count}");
-            }
+            int firedCount = 0;
 
             foreach (var callbackInfo in callbacks)
             {
@@ -613,6 +622,16 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 {
                     if (callbackInfo?.Callback == null || callbackInfo.Instrument?.MasterInstrument == null)
                         continue;
+
+                    // Create a unique key for this specific callback (symbol + callback hashcode)
+                    string callbackKey = $"{symbol}_{callbackInfo.Callback.GetHashCode()}";
+
+                    // Check if THIS SPECIFIC callback has already received its initial tick
+                    if (_initializedCallbacks.ContainsKey(callbackKey))
+                        continue; // This callback already got its tick
+
+                    // Mark this callback as initialized BEFORE firing to prevent double-firing
+                    _initializedCallbacks[callbackKey] = true;
 
                     var callback = callbackInfo.Callback;
 
@@ -635,6 +654,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     if (cachedTick.OpenInterest > 0)
                         callback(MarketDataType.OpenInterest, cachedTick.OpenInterest, cachedTick.OpenInterest, now, 0L);
 
+                    firedCount++;
                     Interlocked.Increment(ref _tickCacheHits);
                 }
                 catch (Exception ex)
@@ -642,12 +662,19 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     Logger.Debug($"[OTP-IMMED-REPLAY] Error replaying to callback for {symbol}: {ex.Message}");
                 }
             }
+
+            // Log replay for options (only if we actually fired)
+            if (isOption && firedCount > 0)
+            {
+                Logger.Info($"[OTP-IMMED-REPLAY] Immediate replay for {symbol}: LTP={cachedTick.LastTradePrice}, callbacks={firedCount}");
+            }
         }
 
         /// <summary>
         /// Replays cached ticks for newly registered callbacks.
         /// Called when subscription cache is updated with new callbacks.
         /// This ensures symbols that received ticks BEFORE their callback was registered still get data.
+        /// Uses per-callback tracking so NEW callbacks get cached ticks even if other callbacks already did.
         /// </summary>
         private void ReplayCachedTicksForNewCallbacks(ConcurrentDictionary<string, List<SubscriptionCallback>> newCallbackCache)
         {
@@ -661,6 +688,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             }
 
             int replayedCount = 0;
+            int callbacksFired = 0;
             DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, IstTimeZone);
 
             foreach (var kvp in newCallbackCache)
@@ -672,30 +700,15 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     continue;
 
                 // Check if we have a cached tick for this symbol
-                if (!_lastTickCache.TryGetValue(symbol, out var cachedTick))
+                if (!_lastTickCache.TryGetValue(symbol, out var cachedTick) || cachedTick.LastTradePrice <= 0)
                 {
                     Interlocked.Increment(ref _tickCacheMisses);
                     continue;
                 }
 
-                // Check if we've already replayed for this symbol in this session
-                bool alreadyReplayed;
-                lock (_replayedSymbolsLock)
-                {
-                    alreadyReplayed = _replayedSymbols.Contains(symbol);
-                    if (!alreadyReplayed)
-                    {
-                        _replayedSymbols.Add(symbol);
-                    }
-                }
+                bool symbolHadNewCallbacks = false;
 
-                if (alreadyReplayed)
-                    continue;
-
-                // Replay the cached tick to all callbacks
-                Interlocked.Increment(ref _tickCacheHits);
-                replayedCount++;
-
+                // Replay to each callback that hasn't received a tick yet
                 foreach (var callbackInfo in callbacks)
                 {
                     try
@@ -703,19 +716,28 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                         if (callbackInfo?.Callback == null || callbackInfo.Instrument?.MasterInstrument == null)
                             continue;
 
+                        // Create unique key for this specific callback
+                        string callbackKey = $"{symbol}_{callbackInfo.Callback.GetHashCode()}";
+
+                        // Check if THIS SPECIFIC callback has already received a tick
+                        if (_initializedCallbacks.ContainsKey(callbackKey))
+                            continue; // This callback already got its tick
+
+                        // Mark this callback as initialized BEFORE firing
+                        _initializedCallbacks[callbackKey] = true;
+                        symbolHadNewCallbacks = true;
+                        callbacksFired++;
+
                         var callback = callbackInfo.Callback;
 
                         // Fire LastPrice callback
-                        if (cachedTick.LastTradePrice > 0)
-                        {
-                            callback(MarketDataType.Last, cachedTick.LastTradePrice, Math.Max(1, cachedTick.LastTradeQty), now, 0L);
+                        callback(MarketDataType.Last, cachedTick.LastTradePrice, Math.Max(1, cachedTick.LastTradeQty), now, 0L);
 
-                            // Also fire bid/ask if available
-                            if (cachedTick.BuyPrice > 0)
-                                callback(MarketDataType.Bid, cachedTick.BuyPrice, cachedTick.BuyQty, now, 0L);
-                            if (cachedTick.SellPrice > 0)
-                                callback(MarketDataType.Ask, cachedTick.SellPrice, cachedTick.SellQty, now, 0L);
-                        }
+                        // Also fire bid/ask if available
+                        if (cachedTick.BuyPrice > 0)
+                            callback(MarketDataType.Bid, cachedTick.BuyPrice, cachedTick.BuyQty, now, 0L);
+                        if (cachedTick.SellPrice > 0)
+                            callback(MarketDataType.Ask, cachedTick.SellPrice, cachedTick.SellQty, now, 0L);
 
                         // Fire daily stats if available
                         if (cachedTick.TotalQtyTraded > 0)
@@ -730,6 +752,8 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                             callback(MarketDataType.LastClose, cachedTick.Close, 0L, now, 0L);
                         if (cachedTick.OpenInterest > 0)
                             callback(MarketDataType.OpenInterest, cachedTick.OpenInterest, cachedTick.OpenInterest, now, 0L);
+
+                        Interlocked.Increment(ref _tickCacheHits);
                     }
                     catch (Exception ex)
                     {
@@ -737,29 +761,31 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     }
                 }
 
-                // Log option replays
-                if ((symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX") && !symbol.Contains("BANKNIFTY"))
+                if (symbolHadNewCallbacks)
                 {
-                    Logger.Info($"[OTP-REPLAY] Replayed cached tick for {symbol}: LTP={cachedTick.LastTradePrice}");
+                    replayedCount++;
+
+                    // Log option replays
+                    if ((symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX") && !symbol.Contains("BANKNIFTY"))
+                    {
+                        Logger.Info($"[OTP-REPLAY] Replayed cached tick for {symbol}: LTP={cachedTick.LastTradePrice}");
+                    }
                 }
             }
 
             if (replayedCount > 0)
             {
-                Logger.Info($"[OTP-REPLAY] Replayed {replayedCount} cached ticks for newly registered callbacks (cache hits={_tickCacheHits}, misses={_tickCacheMisses})");
+                Logger.Info($"[OTP-REPLAY] Replayed {replayedCount} symbols ({callbacksFired} callbacks) (cache hits={_tickCacheHits}, misses={_tickCacheMisses})");
             }
         }
 
         /// <summary>
-        /// Clears the replayed symbols tracking (call when Option Chain is closed/reopened).
+        /// Clears the initialized callbacks tracking (call when Option Chain is closed/reopened).
         /// </summary>
         public void ClearReplayedSymbolsTracking()
         {
-            lock (_replayedSymbolsLock)
-            {
-                _replayedSymbols.Clear();
-            }
-            Logger.Debug("[OTP-REPLAY] Cleared replayed symbols tracking");
+            _initializedCallbacks.Clear();
+            Logger.Debug("[OTP-REPLAY] Cleared initialized callbacks tracking");
         }
 
         /// <summary>
@@ -767,10 +793,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         /// </summary>
         public (int cacheSize, long hits, long misses, int replayedCount) GetTickCacheStats()
         {
-            lock (_replayedSymbolsLock)
-            {
-                return (_lastTickCache.Count, _tickCacheHits, _tickCacheMisses, _replayedSymbols.Count);
-            }
+            return (_lastTickCache.Count, _tickCacheHits, _tickCacheMisses, _initializedCallbacks.Count);
         }
 
         #endregion
