@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reactive.Linq;
+using System.Reactive.Subjects;
 using System.Threading;
 using System.Threading.Tasks;
 using NinjaTrader.Cbi;
@@ -137,6 +139,59 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         /// This is the reliable, event-driven path that bypasses callback chain issues.
         /// </summary>
         public event Action<string, double> OptionTickReceived;
+
+        // ═══════════════════════════════════════════════════════════════════
+        // REACTIVE EXTENSIONS (Rx.NET) - Phase 2 Event-Driven Architecture
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Core reactive tick stream - publishes ALL processed ticks.
+        /// Use this for components that need real-time tick data with Rx operators.
+        /// Subject is thread-safe and supports multiple subscribers.
+        /// </summary>
+        private readonly Subject<TickStreamItem> _tickSubject = new Subject<TickStreamItem>();
+
+        /// <summary>
+        /// Exposes the tick stream as an IObservable for subscribers.
+        /// Consumers can apply Rx operators: .Where(), .Throttle(), .Buffer(), etc.
+        /// </summary>
+        public IObservable<TickStreamItem> TickStream => _tickSubject.AsObservable();
+
+        /// <summary>
+        /// Option-only tick stream with automatic filtering.
+        /// Pre-filtered for CE/PE symbols - no need to filter on consumer side.
+        /// </summary>
+        public IObservable<TickStreamItem> OptionTickStream =>
+            _tickSubject.Where(t => t.IsOption).AsObservable();
+
+        /// <summary>
+        /// Index-only tick stream (NIFTY, BANKNIFTY, SENSEX).
+        /// Pre-filtered for index symbols.
+        /// </summary>
+        public IObservable<TickStreamItem> IndexTickStream =>
+            _tickSubject.Where(t => t.IsIndex).AsObservable();
+
+        /// <summary>
+        /// Throttled option tick stream for UI updates (max 10 updates/second per symbol).
+        /// Prevents UI from being overwhelmed during high-frequency trading.
+        /// Uses GroupBy + Sample to throttle per-symbol independently.
+        /// </summary>
+        public IObservable<TickStreamItem> ThrottledOptionTickStream =>
+            _tickSubject
+                .Where(t => t.IsOption)
+                .GroupBy(t => t.Symbol)
+                .SelectMany(grp => grp.Sample(TimeSpan.FromMilliseconds(100))) // 10 updates/sec per symbol
+                .AsObservable();
+
+        /// <summary>
+        /// Batched tick stream for bulk operations (groups ticks every 100ms).
+        /// Useful for batch database writes or network transmissions.
+        /// </summary>
+        public IObservable<IList<TickStreamItem>> BatchedTickStream =>
+            _tickSubject
+                .Buffer(TimeSpan.FromMilliseconds(100))
+                .Where(batch => batch.Count > 0)
+                .AsObservable();
 
         // Note: Backpressure tracking moved to BackpressureManager
         // Note: Health monitoring moved to ProcessorHealthMonitor
@@ -558,6 +613,21 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
 
             _lastTickCache[symbol] = cachedTick;
 
+            // ═══════════════════════════════════════════════════════════════════
+            // REACTIVE STREAM: Publish to Rx Subject for all subscribers
+            // This is the primary event-driven path - all consumers should use this
+            // ═══════════════════════════════════════════════════════════════════
+            try
+            {
+                DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, IstTimeZone);
+                var streamItem = new TickStreamItem(symbol, tickData, now);
+                _tickSubject.OnNext(streamItem);
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"[OTP-RX] Error publishing to reactive stream for {symbol}: {ex.Message}");
+            }
+
             // Log option tick caching for debugging post-market LTP issues
             bool isOption = (symbol.Contains("CE") || symbol.Contains("PE")) && !symbol.Contains("SENSEX");
             if (isOption)
@@ -567,8 +637,8 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     Logger.Info($"[OTP-CACHE] Cached tick for {symbol}: LTP={tickData.LastTradePrice}, CacheSize={_lastTickCache.Count}");
                 }
 
-                // EVENT-DRIVEN: Fire OptionTickReceived for reliable, direct price updates
-                // This bypasses the complex callback chain and ensures SubscriptionManager always gets the price
+                // EVENT-DRIVEN (Legacy): Fire OptionTickReceived for backward compatibility
+                // New consumers should use OptionTickStream instead
                 try
                 {
                     OptionTickReceived?.Invoke(symbol, tickData.LastTradePrice);
@@ -1467,6 +1537,15 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 _healthMonitor?.Dispose();
 
                 _performanceMonitor?.Dispose();
+
+                // Complete and dispose reactive stream
+                try
+                {
+                    _tickSubject.OnCompleted();
+                    _tickSubject.Dispose();
+                    Logger.Debug("[OTP-RX] Reactive stream disposed");
+                }
+                catch { }
 
                 // Dispose resources
                 _cancellationTokenSource.Dispose();

@@ -32,6 +32,29 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 - **Multi-Callback Support**: Multiple subscribers (Chart, Option Chain, Market Analyzer) can receive the same tick data
 - **Intelligent Throttling**: UI updates throttled to prevent overwhelming the display
 
+### Modern Async Architecture (v2.1)
+
+The adapter uses modern event-driven patterns to eliminate "Sleep & Hope" anti-patterns:
+
+**Phase 1: TPL Dataflow Pipeline (SubscriptionManager)**
+- Replaces `ConcurrentQueue + Task.Run` with `ActionBlock` pipeline
+- 3-stage pipeline: Subscription → Historical → Streaming
+- Built-in backpressure via `BoundedCapacity`
+- Rate limiting via `SemaphoreSlim` for Zerodha API limits
+- Event-driven completion via `TaskCompletionSource`
+
+**Phase 2: Rx.NET Reactive Streams (OptimizedTickProcessor)**
+- `IObservable<TickStreamItem>` for tick data streams
+- `ThrottledOptionTickStream` - 100ms sampling for UI (no polling loops)
+- `OptionTickStream` - unthrottled for trading logic
+- Per-symbol streams via `GetSymbolStream(symbol)`
+
+**Phase 3: Connection State Machine (SharedWebSocketService)**
+- Formal state machine: `Disconnected → Connecting → Connected → BackingOff → Reconnecting`
+- Exponential backoff: 1s → 2s → 4s → 8s → 16s (capped)
+- TCS-based waiting replaces polling loops
+- Centralized timeout constants (no magic numbers)
+
 ### Reliability & Diagnostics
 - **TaskCompletionSource Pattern**: Robust async signaling for token/connection ready states - late subscribers never miss events
 - **Event-Driven Token Validation**: WebSocket waits for valid token before connecting
@@ -89,9 +112,9 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 | **ZerodhaAdapter** | NinjaTrader adapter interface - handles Subscribe/Unsubscribe calls |
 | **Connector** | Service orchestration, token validation, singleton access hub with TaskCompletionSource pattern |
 | **L1Subscription** | Thread-safe multi-callback container - allows multiple consumers per symbol |
-| **OptimizedTickProcessor** | High-performance tick processing with sharded parallelism and tiered backpressure |
-| **SharedWebSocketService** | Single shared WebSocket connection with state machine and TCS-based connection signaling |
-| **SubscriptionManager** | Manages option chain subscriptions and BarsRequests |
+| **OptimizedTickProcessor** | High-performance tick processing with sharded parallelism, Rx.NET streams, and tiered backpressure |
+| **SharedWebSocketService** | Single shared WebSocket with formal state machine (6 states) and exponential backoff |
+| **SubscriptionManager** | TPL Dataflow pipeline for option chain subscriptions with rate limiting |
 | **MarketAnalyzerLogic** | Calculates projected opens, generates option chains, hosts PriceHub and ATM tracking |
 | **OptionChainWindow** | WPF UI for displaying real-time option chain data |
 | **TBSManagerWindow** | TBS Manager addon for time-based straddle execution simulation |
@@ -100,6 +123,107 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 | **InstrumentManager** | Handles symbol mapping, token lookup, and NT instrument creation |
 | **StartupLogger** | Dedicated logger for critical startup events - token validation, WebSocket, first tick |
 | **TBSLogger** | Dedicated logger for TBS Manager events |
+
+### TPL Dataflow Pipeline (SubscriptionManager)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                     TPL Dataflow Subscription Pipeline                           │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌─────────────────────┐     ┌─────────────────────┐     ┌────────────────────┐ │
+│  │  _subscriptionBlock │ ──► │   _historicalBlock  │ ──► │  _streamingBlock   │ │
+│  │  MaxParallelism=1   │     │   MaxParallelism=10 │     │  MaxParallelism=6  │ │
+│  │  BoundedCapacity=500│     │   BoundedCapacity=200│    │  BoundedCapacity=100│ │
+│  │  (Sequential for    │     │   (Rate limited via │     │  (BarsRequest +    │ │
+│  │   UI thread safety) │     │    SemaphoreSlim)   │     │   VWAP setup)      │ │
+│  └─────────────────────┘     └─────────────────────┘     └────────────────────┘ │
+│           │                           │                           │              │
+│           ▼                           ▼                           ▼              │
+│   Create NT Instrument        Fetch Historical Data      Trigger BarsRequest    │
+│   Subscribe WebSocket         Cache in SQLite            Process Straddles      │
+│                                                                                  │
+│  Benefits:                                                                       │
+│  - Built-in backpressure (BoundedCapacity prevents memory overflow)             │
+│  - No polling loops (event-driven completion)                                   │
+│  - Proper async/await flow (no fire-and-forget Task.Run)                        │
+│  - Automatic batching with MaxDegreeOfParallelism                               │
+│  - Clean shutdown via Complete() + Completion task                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Rx.NET Reactive Streams (OptimizedTickProcessor)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        Reactive Tick Stream Architecture                         │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  WebSocket Tick ──► CacheLastTick() ──► _tickSubject.OnNext(TickStreamItem)     │
+│                                                │                                 │
+│                                                ▼                                 │
+│                          ┌─────────────────────────────────────┐                │
+│                          │     Subject<TickStreamItem>         │                │
+│                          │     (Hot Observable - every tick)   │                │
+│                          └─────────────────┬───────────────────┘                │
+│                                            │                                     │
+│              ┌─────────────────────────────┼─────────────────────────────┐      │
+│              │                             │                             │      │
+│              ▼                             ▼                             ▼      │
+│   ┌─────────────────────┐     ┌─────────────────────┐     ┌────────────────────┐│
+│   │     TickStream      │     │   OptionTickStream  │     │ThrottledOptionStream││
+│   │   (All ticks, 0ms)  │     │  (CE/PE only, 0ms)  │     │ (100ms per symbol) ││
+│   │                     │     │                     │     │ GroupBy + Sample   ││
+│   │ Use: Charts, TBS    │     │ Use: Trading logic  │     │ Use: Option Chain  ││
+│   │      execution      │     │                     │     │      UI updates    ││
+│   └─────────────────────┘     └─────────────────────┘     └────────────────────┘│
+│                                                                                  │
+│  Key Point: UI throttling does NOT affect trading execution!                    │
+│  TBS stop-loss, entries, exits all receive every tick at full speed.            │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### WebSocket Connection State Machine
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    SharedWebSocketService State Machine                          │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌──────────────┐     TokenReady      ┌────────────────┐                        │
+│  │ Disconnected │ ──────────────────► │   Connecting   │                        │
+│  │    (0)       │                     │      (1)       │                        │
+│  └──────────────┘                     └────────────────┘                        │
+│         ▲                                    │                                   │
+│         │                              Success│ Failure                          │
+│         │                                    ▼    │                              │
+│         │                             ┌──────────┐│                              │
+│         │◄────────── Dispose ─────────│Connected ││                              │
+│         │            (4)              │   (2)    ││                              │
+│         │                             └──────────┘│                              │
+│         │                                  │      │                              │
+│         │                           Error  │      │                              │
+│         │                                  ▼      ▼                              │
+│         │                             ┌────────────────┐                         │
+│         │◄──── MaxRetries ────────────│   BackingOff   │                         │
+│         │                             │      (5)       │                         │
+│         │                             └────────────────┘                         │
+│         │                                    │                                   │
+│         │                              Timer │ (1s→2s→4s→8s→16s)                 │
+│         │                                    ▼                                   │
+│         │                             ┌────────────────┐                         │
+│         └─────────────────────────────│  Reconnecting  │                         │
+│                                       │      (3)       │                         │
+│                                       └────────────────┘                         │
+│                                                                                  │
+│  Timeout Constants (centralized, no magic numbers):                              │
+│  - TOKEN_READY_TIMEOUT_MS = 30000                                               │
+│  - CONNECTION_TIMEOUT_MS = 30000                                                │
+│  - CLOSE_TIMEOUT_MS = 1000                                                      │
+│  - BACKOFF_INITIAL_MS = 1000                                                    │
+│  - BACKOFF_MAX_MS = 16000                                                       │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Data Flow
 
@@ -437,11 +561,16 @@ These instruments:
 
 Enable DEBUG level to see:
 - `[OTP] ProcessSingleTick` - Every tick processed
+- `[OTP-RX] Publishing to reactive stream` - Rx.NET stream publishing
+- `[SubscriptionManager] Pipeline Stage 1/2/3` - TPL Dataflow pipeline processing
 - `[SubscriptionManager] LiveData CALLBACK FIRING` - Callback invocations
 - `[OptionChainTabPage] OnOptionPriceUpdated RECEIVED` - UI updates
 - `[L1Subscription] AddCallback` - Callback registrations
 - `[MarketAnalyzerLogic] ATM strike updated` - ATM changes from Option Chain
 - `[TBSManagerTabPage] Locked strike` - TBS Manager strike locks
+- `[SharedWS] State: X -> Y` - WebSocket state transitions
+- `[SharedWS] Backing off for Xms` - Exponential backoff in progress
+- `[SharedWS] Backoff state reset` - Successful reconnection
 
 ## Version History
 

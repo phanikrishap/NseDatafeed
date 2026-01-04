@@ -38,6 +38,38 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
         // State machine - replaces boolean flags for atomic transitions
         private int _connectionState = (int)WebSocketConnectionState.Disconnected;
 
+        // ═══════════════════════════════════════════════════════════════════
+        // TIMEOUT & BACKOFF CONFIGURATION (centralized - no magic numbers)
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>Timeout for access token ready wait (ms)</summary>
+        private const int TOKEN_READY_TIMEOUT_MS = 30000;
+
+        /// <summary>Timeout for general connection wait (ms)</summary>
+        private const int CONNECTION_TIMEOUT_MS = 30000;
+
+        /// <summary>Timeout for WebSocket close during reconnect (ms)</summary>
+        private const int CLOSE_TIMEOUT_MS = 1000;
+
+        /// <summary>Brief delay after message receive error (ms)</summary>
+        private const int ERROR_RECOVERY_DELAY_MS = 100;
+
+        /// <summary>Initial backoff delay for reconnection (ms)</summary>
+        private const int BACKOFF_INITIAL_MS = 1000;
+
+        /// <summary>Maximum backoff delay for reconnection (ms)</summary>
+        private const int BACKOFF_MAX_MS = 16000;
+
+        /// <summary>Maximum retry attempts before giving up (0 = infinite)</summary>
+        private const int MAX_RETRY_ATTEMPTS = 0; // Infinite retries
+
+        // Current backoff state
+        private int _currentBackoffMs = BACKOFF_INITIAL_MS;
+        private int _retryAttempts = 0;
+
+        // TCS for waiting on backoff completion (event-driven, no polling)
+        private TaskCompletionSource<bool> _backoffCompleteTcs;
+
         private readonly SemaphoreSlim _connectionSemaphore = new SemaphoreSlim(1, 1);
 
         // Semaphore to serialize WebSocket send operations (WebSocket only allows one outstanding SendAsync at a time)
@@ -187,11 +219,93 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
         }
 
         /// <summary>
-        /// Checks if currently in a connected or connecting state
+        /// Checks if currently in a connected or connecting state (including backoff)
         /// </summary>
         private bool IsConnectedOrConnecting => CurrentState == WebSocketConnectionState.Connected ||
                                                   CurrentState == WebSocketConnectionState.Connecting ||
-                                                  CurrentState == WebSocketConnectionState.Reconnecting;
+                                                  CurrentState == WebSocketConnectionState.Reconnecting ||
+                                                  CurrentState == WebSocketConnectionState.BackingOff;
+
+        /// <summary>
+        /// Resets backoff state after successful connection.
+        /// Called when connection is established successfully.
+        /// </summary>
+        private void ResetBackoff()
+        {
+            _currentBackoffMs = BACKOFF_INITIAL_MS;
+            _retryAttempts = 0;
+            Logger.Debug("[SharedWS] Backoff state reset");
+        }
+
+        /// <summary>
+        /// Calculates next backoff delay with exponential growth.
+        /// Pattern: 1s → 2s → 4s → 8s → 16s (capped)
+        /// </summary>
+        private int GetNextBackoffDelay()
+        {
+            int delay = _currentBackoffMs;
+            _currentBackoffMs = Math.Min(_currentBackoffMs * 2, BACKOFF_MAX_MS);
+            _retryAttempts++;
+            return delay;
+        }
+
+        /// <summary>
+        /// Transitions to BackingOff state and waits for the backoff period.
+        /// Uses TCS for event-driven waiting (no polling loop).
+        /// Returns false if max retries exceeded or disposal requested.
+        /// </summary>
+        private async Task<bool> EnterBackoffAndWaitAsync(CancellationToken token)
+        {
+            // Check max retries (0 = infinite)
+            if (MAX_RETRY_ATTEMPTS > 0 && _retryAttempts >= MAX_RETRY_ATTEMPTS)
+            {
+                Logger.Warn($"[SharedWS] Max retry attempts ({MAX_RETRY_ATTEMPTS}) exceeded, giving up");
+                TransitionToDisconnected();
+                return false;
+            }
+
+            int backoffMs = GetNextBackoffDelay();
+
+            // Transition to BackingOff state
+            var current = CurrentState;
+            if (current == WebSocketConnectionState.Disposing)
+            {
+                return false;
+            }
+
+            // Force to BackingOff (valid from Connected, Connecting, Reconnecting, or Disconnected after failure)
+            ForceState(WebSocketConnectionState.BackingOff);
+
+            Logger.Info($"[SharedWS] Backing off for {backoffMs}ms before retry (attempt {_retryAttempts})");
+
+            // Create TCS for this backoff period
+            _backoffCompleteTcs = new TaskCompletionSource<bool>();
+
+            try
+            {
+                // Wait for backoff period using Task.Delay (interruptible via token)
+                await Task.Delay(backoffMs, token);
+
+                // Backoff complete - transition to Reconnecting
+                if (TryTransition(WebSocketConnectionState.BackingOff, WebSocketConnectionState.Reconnecting))
+                {
+                    _backoffCompleteTcs?.TrySetResult(true);
+                    return true;
+                }
+                else
+                {
+                    // State changed during backoff (e.g., Disposing)
+                    _backoffCompleteTcs?.TrySetResult(false);
+                    return false;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Logger.Debug("[SharedWS] Backoff cancelled");
+                _backoffCompleteTcs?.TrySetResult(false);
+                return false;
+            }
+        }
 
         #endregion
 
@@ -260,7 +374,8 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
         }
 
         /// <summary>
-        /// Ensures the WebSocket connection is established
+        /// Ensures the WebSocket connection is established.
+        /// Uses TCS-based waiting instead of polling loops.
         /// </summary>
         public async Task<bool> EnsureConnectedAsync()
         {
@@ -274,20 +389,14 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             if (state == WebSocketConnectionState.Disposing)
                 return false;
 
-            // If already connecting/reconnecting, wait for it
-            if (state == WebSocketConnectionState.Connecting || state == WebSocketConnectionState.Reconnecting)
+            // If already connecting/reconnecting/backing off, wait for completion via TCS
+            // This replaces the old polling loop with event-driven waiting
+            if (state == WebSocketConnectionState.Connecting ||
+                state == WebSocketConnectionState.Reconnecting ||
+                state == WebSocketConnectionState.BackingOff)
             {
-                // Wait up to 10 seconds for connection to complete
-                for (int i = 0; i < 100; i++)
-                {
-                    await Task.Delay(100);
-                    state = CurrentState;
-                    if (state == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
-                        return true;
-                    if (state != WebSocketConnectionState.Connecting && state != WebSocketConnectionState.Reconnecting)
-                        break;
-                }
-                return CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open;
+                Logger.Debug($"[SharedWS] EnsureConnectedAsync: Connection in progress (state={state}), waiting via TCS...");
+                return await WaitForConnectionAsync(timeoutMs: CONNECTION_TIMEOUT_MS);
             }
 
             return await ConnectAsync();
@@ -315,7 +424,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 if (current == WebSocketConnectionState.Connecting || current == WebSocketConnectionState.Reconnecting)
                 {
                     Logger.Debug("[SharedWS] Connection already in progress, waiting via TCS...");
-                    return await WaitForConnectionAsync(timeoutMs: 30000);
+                    return await WaitForConnectionAsync(timeoutMs: CONNECTION_TIMEOUT_MS);
                 }
                 // If disposing, reject
                 if (current == WebSocketConnectionState.Disposing)
@@ -344,7 +453,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                     {
                         if (_sharedWebSocket.State == WebSocketState.Open)
                         {
-                            _sharedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Reconnecting", CancellationToken.None).Wait(1000);
+                            _sharedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Reconnecting", CancellationToken.None).Wait(CLOSE_TIMEOUT_MS);
                         }
                         _sharedWebSocket.Dispose();
                     }
@@ -363,7 +472,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 // WebSocket URL includes the access token - must be valid!
                 StartupLogger.LogWebSocketPhase("Token Wait", true, "Waiting for access token...");
                 Logger.Info("[SharedWS] Waiting for access token to be ready...");
-                var tokenReady = await Connector.Instance.WaitForTokenReadyAsync(timeoutMs: 30000);
+                var tokenReady = await Connector.Instance.WaitForTokenReadyAsync(timeoutMs: TOKEN_READY_TIMEOUT_MS);
                 if (!tokenReady)
                 {
                     Logger.Error("[SharedWS] Access token not ready after 30s - cannot connect WebSocket");
@@ -398,6 +507,9 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
 
                 Logger.Info($"[SharedWS] Connected successfully. State={_sharedWebSocket.State}");
                 StartupLogger.LogWebSocketConnected(_subscriptions.Count);
+
+                // Reset backoff state on successful connection
+                ResetBackoff();
 
                 // Start message processing loop
                 _messageLoopTask = Task.Run(() => ProcessMessagesAsync(_connectionCts.Token));
@@ -712,7 +824,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                     catch (Exception ex)
                     {
                         Logger.Error($"[SharedWS] Message receive error: {ex.Message}");
-                        await Task.Delay(100, token);
+                        await Task.Delay(ERROR_RECOVERY_DELAY_MS, token);
                     }
                 }
             }
@@ -738,12 +850,16 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 }
                 Logger.Info("[SharedWS] Message processing loop ended");
 
-                // Attempt reconnection (only if not disposing)
+                // Attempt reconnection with exponential backoff (only if not disposing)
                 if (!token.IsCancellationRequested && CurrentState != WebSocketConnectionState.Disposing)
                 {
-                    Logger.Info("[SharedWS] Attempting reconnection in 2 seconds...");
-                    await Task.Delay(2000);
-                    _ = ConnectAsync(isReconnect: true);
+                    // Use state machine: Disconnected -> BackingOff -> Reconnecting -> Connected
+                    bool shouldRetry = await EnterBackoffAndWaitAsync(token);
+                    if (shouldRetry)
+                    {
+                        // State is already Reconnecting after backoff
+                        _ = ConnectAsync(isReconnect: true);
+                    }
                 }
             }
         }
@@ -904,7 +1020,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 {
                     if (_sharedWebSocket.State == WebSocketState.Open)
                     {
-                        _sharedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None).Wait(1000);
+                        _sharedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None).Wait(CLOSE_TIMEOUT_MS);
                     }
                     _sharedWebSocket.Dispose();
                 }
