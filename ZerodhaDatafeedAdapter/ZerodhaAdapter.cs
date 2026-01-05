@@ -123,10 +123,12 @@ namespace ZerodhaDatafeedAdapter
             {
                 MarketDataType.Last
             };
-            this.Connect();
+
+            // Safely execute the async connection process
+            this.ConnectAsync().SafeFireAndForget("ZerodhaAdapter.ConnectAsync");
         }
 
-        private async void Connect()
+        internal async Task ConnectAsync()
         {
             if (this._zerodhaConncetion.Status == ConnectionStatus.Connecting)
             {
@@ -142,10 +144,14 @@ namespace ZerodhaDatafeedAdapter
                     await Connector.Instance.RegisterInstruments();
                 }
                 else
+                {
                     this._zerodhaConncetion.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.LogOnFailed, "Unable to connect to provider Zerodha.");
+                }
             }
             else
+            {
                 this.Disconnect();
+            }
         }
 
         private void SetInstruments()

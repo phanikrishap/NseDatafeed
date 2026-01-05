@@ -659,8 +659,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             if ((niftyProjected > 0 || sensexProjected > 0) && !_optionsAlreadyGenerated)
             {
-                Logger.Info("[MarketAnalyzerLogic] CheckAndCalculate(): Triggering option generation...");
-                GenerateOptions(niftyProjected, sensexProjected);
+                // Only trigger if we have a reasonably valid projected price
+                double minValidPrice = (niftyProjected > sensexProjected ? 1000 : 10000); // Rough check for NIFTY vs SENSEX
+                
+                if (niftyProjected >= 1000 || sensexProjected >= 10000)
+                {
+                    Logger.Info($"[MarketAnalyzerLogic] CheckAndCalculate(): Conditions met. Triggering option generation (Nifty Proj={niftyProjected:F0}, Sensex Proj={sensexProjected:F0})...");
+                    GenerateOptionsAsync(niftyProjected, sensexProjected).SafeFireAndForget("MarketAnalyzerLogic.GenerateOptionsAsync");
+                }
+                else
+                {
+                    Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): Waiting for more realistic projected prices (Nifty={niftyProjected:F0}, Sensex={sensexProjected:F0})");
+                    StatusUpdated?.Invoke("Waiting for price data...");
+                }
             }
             else if (_optionsAlreadyGenerated)
             {
@@ -668,9 +679,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
         }
 
-        private async void GenerateOptions(double niftyProjected, double sensexProjected)
+        internal async Task GenerateOptionsAsync(double niftyProjected, double sensexProjected)
         {
-            Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Starting with niftyProjected={niftyProjected:F2}, sensexProjected={sensexProjected:F2}");
+            Logger.Info($"[MarketAnalyzerLogic] GenerateOptionsAsync(): Starting with niftyProjected={niftyProjected:F2}, sensexProjected={sensexProjected:F2}");
 
             try
             {
@@ -678,13 +689,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 _optionsAlreadyGenerated = true;
 
                 // FETCH EXPIRIES from database
-                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Fetching NIFTY expiries from database...");
+                Logger.Info("[MarketAnalyzerLogic] GenerateOptionsAsync(): Fetching NIFTY expiries from database...");
                 var niftyExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlying("NIFTY");
-                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Found {niftyExpiries.Count} NIFTY expiries");
-
-                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Fetching SENSEX expiries from database...");
+                
+                Logger.Info("[MarketAnalyzerLogic] GenerateOptionsAsync(): Fetching SENSEX expiries from database...");
                 var sensexExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlying("SENSEX");
-                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Found {sensexExpiries.Count} SENSEX expiries");
 
                 // Cache expiries globally for TBS Manager and other consumers
                 lock (_expiryLock)
@@ -770,52 +779,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Default to NIFTY (DTE={niftyDTE})");
                 }
 
-                // Now wait for the selected underlying's projected price (max 30 seconds)
+                // Projected price is already validated by CheckAndCalculate before calling this method.
+                // No more polling loop!
                 projectedPrice = selectedUnderlying == "NIFTY" ? niftyProjected : sensexProjected;
-                double minValidPrice = selectedUnderlying == "NIFTY" ? 1000 : 10000;
-
-                if (projectedPrice < minValidPrice)
-                {
-                    Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Waiting for {selectedUnderlying} projected price (current={projectedPrice:F0}, min={minValidPrice})...");
-                    StatusUpdated?.Invoke($"Waiting for {selectedUnderlying} price data...");
-
-                    int waitedMs = 0;
-                    const int maxWaitMs = 30000; // 30 seconds max wait
-                    const int pollIntervalMs = 500;
-
-                    while (waitedMs < maxWaitMs)
-                    {
-                        await Task.Delay(pollIntervalMs);
-                        waitedMs += pollIntervalMs;
-
-                        // Re-check the projected price - recalculate from spot price and GIFT NIFTY change
-                        double spotPrice = selectedUnderlying == "NIFTY" ? NiftySpotPrice : SensexSpotPrice;
-                        if (spotPrice > 0 && GiftNiftyPriorClose > 0 && GiftNiftyPrice > 0)
-                        {
-                            double changePercent = (GiftNiftyPrice - GiftNiftyPriorClose) / GiftNiftyPriorClose;
-                            projectedPrice = spotPrice * (1 + changePercent);
-                        }
-
-                        if (projectedPrice >= minValidPrice)
-                        {
-                            Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Got {selectedUnderlying} price={projectedPrice:F0} after {waitedMs}ms");
-                            break;
-                        }
-
-                        if (waitedMs % 5000 == 0) // Log every 5 seconds
-                        {
-                            Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Still waiting for {selectedUnderlying} price... ({waitedMs / 1000}s)");
-                        }
-                    }
-
-                    if (projectedPrice < minValidPrice)
-                    {
-                        Logger.Error($"[MarketAnalyzerLogic] GenerateOptions(): Timeout waiting for {selectedUnderlying} price after {maxWaitMs / 1000}s - aborting");
-                        _optionsAlreadyGenerated = false;
-                        StatusUpdated?.Invoke($"Timeout: No {selectedUnderlying} price received");
-                        return;
-                    }
-                }
 
                 // Round projected price to step size for ATM strike
                 double atmStrike = Math.Round(projectedPrice / stepSize) * stepSize;

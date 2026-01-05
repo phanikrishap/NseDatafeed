@@ -425,13 +425,51 @@ namespace ZerodhaDatafeedAdapter.Services
             }
 
             // Stoxxo: Place order at 5 seconds before entry
-            ProcessStoxxoOrderPlacement(state, now);
+            if (state.Status == TBSExecutionStatus.Monitoring && !state.StoxxoOrderPlaced && !state.SkippedDueToProfitCondition)
+            {
+                var timeDiff = state.Config.EntryTime - now;
+                if (timeDiff.TotalSeconds <= 5 && timeDiff.TotalSeconds > 0)
+                {
+                    if (state.ProfitCondition && !ShouldDeployTranche(state))
+                    {
+                        TBSLogger.Warn($"Tranche #{state.TrancheId} ProfitCondition not met 5s before entry - skipping");
+                        state.SkippedDueToProfitCondition = true;
+                        state.Status = TBSExecutionStatus.Skipped;
+                        state.Message = "Skipped: Prior tranches P&L <= 0";
+                    }
+                    else
+                    {
+                        PlaceStoxxoOrderAsync(state).SafeFireAndForget("TBS.PlaceStoxxoOrder");
+                    }
+                }
+            }
 
             // When going Live, lock strike and enter positions
-            ProcessGoingLive(state, oldStatus);
+            if (oldStatus != TBSExecutionStatus.Monitoring && state.Status == TBSExecutionStatus.Live)
+            {
+                if (state.SkippedDueToProfitCondition)
+                {
+                    state.Status = TBSExecutionStatus.Skipped;
+                }
+                else
+                {
+                    TBSLogger.Info($"Tranche #{state.TrancheId} Going Live - locking strike");
+                    LockStrikeAndEnter(state);
+                }
+            }
 
             // Stoxxo: Reconcile legs 10 seconds after going Live
-            ProcessStoxxoReconciliation(state);
+            if (state.Status == TBSExecutionStatus.Live && state.StoxxoOrderPlaced && !state.StoxxoReconciled)
+            {
+                if (state.ActualEntryTime.HasValue)
+                {
+                    var elapsed = DateTime.Now - state.ActualEntryTime.Value;
+                    if (elapsed.TotalSeconds >= 10)
+                    {
+                        ReconcileStoxxoLegsAsync(state).SafeFireAndForget("TBS.ReconcileStoxxoLegs");
+                    }
+                }
+            }
 
             // While Live, check for SL conditions
             if (state.Status == TBSExecutionStatus.Live && state.StrikeLocked)
@@ -442,11 +480,20 @@ namespace ZerodhaDatafeedAdapter.Services
             // Stoxxo: Send SL modification when SL-to-cost is applied
             if (state.SLToCostApplied && !state.StoxxoSLModified && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
             {
-                ModifyStoxxoSLAsync(state);
+                ModifyStoxxoSLAsync(state).SafeFireAndForget("TBS.ModifyStoxxoSL");
             }
 
             // When going SquaredOff, record exit details
-            ProcessGoingSquaredOff(state, oldStatus);
+            if (oldStatus == TBSExecutionStatus.Live && state.Status == TBSExecutionStatus.SquaredOff)
+            {
+                TBSLogger.Info($"Tranche #{state.TrancheId} Going SquaredOff - recording exit prices");
+                RecordExitPrices(state);
+
+                if (!state.StoxxoExitCalled && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
+                {
+                    ExitStoxxoOrderAsync(state).SafeFireAndForget("TBS.ExitStoxxoOrder");
+                }
+            }
 
             // Update combined P&L from legs
             state.UpdateCombinedPnL();
@@ -469,7 +516,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 }
                 else
                 {
-                    PlaceStoxxoOrderAsync(state);
+                    PlaceStoxxoOrderAsync(state).SafeFireAndForget("TBS.ProcessStoxxoOrderPlacement");
                 }
             }
         }
@@ -500,7 +547,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 var elapsed = DateTime.Now - state.ActualEntryTime.Value;
                 if (elapsed.TotalSeconds >= 10)
                 {
-                    ReconcileStoxxoLegsAsync(state);
+                    ReconcileStoxxoLegsAsync(state).SafeFireAndForget("TBS.ProcessStoxxoReconciliation");
                 }
             }
         }
@@ -515,7 +562,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
             if (!state.StoxxoExitCalled && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
             {
-                ExitStoxxoOrderAsync(state);
+                ExitStoxxoOrderAsync(state).SafeFireAndForget("TBS.ProcessGoingSquaredOff");
             }
         }
 
@@ -627,7 +674,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
                 if (!state.StoxxoExitCalled && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
                 {
-                    ExitStoxxoOrderAsync(state);
+                    ExitStoxxoOrderAsync(state).SafeFireAndForget("TBS.ExitStoxxoTargetHit");
                 }
             }
         }
@@ -769,7 +816,12 @@ namespace ZerodhaDatafeedAdapter.Services
 
         #region Stoxxo Integration
 
-        private async void OnStoxxoPollingTimerTick(object sender, EventArgs e)
+        private void OnStoxxoPollingTimerTick(object sender, EventArgs e)
+        {
+            PollStoxxoPortfoliosAsync().SafeFireAndForget("TBS.OnStoxxoPollingTimerTick");
+        }
+
+        private async Task PollStoxxoPortfoliosAsync()
         {
             try
             {
@@ -787,7 +839,7 @@ namespace ZerodhaDatafeedAdapter.Services
             }
         }
 
-        private async void PlaceStoxxoOrderAsync(TBSExecutionState state)
+        private async Task PlaceStoxxoOrderAsync(TBSExecutionState state)
         {
             try
             {
@@ -812,7 +864,7 @@ namespace ZerodhaDatafeedAdapter.Services
             }
         }
 
-        private async void ReconcileStoxxoLegsAsync(TBSExecutionState state)
+        private async Task ReconcileStoxxoLegsAsync(TBSExecutionState state)
         {
             try
             {
@@ -825,7 +877,7 @@ namespace ZerodhaDatafeedAdapter.Services
             }
         }
 
-        private async void ModifyStoxxoSLAsync(TBSExecutionState state)
+        private async Task ModifyStoxxoSLAsync(TBSExecutionState state)
         {
             try
             {
@@ -838,7 +890,7 @@ namespace ZerodhaDatafeedAdapter.Services
             }
         }
 
-        private async void ExitStoxxoOrderAsync(TBSExecutionState state)
+        private async Task ExitStoxxoOrderAsync(TBSExecutionState state)
         {
             try
             {

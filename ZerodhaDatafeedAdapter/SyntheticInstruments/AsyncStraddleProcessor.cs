@@ -7,29 +7,73 @@ using System.Threading.Tasks;
 namespace ZerodhaDatafeedAdapter.SyntheticInstruments
 {
     /// <summary>
-    /// High-performance async synthetic straddle processor
-    /// Replaces synchronous processing with BlockingCollection producer-consumer pattern
+    /// High-performance async synthetic straddle processor with sharded architecture.
+    ///
+    /// Architecture: Sharded Processing (Thread-Safe by Design)
+    /// ═══════════════════════════════════════════════════════════════════════════
+    ///
+    /// Problem Solved: Race condition where multiple workers could update the same
+    /// StraddleState concurrently when CE and PE ticks arrived simultaneously.
+    ///
+    /// Solution: Partition ticks by straddle symbol hash into N shards. Each shard
+    /// has its own BlockingCollection and dedicated worker. All ticks for a given
+    /// straddle ALWAYS go to the same shard, guaranteeing single-threaded access
+    /// to StraddleState without locks.
+    ///
+    /// ┌─────────────────────────────────────────────────────────────────────────┐
+    /// │                    Sharded Straddle Processing                           │
+    /// ├─────────────────────────────────────────────────────────────────────────┤
+    /// │                                                                          │
+    /// │  Input Tick ──► Route by Symbol Hash ──► Shard N ──► Worker N           │
+    /// │                                                                          │
+    /// │  ┌─────────────────┐                                                     │
+    /// │  │ QueueTick(CE)   │ ──► Hash("NIFTY26JAN26000_STRDL") % 4 = 2          │
+    /// │  └─────────────────┘              │                                      │
+    /// │                                   ▼                                      │
+    /// │  ┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐  │
+    /// │  │ QueueTick(PE)   │ ──► │ _shardQueues[2]  │ ──► │ Worker 2 ONLY    │  │
+    /// │  └─────────────────┘     │ (BlockingColl)   │     │ updates this     │  │
+    /// │                          └──────────────────┘     │ StraddleState    │  │
+    /// │                                                   └──────────────────┘  │
+    /// │                                                                          │
+    /// │  Benefits:                                                               │
+    /// │  - No locks needed: Thread affinity guarantees single-writer access     │
+    /// │  - High throughput: Parallel processing across different straddles      │
+    /// │  - Deterministic: Same symbol always routes to same worker              │
+    /// └─────────────────────────────────────────────────────────────────────────┘
     /// </summary>
     public class AsyncStraddleProcessor : IDisposable
     {
-        // BlockingCollection-based processing pipeline
-        private readonly BlockingCollection<StraddleTickRequest> _inputQueue;
+        // ═══════════════════════════════════════════════════════════════════
+        // SHARDED PROCESSING ARCHITECTURE
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Sharded input queues - each shard has its own BlockingCollection.
+        /// Ticks are routed to shards based on straddle symbol hash.
+        /// </summary>
+        private readonly BlockingCollection<StraddleTickRequest>[] _shardQueues;
+
+        /// <summary>
+        /// Output queue for publishing results (single queue, thread-safe).
+        /// </summary>
         private readonly BlockingCollection<StraddleResult> _outputQueue;
-        
+
         // Processing tasks and cancellation
         private readonly CancellationTokenSource _cancellationTokenSource;
         private readonly Task[] _processingTasks;
         private readonly Task _publishingTask;
-        
+
         // Straddle state management
         private readonly ConcurrentDictionary<string, StraddleState> _straddleStates;
         private readonly ConcurrentDictionary<string, List<string>> _legToStraddleMapping;
-        
+
         // Performance metrics
         private long _ticksReceived = 0;
         private long _straddlesProcessed = 0;
         private long _straddlesPublished = 0;
         private long _processingErrors = 0;
+        private readonly long[] _shardTickCounts; // Per-shard tick counts
         private DateTime _startTime = DateTime.UtcNow;
 
         /// <summary>
@@ -37,71 +81,113 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         /// Parameters: straddleSymbol, price, cePrice, pePrice
         /// </summary>
         public event Action<string, double, double, double> StraddlePriceCalculated;
-        
+
         // Configuration
-        private const int QUEUE_CAPACITY = 10000;
-        private const int PROCESSING_WORKERS = 2; // Dedicated workers for parallel processing
+        private const int QUEUE_CAPACITY_PER_SHARD = 2500; // 10000 / 4 shards
+        private const int NUM_SHARDS = 4; // Number of processing shards
         private const int MAX_BATCH_SIZE = 100;
         private const int BATCH_TIMEOUT_MS = 5; // 5ms max delay for low-latency
-        
+
         private readonly ZerodhaAdapter _adapter;
         private volatile bool _isDisposed = false;
-        
+
         public AsyncStraddleProcessor(ZerodhaAdapter adapter)
         {
             _adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
-            
+
             // Initialize state management
             _straddleStates = new ConcurrentDictionary<string, StraddleState>();
             _legToStraddleMapping = new ConcurrentDictionary<string, List<string>>();
-            
-            // Create bounded queues with backpressure handling
-            _inputQueue = new BlockingCollection<StraddleTickRequest>(QUEUE_CAPACITY);
-            _outputQueue = new BlockingCollection<StraddleResult>(QUEUE_CAPACITY);
-            
+
+            // Create sharded input queues
+            _shardQueues = new BlockingCollection<StraddleTickRequest>[NUM_SHARDS];
+            _shardTickCounts = new long[NUM_SHARDS];
+            for (int i = 0; i < NUM_SHARDS; i++)
+            {
+                _shardQueues[i] = new BlockingCollection<StraddleTickRequest>(QUEUE_CAPACITY_PER_SHARD);
+            }
+
+            // Create output queue
+            _outputQueue = new BlockingCollection<StraddleResult>(QUEUE_CAPACITY_PER_SHARD * NUM_SHARDS);
+
             // Create cancellation token
             _cancellationTokenSource = new CancellationTokenSource();
-            
-            // Start processing tasks
-            _processingTasks = new Task[PROCESSING_WORKERS];
-            for (int i = 0; i < PROCESSING_WORKERS; i++)
+
+            // Start one processing task per shard (thread affinity)
+            _processingTasks = new Task[NUM_SHARDS];
+            for (int i = 0; i < NUM_SHARDS; i++)
             {
-                int workerId = i;
-                _processingTasks[i] = Task.Run(() => ProcessStraddleTicks(workerId, _cancellationTokenSource.Token));
+                int shardId = i;
+                _processingTasks[i] = Task.Run(() => ProcessShardTicks(shardId, _cancellationTokenSource.Token));
             }
-            
+
             // Start publishing task
             _publishingTask = Task.Run(() => PublishStraddleResults(_cancellationTokenSource.Token));
-            
-            Logger.Info($"[AsyncStraddleProcessor] Started with {PROCESSING_WORKERS} workers, {QUEUE_CAPACITY} capacity");
+
+            Logger.Info($"[AsyncStraddleProcessor] Started with {NUM_SHARDS} shards (thread-safe by design), {QUEUE_CAPACITY_PER_SHARD} capacity/shard");
+        }
+
+        /// <summary>
+        /// Computes the shard index for a given straddle symbol.
+        /// Uses consistent hashing to ensure same symbol always routes to same shard.
+        /// </summary>
+        private int GetShardIndex(string straddleSymbol)
+        {
+            if (string.IsNullOrEmpty(straddleSymbol)) return 0;
+
+            // Use stable hash code (not GetHashCode which can vary across runs)
+            int hash = 0;
+            foreach (char c in straddleSymbol)
+            {
+                hash = (hash * 31) + c;
+            }
+
+            // Ensure positive and map to shard
+            return (hash & 0x7FFFFFFF) % NUM_SHARDS;
         }
         
         /// <summary>
-        /// Queue a tick for async straddle processing
+        /// Queue a tick for async straddle processing.
+        /// Routes the tick to the appropriate shard based on straddle symbol hash.
         /// </summary>
         public bool QueueTickForProcessing(string instrumentSymbol, Tick tick)
         {
             if (_isDisposed || string.IsNullOrEmpty(instrumentSymbol) || tick == null)
                 return false;
-            
+
             try
             {
-                var request = new StraddleTickRequest
+                // Find which straddles this instrument affects
+                if (!_legToStraddleMapping.TryGetValue(instrumentSymbol, out var straddleSymbols))
+                    return false;
+
+                bool anyQueued = false;
+
+                foreach (var straddleSymbol in straddleSymbols)
                 {
-                    InstrumentSymbol = instrumentSymbol,
-                    Tick = tick,
-                    QueueTime = DateTime.UtcNow
-                };
-                
-                // Non-blocking try add
-                bool queued = _inputQueue.TryAdd(request);
-                
-                if (queued)
-                {
-                    Interlocked.Increment(ref _ticksReceived);
+                    var request = new StraddleTickRequest
+                    {
+                        InstrumentSymbol = instrumentSymbol,
+                        StraddleSymbol = straddleSymbol, // Include straddle symbol for routing
+                        Tick = tick,
+                        QueueTime = DateTime.UtcNow
+                    };
+
+                    // Route to the correct shard based on straddle symbol
+                    int shardIndex = GetShardIndex(straddleSymbol);
+
+                    // Non-blocking try add to the shard's queue
+                    bool queued = _shardQueues[shardIndex].TryAdd(request);
+
+                    if (queued)
+                    {
+                        Interlocked.Increment(ref _ticksReceived);
+                        Interlocked.Increment(ref _shardTickCounts[shardIndex]);
+                        anyQueued = true;
+                    }
                 }
-                
-                return queued;
+
+                return anyQueued;
             }
             catch (Exception ex)
             {
@@ -169,23 +255,26 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         }
         
         /// <summary>
-        /// processing worker for straddle tick processing
+        /// Shard-specific processing worker.
+        /// Each shard has exactly ONE worker, guaranteeing thread affinity for StraddleState access.
+        /// This eliminates the race condition where multiple workers could update the same state.
         /// </summary>
-        private void ProcessStraddleTicks(int workerId, CancellationToken cancellationToken)
+        private void ProcessShardTicks(int shardId, CancellationToken cancellationToken)
         {
             try
             {
+                Logger.Debug($"[AsyncStraddleProcessor] Shard {shardId} worker started");
                 var batchBuffer = new List<StraddleTickRequest>(MAX_BATCH_SIZE);
-                
-                foreach (var request in _inputQueue.GetConsumingEnumerable(cancellationToken))
+
+                // Each shard only consumes from its own queue
+                foreach (var request in _shardQueues[shardId].GetConsumingEnumerable(cancellationToken))
                 {
                     batchBuffer.Add(request);
-                    
-                    // Process immediately if batch is full or after a small timeout
-                    // Note: Simplified batching for BlockingCollection
-                    if (batchBuffer.Count >= MAX_BATCH_SIZE || _inputQueue.Count == 0)
+
+                    // Process immediately if batch is full or queue is empty
+                    if (batchBuffer.Count >= MAX_BATCH_SIZE || _shardQueues[shardId].Count == 0)
                     {
-                        ProcessBatch(workerId, batchBuffer);
+                        ProcessBatch(shardId, batchBuffer);
                         batchBuffer.Clear();
                     }
                 }
@@ -193,73 +282,75 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
             catch (OperationCanceledException)
             {
                 // Expected during shutdown
+                Logger.Debug($"[AsyncStraddleProcessor] Shard {shardId} worker stopped (cancelled)");
             }
             catch (Exception ex)
             {
-                Logger.Error($"[AsyncStraddleProcessor] Worker {workerId} error: {ex.Message}");
+                Logger.Error($"[AsyncStraddleProcessor] Shard {shardId} worker error: {ex.Message}");
                 Interlocked.Increment(ref _processingErrors);
             }
         }
         
         /// <summary>
-        /// Process a batch of straddle tick requests
+        /// Process a batch of straddle tick requests.
+        /// Called by a single shard worker, so no synchronization needed for state access.
         /// </summary>
-        private void ProcessBatch(int workerId, List<StraddleTickRequest> batch)
+        private void ProcessBatch(int shardId, List<StraddleTickRequest> batch)
         {
             foreach (var request in batch)
             {
-                ProcessSingleStraddle(request);
+                ProcessSingleStraddle(request, shardId);
             }
             Interlocked.Add(ref _straddlesProcessed, batch.Count);
         }
         
         /// <summary>
-        /// Process a single straddle tick and generate results
+        /// Process a single straddle tick and generate results.
+        /// Thread-safe by design: each shard worker only processes its assigned straddles.
+        /// No locking needed because shardId guarantees single-threaded access to this StraddleState.
         /// </summary>
-        private void ProcessSingleStraddle(StraddleTickRequest request)
+        private void ProcessSingleStraddle(StraddleTickRequest request, int shardId)
         {
             try
             {
-                // Find affected straddles
-                if (!_legToStraddleMapping.TryGetValue(request.InstrumentSymbol, out var straddleSymbols))
-                    return;
-                
-                foreach (var straddleSymbol in straddleSymbols)
-                {
-                    if (!_straddleStates.TryGetValue(straddleSymbol, out var state))
-                        continue;
-                    
-                    // Update straddle state with new tick
-                    bool wasUpdated = UpdateStraddleState(state, request.InstrumentSymbol, request.Tick);
-                    
-                    if (wasUpdated && CanCalculateStraddlePrice(state))
-                    {
-                        // Calculate straddle price
-                        var straddlePrice = CalculateStraddlePrice(state);
-                        
-                        // Queue result for publishing
-                        var result = new StraddleResult
-                        {
-                            StraddleSymbol = straddleSymbol,
-                            Price = straddlePrice,
-                            Volume = Math.Max(state.LastCEVolume, state.LastPEVolume),
-                            Timestamp = DateTime.UtcNow,
-                            CEPrice = state.LastCEPrice,
-                            PEPrice = state.LastPEPrice,
-                            ProcessingLatency = (DateTime.UtcNow - request.QueueTime).TotalMilliseconds
-                        };
-                        
-                        // Try to queue result
-                        _outputQueue.TryAdd(result);
+                // The straddle symbol is now included in the request (set during routing)
+                string straddleSymbol = request.StraddleSymbol;
 
-                        // Fire event for UI updates (Option Chain window)
-                        StraddlePriceCalculated?.Invoke(straddleSymbol, straddlePrice, state.LastCEPrice, state.LastPEPrice);
-                    }
+                if (!_straddleStates.TryGetValue(straddleSymbol, out var state))
+                    return;
+
+                // Update straddle state with new tick
+                // THREAD-SAFE: Only this shard's worker updates this state
+                bool wasUpdated = UpdateStraddleState(state, request.InstrumentSymbol, request.Tick);
+
+                if (wasUpdated && CanCalculateStraddlePrice(state))
+                {
+                    // Calculate straddle price
+                    var straddlePrice = CalculateStraddlePrice(state);
+
+                    // Queue result for publishing
+                    var result = new StraddleResult
+                    {
+                        StraddleSymbol = straddleSymbol,
+                        Price = straddlePrice,
+                        Volume = Math.Max(state.LastCEVolume, state.LastPEVolume),
+                        Timestamp = DateTime.UtcNow,
+                        CEPrice = state.LastCEPrice,
+                        PEPrice = state.LastPEPrice,
+                        ProcessingLatency = (DateTime.UtcNow - request.QueueTime).TotalMilliseconds,
+                        ShardId = shardId // Track which shard processed this
+                    };
+
+                    // Try to queue result (output queue is thread-safe)
+                    _outputQueue.TryAdd(result);
+
+                    // Fire event for UI updates (Option Chain window)
+                    StraddlePriceCalculated?.Invoke(straddleSymbol, straddlePrice, state.LastCEPrice, state.LastPEPrice);
                 }
             }
             catch (Exception ex)
             {
-                Logger.Error($"[AsyncStraddleProcessor] Error processing straddle: {ex.Message}");
+                Logger.Error($"[AsyncStraddleProcessor] Shard {shardId} error processing straddle: {ex.Message}");
                 Interlocked.Increment(ref _processingErrors);
             }
         }
@@ -337,7 +428,16 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         public AsyncStraddleMetrics GetMetrics()
         {
             var uptime = (DateTime.UtcNow - _startTime).TotalSeconds;
-            
+
+            // Collect per-shard queue depths
+            var shardQueueDepths = new int[NUM_SHARDS];
+            var shardTickCountsCopy = new long[NUM_SHARDS];
+            for (int i = 0; i < NUM_SHARDS; i++)
+            {
+                shardQueueDepths[i] = _shardQueues[i].Count;
+                shardTickCountsCopy[i] = Interlocked.Read(ref _shardTickCounts[i]);
+            }
+
             return new AsyncStraddleMetrics
             {
                 TicksReceived = _ticksReceived,
@@ -346,8 +446,10 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
                 ProcessingErrors = _processingErrors,
                 UptimeSeconds = uptime,
                 TicksPerSecond = uptime > 0 ? _ticksReceived / uptime : 0,
-                ProcessingWorkers = PROCESSING_WORKERS,
-                QueueCapacity = QUEUE_CAPACITY
+                NumShards = NUM_SHARDS,
+                QueueCapacityPerShard = QUEUE_CAPACITY_PER_SHARD,
+                ShardQueueDepths = shardQueueDepths,
+                ShardTickCounts = shardTickCountsCopy
             };
         }
         
@@ -355,20 +457,32 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         {
             if (_isDisposed) return;
             _isDisposed = true;
-            
+
             try
             {
                 _cancellationTokenSource.Cancel();
-                _inputQueue.CompleteAdding();
+
+                // Complete all shard queues
+                for (int i = 0; i < NUM_SHARDS; i++)
+                {
+                    _shardQueues[i].CompleteAdding();
+                }
                 _outputQueue.CompleteAdding();
-                
-                Task.WaitAll(new List<Task>(_processingTasks) { _publishingTask }.ToArray(), TimeSpan.FromSeconds(5));
-                
+
+                // Wait for all processing tasks including the publishing task
+                var allTasks = new List<Task>(_processingTasks) { _publishingTask };
+                Task.WaitAll(allTasks.ToArray(), TimeSpan.FromSeconds(5));
+
                 _cancellationTokenSource.Dispose();
-                _inputQueue.Dispose();
+
+                // Dispose all shard queues
+                for (int i = 0; i < NUM_SHARDS; i++)
+                {
+                    _shardQueues[i].Dispose();
+                }
                 _outputQueue.Dispose();
-                
-                Logger.Info("[AsyncStraddleProcessor] Disposed successfully");
+
+                Logger.Info($"[AsyncStraddleProcessor] Disposed successfully ({NUM_SHARDS} shards)");
             }
             catch (Exception ex)
             {
@@ -380,6 +494,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
     public class StraddleTickRequest
     {
         public string InstrumentSymbol { get; set; }
+        public string StraddleSymbol { get; set; } // Used for routing to correct shard
         public Tick Tick { get; set; }
         public DateTime QueueTime { get; set; }
     }
@@ -393,6 +508,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         public double CEPrice { get; set; }
         public double PEPrice { get; set; }
         public double ProcessingLatency { get; set; }
+        public int ShardId { get; set; } // Track which shard processed this result
     }
     
     public class AsyncStraddleMetrics
@@ -403,7 +519,11 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         public long ProcessingErrors { get; set; }
         public double UptimeSeconds { get; set; }
         public double TicksPerSecond { get; set; }
-        public int ProcessingWorkers { get; set; }
-        public int QueueCapacity { get; set; }
+
+        // Sharding metrics
+        public int NumShards { get; set; }
+        public int QueueCapacityPerShard { get; set; }
+        public int[] ShardQueueDepths { get; set; } // Current queue depth per shard
+        public long[] ShardTickCounts { get; set; } // Total ticks processed per shard
     }
 }

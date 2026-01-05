@@ -13,6 +13,7 @@ using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.Zerodha;
+using System.Threading.Tasks.Dataflow;
 using ZerodhaDatafeedAdapter.ViewModels;
 
 namespace ZerodhaDatafeedAdapter.Services.MarketData
@@ -29,12 +30,10 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private readonly HistoricalBarCache _barCache;
         private static readonly ILoggerService _log = LoggerFactory.GetLogger(LogDomain.MarketData);
 
-        // Rate limiting: Zerodha allows ~3 requests/second for historical API
-        // We use 6 concurrent requests with 3 second batch delays
-        private static readonly SemaphoreSlim _rateLimitSemaphore = new SemaphoreSlim(6, 6);
-        private static DateTime _lastBatchTime = DateTime.MinValue;
-        private static readonly object _batchLock = new object();
-        private const int BATCH_DELAY_MS = 3000; // 3 seconds between batches
+        // TPL Dataflow for rate limiting and request sequencing
+        private readonly TransformBlock<HistoricalRequest, List<Record>> _requestBlock;
+        private const int MAX_CONCURRENT_REQUESTS = 1; // Sequential processing for simplified rate limiting
+        private const int RATE_LIMIT_DELAY_MS = 500; // 2 requests per second safety limit
         private const int MAX_DAYS_PER_REQUEST = 60; // Zerodha's limit
 
         /// <summary>
@@ -58,6 +57,15 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             _zerodhaClient = ZerodhaClient.Instance;
             _instrumentManager = InstrumentManager.Instance;
             _barCache = HistoricalBarCache.Instance;
+
+            // Initialize the request pipeline with rate limiting
+            _requestBlock = new TransformBlock<HistoricalRequest, List<Record>>(
+                async request => await ProcessHistoricalRequest(request),
+                new ExecutionDataflowBlockOptions
+                {
+                    MaxDegreeOfParallelism = MAX_CONCURRENT_REQUESTS,
+                    BoundedCapacity = 100 // Prevent memory leaks from too many queued requests
+                });
         }
 
         /// <summary>
@@ -92,102 +100,102 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 _log.Warn($"Date range exceeds {MAX_DAYS_PER_REQUEST} days for {symbol}. Truncating from {fromDate} to {effectiveFromDate}");
             }
 
-            List<Record> records = new List<Record>();
-
-            try
+            // CACHE-FIRST: Check SQLite cache before hitting API
+            if (barsPeriodType != BarsPeriodType.Tick)
             {
-                // For Zerodha, we need to format the request correctly
-                if (barsPeriodType != BarsPeriodType.Tick)
+                var cachedRecords = _barCache.GetCachedBars(symbol, interval, effectiveFromDate, toDate);
+                if (cachedRecords != null && cachedRecords.Count > 0)
                 {
-                    // CACHE-FIRST: Check SQLite cache before hitting Zerodha API
-                    var cachedRecords = _barCache.GetCachedBars(symbol, interval, effectiveFromDate, toDate);
-                    if (cachedRecords != null && cachedRecords.Count > 0)
-                    {
-                        _log.Debug($"CACHE HIT: {symbol} - {cachedRecords.Count} bars from cache");
-                        return cachedRecords;
-                    }
-
-                    _log.Debug($"CACHE MISS: {symbol} - fetching from Zerodha API");
-
-                    // Get the instrument token
-                    long instrumentToken = await _instrumentManager.GetInstrumentToken(symbol);
-
-                    if (instrumentToken == 0)
-                    {
-                        _log.Error($"Could not find instrument token for {symbol}");
-                        return records;
-                    }
-
-                    string fromDateStr = effectiveFromDate.ToString("yyyy-MM-dd HH:mm:ss");
-                    string toDateStr = toDate.ToString("yyyy-MM-dd HH:mm:ss");
-
-                    // Apply rate limiting before making API call
-                    await ApplyRateLimiting(symbol);
-
-                    // Get historical data from Zerodha
-                    records = await GetHistoricalDataChunk(instrumentToken, interval, fromDateStr, toDateStr);
-
-                    // Store in cache for future requests
-                    if (records.Count > 0)
-                    {
-                        _barCache.StoreBars(symbol, interval, records);
-                        _log.Debug($"Cached {records.Count} bars for {symbol}");
-                    }
-                }
-                else
-                {
-                    _log.Warn("Tick data not supported for Zerodha historical API");
+                    _log.Debug($"CACHE HIT: {symbol} - {cachedRecords.Count} bars from cache");
+                    return cachedRecords;
                 }
             }
-            catch (Exception ex)
+            else
             {
-                _log.Error($"Exception in GetHistoricalTrades for {symbol}: {ex.Message}", ex);
+                _log.Warn("Tick data not supported for Zerodha historical API");
+                return new List<Record>();
             }
 
-            _log.Debug($"Returning {records.Count} historical records for {symbol}");
-            return records;
+            _log.Debug($"CACHE MISS: {symbol} - queueing for Zerodha API via TPL Dataflow");
+
+            // Create a request object for the pipeline
+            var request = new HistoricalRequest
+            {
+                Symbol = symbol,
+                Interval = interval,
+                FromDate = effectiveFromDate,
+                ToDate = toDate
+            };
+
+            // Post to the pipeline and wait for result
+            // Note: We use SendAsync to respect BoundedCapacity (backpressure)
+            if (await _requestBlock.SendAsync(request))
+            {
+                // In a TransformBlock with MaxDOP=1, we can't easily get the direct result 
+                // without matching IDs or using a TaskCompletionSource inside the request.
+                // Let's use the TCS pattern for reliability.
+                return await request.CompletionSource.Task;
+            }
+
+            _log.Error($"Failed to queue historical request for {symbol}");
+            return new List<Record>();
         }
 
         /// <summary>
-        /// Applies rate limiting to avoid Zerodha API throttling.
-        /// Uses semaphore for concurrent request limiting and batch delays.
+        /// Process a historical request from the pipeline with rate limiting
         /// </summary>
-        private async Task ApplyRateLimiting(string symbol)
+        private async Task<List<Record>> ProcessHistoricalRequest(HistoricalRequest request)
         {
-            // Wait for semaphore slot (max 6 concurrent requests)
-            await _rateLimitSemaphore.WaitAsync();
-
             try
             {
-                int delayMs = 0;
+                _log.Debug($"Processing historical request for {request.Symbol} ({request.FromDate} to {request.ToDate})");
 
-                // Check if we need to wait for batch delay (minimize lock time)
-                lock (_batchLock)
+                // Get the instrument token
+                long instrumentToken = await _instrumentManager.GetInstrumentToken(request.Symbol);
+                if (instrumentToken == 0)
                 {
-                    var timeSinceLastBatch = DateTime.Now - _lastBatchTime;
-                    if (timeSinceLastBatch.TotalMilliseconds < BATCH_DELAY_MS)
-                    {
-                        delayMs = BATCH_DELAY_MS - (int)timeSinceLastBatch.TotalMilliseconds;
-                    }
+                    _log.Error($"Could not find instrument token for {request.Symbol}");
+                    request.CompletionSource.SetResult(new List<Record>());
+                    return new List<Record>();
                 }
 
-                // Delay outside of lock to avoid blocking other threads
-                if (delayMs > 0)
+                // Apply simple but effective rate limiting delay
+                await Task.Delay(RATE_LIMIT_DELAY_MS);
+
+                string fromDateStr = request.FromDate.ToString("yyyy-MM-dd HH:mm:ss");
+                string toDateStr = request.ToDate.ToString("yyyy-MM-dd HH:mm:ss");
+
+                // Get historical data from Zerodha
+                var records = await GetHistoricalDataChunk(instrumentToken, request.Interval, fromDateStr, toDateStr);
+
+                // Store in cache for future requests
+                if (records.Count > 0)
                 {
-                    _log.Debug($"Rate limiting: waiting {delayMs}ms before request for {symbol}");
-                    await Task.Delay(delayMs);
+                    _barCache.StoreBars(request.Symbol, request.Interval, records);
+                    _log.Debug($"Cached {records.Count} bars for {request.Symbol}");
                 }
 
-                // Update last batch time
-                lock (_batchLock)
-                {
-                    _lastBatchTime = DateTime.Now;
-                }
+                request.CompletionSource.SetResult(records);
+                return records;
             }
-            finally
+            catch (Exception ex)
             {
-                _rateLimitSemaphore.Release();
+                _log.Error($"Error processing historical request for {request.Symbol}: {ex.Message}");
+                request.CompletionSource.SetException(ex);
+                return new List<Record>();
             }
+        }
+
+        /// <summary>
+        /// Data structure for a historical request in the pipeline
+        /// </summary>
+        private class HistoricalRequest
+        {
+            public string Symbol { get; set; }
+            public string Interval { get; set; }
+            public DateTime FromDate { get; set; }
+            public DateTime ToDate { get; set; }
+            public TaskCompletionSource<List<Record>> CompletionSource { get; } = new TaskCompletionSource<List<Record>>();
         }
 
         /// <summary>

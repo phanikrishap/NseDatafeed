@@ -85,7 +85,8 @@
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff 7b50f6ce HEAD -- ZerodhaDatafeedAdapter/Services/WebSocket/SharedWebSocketService.cs)",
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" checkout -b develop)",
       "Bash(nuget restore:*)",
-      "Bash(powershell: nuget restore \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\packages.config\" -PackagesDirectory \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\packages\")"
+      "Bash(powershell: nuget restore \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\packages.config\" -PackagesDirectory \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\packages\")",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" log --oneline -5)"
     ]
   }
 }

@@ -777,23 +777,32 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
 
         private async void OnLoadClick(object sender, RoutedEventArgs e)
         {
-            if (!UpdateConfigFromUI())
-                return;
-
-            _btnLoad.IsEnabled = false;
-            Logger.Info($"[SimulationEngineTabPage] Loading data: {_config.Underlying} {_config.SimulationDate:yyyy-MM-dd} {_config.TimeFrom}-{_config.TimeTo}");
-
-            var success = await SimulationService.Instance.LoadHistoricalBars(_config);
-
-            UpdateButtonStates();
-
-            if (success)
+            try
             {
-                Logger.Info("[SimulationEngineTabPage] Data loaded successfully");
+                if (!UpdateConfigFromUI())
+                    return;
+
+                _btnLoad.IsEnabled = false;
+                Logger.Info($"[SimulationEngineTabPage] Loading data: {_config.Underlying} {_config.SimulationDate:yyyy-MM-dd} {_config.TimeFrom}-{_config.TimeTo}");
+
+                var success = await SimulationService.Instance.LoadHistoricalBars(_config);
+
+                UpdateButtonStates();
+
+                if (success)
+                {
+                    Logger.Info("[SimulationEngineTabPage] Data loaded successfully");
+                }
+                else
+                {
+                    Logger.Warn("[SimulationEngineTabPage] Failed to load data");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                Logger.Warn("[SimulationEngineTabPage] Failed to load data");
+                Logger.Error($"[SimulationEngineTabPage] ERROR in OnLoadClick: {ex.Message}", ex);
+                _btnLoad.IsEnabled = true;
+                _lblStatus.Text = $"Load failed: {ex.Message}";
             }
         }
 

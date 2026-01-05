@@ -1330,7 +1330,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                         else
                         {
                             // Condition met or no condition - proceed with Stoxxo order
-                            PlaceStoxxoOrderAsync(state);
+                            PlaceStoxxoOrderAsync(state).SafeFireAndForget("TBSManager.PlaceStoxxo");
                         }
                     }
                 }
@@ -1365,7 +1365,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                         var elapsed = DateTime.Now - state.ActualEntryTime.Value;
                         if (elapsed.TotalSeconds >= 10)
                         {
-                            ReconcileStoxxoLegsAsync(state);
+                            ReconcileStoxxoLegsAsync(state).SafeFireAndForget("TBSWindow.ReconcileStoxxo");
                         }
                     }
                 }
@@ -1379,7 +1379,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                 // Stoxxo: Send SL modification when SL-to-cost is applied
                 if (state.SLToCostApplied && !state.StoxxoSLModified && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
                 {
-                    ModifyStoxxoSLAsync(state);
+                    ModifyStoxxoSLAsync(state).SafeFireAndForget("TBSWindow.ModifyStoxxoSL");
                 }
 
                 // When going SquaredOff, record exit details
@@ -1391,7 +1391,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                     // Stoxxo: Call exit
                     if (!state.StoxxoExitCalled && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
                     {
-                        ExitStoxxoOrderAsync(state);
+                        ExitStoxxoOrderAsync(state).SafeFireAndForget("TBSWindow.ExitStoxxo");
                     }
                 }
 
@@ -1515,7 +1515,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
                         // Stoxxo: Immediately send exit when target is hit
                         if (!state.StoxxoExitCalled && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
                         {
-                            ExitStoxxoOrderAsync(state);
+                            ExitStoxxoOrderAsync(state).SafeFireAndForget("TBSManager.ExitStoxxo");
                         }
                     }
                 }
@@ -1770,7 +1770,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         /// <summary>
         /// Poll Stoxxo for status and MTM updates on active portfolios
         /// </summary>
-        private async void OnStoxxoPollingTimerTick(object sender, EventArgs e)
+        private void OnStoxxoPollingTimerTick(object sender, EventArgs e)
+        {
+            PollStoxxoPortfoliosAsync().SafeFireAndForget("TBSManager.PollStoxxo");
+        }
+
+        private async Task PollStoxxoPortfoliosAsync()
         {
             try
             {
@@ -1815,7 +1820,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         /// <summary>
         /// Place Stoxxo order 5 seconds before entry time
         /// </summary>
-        private async void PlaceStoxxoOrderAsync(TBSExecutionState state)
+        private async Task PlaceStoxxoOrderAsync(TBSExecutionState state)
         {
             try
             {
@@ -1888,7 +1893,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         /// <summary>
         /// Reconcile Stoxxo legs with internal legs 10 seconds after going Live
         /// </summary>
-        private async void ReconcileStoxxoLegsAsync(TBSExecutionState state)
+        private async Task ReconcileStoxxoLegsAsync(TBSExecutionState state)
         {
             try
             {
@@ -1989,7 +1994,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         /// Modify Stoxxo SL when SL-to-cost is triggered
         /// Sends the actual entry price as the new SL value (not percentage)
         /// </summary>
-        private async void ModifyStoxxoSLAsync(TBSExecutionState state)
+        private async Task ModifyStoxxoSLAsync(TBSExecutionState state)
         {
             try
             {
@@ -2030,7 +2035,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         /// <summary>
         /// Exit Stoxxo portfolio when squaring off
         /// </summary>
-        private async void ExitStoxxoOrderAsync(TBSExecutionState state)
+        private async Task ExitStoxxoOrderAsync(TBSExecutionState state)
         {
             try
             {
