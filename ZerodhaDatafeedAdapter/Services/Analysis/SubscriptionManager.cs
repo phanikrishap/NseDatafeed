@@ -108,29 +108,17 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         // REACTIVE HUB INTEGRATION
         // ═══════════════════════════════════════════════════════════════════
 
-        // Reference to the reactive hub for publishing updates
+        // Reference to the reactive hub for publishing updates (single source of truth)
         private readonly MarketDataReactiveHub _hub = MarketDataReactiveHub.Instance;
-
-        // Event for UI updates (legacy - kept for backward compatibility)
-        public event Action<string, double> OptionPriceUpdated;
 
         /// <summary>
         /// Inject a simulated price update (for SimulationService to feed Option Chain)
         /// </summary>
         public void InjectSimulatedPrice(string symbol, double price)
         {
-            // Publish to reactive hub (primary)
+            // Publish to reactive hub only (single source of truth)
             _hub.PublishOptionPrice(symbol, price, 0, "Simulated");
-
-            // Legacy event for backward compatibility
-            OptionPriceUpdated?.Invoke(symbol, price);
         }
-
-        // Event to notify when zerodhaSymbol is resolved from DB (generatedSymbol, zerodhaSymbol)
-        public event Action<string, string> SymbolResolved;
-
-        // Event to notify UI of historical data status (symbol, status like "Done (123)" or "No Data")
-        public event Action<string, string> OptionStatusUpdated;
 
         // Flag to track if we've subscribed to the event-driven tick feed (0=false, 1=true)
         // Use int for Interlocked.CompareExchange atomic operations
@@ -297,17 +285,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         /// <summary>
         /// Event handler for option ticks from OptimizedTickProcessor.
-        /// Publishes to reactive hub and fires legacy event for backward compatibility.
+        /// Publishes to reactive hub (single source of truth).
         /// </summary>
         private void OnOptionTickReceived(string symbol, double price)
         {
             if (string.IsNullOrEmpty(symbol) || price <= 0) return;
 
-            // Publish to reactive hub (primary - enables batching and backpressure)
+            // Publish to reactive hub only (single source of truth - enables batching and backpressure)
             _hub.PublishOptionPrice(symbol, price, 0, "WebSocket");
-
-            // Legacy event for backward compatibility
-            OptionPriceUpdated?.Invoke(symbol, price);
         }
 
         /// <summary>
@@ -430,11 +415,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         instrument.zerodhaSymbol = tradingSymbol;
                         Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Found token={token}, zerodhaSymbol={tradingSymbol}");
 
-                        // Publish to reactive hub (primary)
+                        // Publish to reactive hub only (single source of truth)
                         _hub.PublishSymbolResolved(generatedSymbol, tradingSymbol);
-
-                        // Legacy event for backward compatibility
-                        SymbolResolved?.Invoke(generatedSymbol, tradingSymbol);
                     }
                 }
                 else
@@ -515,16 +497,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                         adapter.SubscribeMarketData(ntInstrument, (type, price, size, time, unknown) =>
                         {
-                            // Update UI with live prices
+                            // Update via reactive hub (single source of truth)
+                            // Note: Primary tick updates come from OptimizedTickProcessor via OnOptionTickReceived
+                            // This callback is mainly for triggering NinjaTrader's internal data storage
                             if (type == MarketDataType.Last && price > 0)
                             {
                                 // DIAGNOSTIC: Log first 50 option callbacks to verify they fire
                                 bool isOption = symbolForClosure.Contains("CE") || symbolForClosure.Contains("PE");
                                 if (isOption)
                                 {
-                                    Logger.Info($"[SM-CALLBACK] {symbolForClosure} = {price} (type={type})");
+                                    Logger.Debug($"[SM-CALLBACK] {symbolForClosure} = {price} (type={type})");
                                 }
-                                OptionPriceUpdated?.Invoke(symbolForClosure, price);
+                                // Publish to hub (will be deduplicated with OptimizedTickProcessor updates)
+                                _hub.PublishOptionPrice(symbolForClosure, price, 0, "Callback");
                             }
                         });
 
@@ -597,9 +582,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 {
                     Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Received {records.Count} bars");
 
-                    // Publish status to reactive hub and legacy event
+                    // Publish status to reactive hub only (single source of truth)
                     _hub.PublishOptionStatus(ntSymbol, $"Cached ({records.Count})");
-                    OptionStatusUpdated?.Invoke(ntSymbol, $"Cached ({records.Count})");
 
                     // Track this instrument for straddle processing
                     _processedInstruments.Add((ntSymbol, instrument));
@@ -637,7 +621,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         if (dataAge.TotalMinutes <= 5)
                         {
                             _hub.PublishOptionPrice(ntSymbol, lastRecord.Close, 0, "Historical");
-                            OptionPriceUpdated?.Invoke(ntSymbol, lastRecord.Close);
                         }
                         else
                         {
@@ -649,7 +632,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 {
                     Logger.Warn($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): No historical data received for {apiSymbol}");
                     _hub.PublishOptionStatus(ntSymbol, "No Data");
-                    OptionStatusUpdated?.Invoke(ntSymbol, "No Data");
                 }
             }
             catch (Exception ex)
@@ -702,7 +684,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             {
                                 Logger.Info($"[SubscriptionManager] Streaming BarsRequest completed for {symbolForClosure}: {barCount} bars");
                                 _hub.PublishOptionStatus(symbolForClosure, $"Done ({barCount})");
-                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
 
                                 // Start VWAP calculation immediately
                                 _ = VWAPCalculatorService.Instance.StartVWAPCalculation(symbolForClosure, instrumentForClosure);
@@ -711,7 +692,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             {
                                 Logger.Warn($"[SubscriptionManager] Streaming BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
                                 _hub.PublishOptionStatus(symbolForClosure, $"Error: {errorCode}");
-                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
                             }
                         });
                     }
@@ -842,9 +822,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                                 var refDetails = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
                                 Logger.Debug($"[SubscriptionManager] PRE-DONE STATUS: {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
 
-                                // Update UI status to "Done" now that data is in NinjaTrader database
+                                // Update status via hub (single source of truth)
                                 _hub.PublishOptionStatus(symbolForClosure, $"Done ({barCount})");
-                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
 
                                 // LOG SUBSCRIPTION STATE AGAIN
                                 var refDetailsAfter = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
@@ -857,7 +836,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             {
                                 Logger.Warn($"[SubscriptionManager] BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
                                 _hub.PublishOptionStatus(symbolForClosure, $"Error: {errorCode}");
-                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
                             }
 
                             // IMPORTANT: Do NOT dispose BarsRequest - keep it alive for real-time tick storage
@@ -942,9 +920,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                                 var refDetails = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
                                 Logger.Debug($"[SubscriptionManager] PRE-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
 
-                                // Update UI status to "Done" now that data is in NinjaTrader database
+                                // Update status via hub (single source of truth)
                                 _hub.PublishOptionStatus(symbolForClosure, $"Done ({barCount})");
-                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
 
                                 // LOG SUBSCRIPTION STATE AGAIN
                                 var refDetailsAfter = SubscriptionTrackingService.Instance.GetReferenceDetails(symbolForClosure);
@@ -957,7 +934,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             {
                                 Logger.Warn($"[SubscriptionManager] STRDL BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
                                 _hub.PublishOptionStatus(symbolForClosure, $"Error: {errorCode}");
-                                OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
                             }
 
                             // IMPORTANT: Do NOT dispose BarsRequest - keep it alive for real-time tick storage

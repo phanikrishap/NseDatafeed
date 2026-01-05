@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using Newtonsoft.Json;
 using ZerodhaDatafeedAdapter.Classes;
+using ZerodhaDatafeedAdapter.Services.Analysis;
 
 namespace ZerodhaDatafeedAdapter.SyntheticInstruments
 {
@@ -52,9 +53,13 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
             // Initialize processor with definitions
             _asyncProcessor.LoadStraddleConfigurations(_definitions);
 
-            // Forward straddle price events to subscribers (Option Chain window, etc.)
+            // Forward straddle price events to reactive hub (primary) and legacy subscribers
             _asyncProcessor.StraddlePriceCalculated += (symbol, price, cePrice, pePrice) =>
             {
+                // Publish to reactive hub (primary - enables batching and streaming)
+                MarketDataReactiveHub.Instance.PublishStraddlePrice(symbol, price, cePrice, pePrice);
+
+                // Legacy event for backward compatibility (can be removed once all consumers use hub)
                 StraddlePriceCalculated?.Invoke(symbol, price, cePrice, pePrice);
             };
 

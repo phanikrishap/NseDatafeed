@@ -214,23 +214,60 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
             ntSymbolName = instrument.Symbol;
             try
             {
-                // In NinjaTrader, actual instrument creation/lookup happens via Instrument.GetInstrument
-                // Here we just ensure we have the mapping
+                // Step 1: Add mapping to our internal cache
                 _mappingService.AddMapping(instrument.Symbol, new MappedInstrument
                 {
                     symbol = instrument.Symbol,
+                    zerodhaSymbol = instrument.BrokerSymbol ?? instrument.Symbol,
                     instrument_token = instrument.InstrumentToken,
-                    exchange = instrument.Segment
+                    exchange = instrument.Segment,
+                    segment = instrument.Segment,
+                    tick_size = instrument.TickSize,
+                    lot_size = instrument.LotSize,
+                    expiry = instrument.Expiry,
+                    strike = instrument.Strike,
+                    underlying = instrument.Underlying
                 });
-                return true;
+
+                // Step 2: Create actual NinjaTrader MasterInstrument and Instrument
+                // This is the critical step that was missing - without it, Instrument.GetInstrument() returns null
+                bool created = NinjaTraderHelper.CreateNTInstrument(instrument, out ntSymbolName);
+
+                if (created)
+                {
+                    Logger.Info($"[IM] CreateInstrument: Successfully created/found NT instrument '{ntSymbolName}'");
+                }
+                else
+                {
+                    Logger.Warn($"[IM] CreateInstrument: Failed to create NT instrument for '{instrument.Symbol}'");
+                }
+
+                return created;
             }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                Logger.Error($"[IM] CreateInstrument: Exception for '{instrument.Symbol}' - {ex.Message}", ex);
+                return false;
+            }
         }
 
         public bool RemoveInstrument(InstrumentDefinition instrument)
         {
-            // Logic to remove from internal collections if needed
-            return true;
+            try
+            {
+                // Remove from NinjaTrader database
+                bool removed = NinjaTraderHelper.RemoveNTInstrument(instrument.Symbol);
+
+                // Also remove from our mapping cache (if we had a method for that)
+                // _mappingService.RemoveMapping(instrument.Symbol);
+
+                return removed;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[IM] RemoveInstrument: Exception for '{instrument.Symbol}' - {ex.Message}", ex);
+                return false;
+            }
         }
 
         public async Task<ObservableCollection<InstrumentDefinition>> GetNTSymbols()

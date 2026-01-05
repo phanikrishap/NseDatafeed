@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Reactive.Disposables;
+using System.Reactive.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -11,6 +13,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Tools;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.SyntheticInstruments;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Models;
@@ -48,7 +51,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
     }
 
     /// <summary>
-    /// Modularized Option Chain Tab Page.
+    /// Modularized Option Chain Tab Page using Rx-based MarketDataReactiveHub.
+    /// All market data flows through the hub's reactive streams with built-in backpressure.
     /// UI logic is delegated to specialized controls in the Controls/ directory.
     /// </summary>
     public class OptionChainTabPage : NTTabPage, IInstrumentProvider
@@ -67,21 +71,19 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         private Dictionary<string, OptionChainRow> _straddleSymbolToRowMap = new Dictionary<string, OptionChainRow>();
         private HashSet<string> _persistenceSubscribedSymbols = new HashSet<string>();
 
-        private readonly Dictionary<string, (double price, DateTime timestamp)> _pendingPriceUpdates = new Dictionary<string, (double, DateTime)>();
-        private readonly Dictionary<string, string> _pendingStatusUpdates = new Dictionary<string, string>();
-        private readonly Dictionary<string, (double price, double ce, double pe)> _pendingStraddleUpdates = new Dictionary<string, (double, double, double)>();
-        private readonly Dictionary<string, VWAPData> _pendingVWAPUpdates = new Dictionary<string, VWAPData>();
-        private readonly object _throttleLock = new object();
-        private System.Windows.Threading.DispatcherTimer _uiUpdateTimer;
+        // Rx subscriptions - disposed on unload
+        private CompositeDisposable _subscriptions;
+
+        // Track if UI refresh is needed after batch processing
+        private bool _needsUIRefresh = false;
 
         public OptionChainTabPage()
         {
-            Logger.Info("[OptionChainTabPage] Initializing modular UI");
-            
+            Logger.Info("[OptionChainTabPage] Initializing modular UI with Rx streams");
+
             _rows = new ObservableCollection<OptionChainRow>();
             BuildUI();
-            InitializeThrottling();
-            
+
             Loaded += OnTabPageLoaded;
             Unloaded += OnTabPageUnloaded;
         }
@@ -104,172 +106,209 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             dockPanel.Children.Add(_listViewControl);
         }
 
-        private void InitializeThrottling()
-        {
-            _uiUpdateTimer = new System.Windows.Threading.DispatcherTimer();
-            _uiUpdateTimer.Interval = TimeSpan.FromMilliseconds(500);
-            _uiUpdateTimer.Tick += OnUiUpdateTimerTick;
-            _uiUpdateTimer.Start();
-        }
-
         private void OnTabPageLoaded(object sender, RoutedEventArgs e)
         {
-            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribing to events");
-            SubscriptionManager.Instance.OptionPriceUpdated += OnOptionPriceUpdated;
-            SubscriptionManager.Instance.OptionStatusUpdated += OnOptionStatusUpdated;
-            SubscriptionManager.Instance.SymbolResolved += OnSymbolResolved;
-            MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
-            VWAPDataCache.Instance.VWAPUpdated += OnVWAPUpdated;
-            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribed to VWAPDataCache.VWAPUpdated");
+            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Setting up Rx subscriptions");
 
-            var adapter = Connector.Instance.GetAdapter() as ZerodhaAdapter;
-            if (adapter?.SyntheticStraddleService != null)
-                adapter.SyntheticStraddleService.StraddlePriceCalculated += OnStraddlePriceCalculated;
-            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribed to SyntheticStraddleService.StraddlePriceCalculated");
+            _subscriptions = new CompositeDisposable();
+            var hub = MarketDataReactiveHub.Instance;
 
-            // CRITICAL: Restart the UI update timer if it was stopped during unload
-            if (_uiUpdateTimer != null && !_uiUpdateTimer.IsEnabled)
-            {
-                _uiUpdateTimer.Start();
-                Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Restarted _uiUpdateTimer");
-            }
+            // Subscribe to options generated events
+            _subscriptions.Add(
+                hub.OptionsGeneratedStream
+                    .ObserveOnDispatcher()
+                    .Subscribe(OnOptionsGenerated, ex => Logger.Error($"[OptionChainTabPage] OptionsGenerated error: {ex.Message}")));
+
+            // Subscribe to batched option prices (100ms/50 items - hub handles backpressure)
+            _subscriptions.Add(
+                hub.OptionPriceBatchStream
+                    .ObserveOnDispatcher()
+                    .Subscribe(OnOptionPriceBatch, ex => Logger.Error($"[OptionChainTabPage] OptionPriceBatch error: {ex.Message}")));
+
+            // Subscribe to option status updates (sampled every 100ms per symbol)
+            _subscriptions.Add(
+                hub.OptionStatusStream
+                    .GroupBy(s => s.Symbol)
+                    .SelectMany(g => g.Sample(TimeSpan.FromMilliseconds(100)))
+                    .ObserveOnDispatcher()
+                    .Subscribe(OnOptionStatus, ex => Logger.Error($"[OptionChainTabPage] OptionStatus error: {ex.Message}")));
+
+            // Subscribe to symbol resolution events
+            _subscriptions.Add(
+                hub.SymbolResolvedStream
+                    .ObserveOnDispatcher()
+                    .Subscribe(OnSymbolResolved, ex => Logger.Error($"[OptionChainTabPage] SymbolResolved error: {ex.Message}")));
+
+            // Subscribe to VWAP updates (sampled every 200ms per symbol)
+            _subscriptions.Add(
+                hub.VWAPStream
+                    .GroupBy(v => v.Symbol)
+                    .SelectMany(g => g.Sample(TimeSpan.FromMilliseconds(200)))
+                    .ObserveOnDispatcher()
+                    .Subscribe(OnVWAPUpdate, ex => Logger.Error($"[OptionChainTabPage] VWAP error: {ex.Message}")));
+
+            // Subscribe to straddle price updates (batched every 200ms)
+            _subscriptions.Add(
+                hub.StraddlePriceStream
+                    .Buffer(TimeSpan.FromMilliseconds(200))
+                    .Where(batch => batch.Count > 0)
+                    .ObserveOnDispatcher()
+                    .Subscribe(OnStraddlePriceBatch, ex => Logger.Error($"[OptionChainTabPage] StraddlePrice error: {ex.Message}")));
+
+            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Rx subscriptions active");
         }
 
         private void OnTabPageUnloaded(object sender, RoutedEventArgs e)
         {
-            Logger.Info("[OptionChainTabPage] OnTabPageUnloaded: Unsubscribing from events");
-            _uiUpdateTimer?.Stop();
-            SubscriptionManager.Instance.OptionPriceUpdated -= OnOptionPriceUpdated;
-            SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;
-            SubscriptionManager.Instance.SymbolResolved -= OnSymbolResolved;
-            MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
-            VWAPDataCache.Instance.VWAPUpdated -= OnVWAPUpdated;
-
-            var adapter = Connector.Instance.GetAdapter() as ZerodhaAdapter;
-            if (adapter?.SyntheticStraddleService != null)
-                adapter.SyntheticStraddleService.StraddlePriceCalculated -= OnStraddlePriceCalculated;
+            Logger.Info("[OptionChainTabPage] OnTabPageUnloaded: Disposing Rx subscriptions");
+            _subscriptions?.Dispose();
+            _subscriptions = null;
         }
 
-        private void OnOptionsGenerated(List<MappedInstrument> options)
+        private void OnOptionsGenerated(OptionsGeneratedEvent evt)
         {
-            Dispatcher.InvokeAsync(() =>
+            _rows.Clear();
+            _symbolToRowMap.Clear();
+            _generatedToZerodhaMap.Clear();
+            _straddleSymbolToRowMap.Clear();
+
+            if (evt.Options == null || evt.Options.Count == 0) return;
+
+            var first = evt.Options.First();
+            _underlying = first.underlying;
+            _expiry = first.expiry;
+
+            _headerControl.Underlying = _underlying;
+            _headerControl.Expiry = _expiry.HasValue ? _expiry.Value.ToString("dd-MMM-yyyy") : "---";
+
+            var strikeGroups = evt.Options.Where(o => o.strike.HasValue).GroupBy(o => o.strike.Value).OrderBy(g => g.Key);
+
+            foreach (var group in strikeGroups)
             {
-                _rows.Clear();
-                _symbolToRowMap.Clear();
-                _generatedToZerodhaMap.Clear();
-                _straddleSymbolToRowMap.Clear();
+                var row = new OptionChainRow { Strike = group.Key };
+                var ce = group.FirstOrDefault(o => o.option_type == "CE");
+                var pe = group.FirstOrDefault(o => o.option_type == "PE");
 
-                if (options.Count == 0) return;
-
-                var first = options.First();
-                _underlying = first.underlying;
-                _expiry = first.expiry;
-
-                _headerControl.Underlying = _underlying;
-                _headerControl.Expiry = _expiry.HasValue ? _expiry.Value.ToString("dd-MMM-yyyy") : "---";
-
-                var strikeGroups = options.Where(o => o.strike.HasValue).GroupBy(o => o.strike.Value).OrderBy(g => g.Key);
-
-                foreach (var group in strikeGroups)
+                if (ce != null)
                 {
-                    var row = new OptionChainRow { Strike = group.Key };
-                    var ce = group.FirstOrDefault(o => o.option_type == "CE");
-                    var pe = group.FirstOrDefault(o => o.option_type == "PE");
-
-                    if (ce != null)
-                    {
-                        row.CESymbol = ce.symbol;
-                        row.CEStatus = "Pending";
-                        _symbolToRowMap[ce.symbol] = (row, "CE");
-                        SubscribeForPersistence(ce.symbol);
-                    }
-
-                    if (pe != null)
-                    {
-                        row.PESymbol = pe.symbol;
-                        row.PEStatus = "Pending";
-                        _symbolToRowMap[pe.symbol] = (row, "PE");
-                        SubscribeForPersistence(pe.symbol);
-                    }
-
-                    if (_expiry.HasValue && ce != null && pe != null)
-                    {
-                        string monthAbbr = _expiry.Value.ToString("MMM").ToUpper();
-                        string straddleSymbol = $"{_underlying}{_expiry.Value:yy}{monthAbbr}{group.Key:F0}_STRDL";
-                        row.StraddleSymbol = straddleSymbol;
-                        _straddleSymbolToRowMap[straddleSymbol] = row;
-                    }
-
-                    _rows.Add(row);
+                    row.CESymbol = ce.symbol;
+                    row.CEStatus = "Pending";
+                    _symbolToRowMap[ce.symbol] = (row, "CE");
+                    SubscribeForPersistence(ce.symbol);
                 }
 
-                _statusBarControl.StatusText = $"Loaded {_rows.Count} strikes for {_underlying}";
-                _listViewControl.Refresh();
-            });
-        }
-
-        private void OnUiUpdateTimerTick(object sender, EventArgs e)
-        {
-            bool needsRefresh = false;
-            lock (_throttleLock)
-            {
-                if (_pendingPriceUpdates.Count == 0 && _pendingStatusUpdates.Count == 0 && _pendingStraddleUpdates.Count == 0 && _pendingVWAPUpdates.Count == 0)
-                    return;
-
-                foreach (var kvp in _pendingPriceUpdates)
+                if (pe != null)
                 {
-                    if (_symbolToRowMap.TryGetValue(kvp.Key, out var mapping))
-                    {
-                        var (row, optType) = mapping;
-                        var (price, ts) = kvp.Value;
-                        string timeStr = DateTimeHelper.ClampToMarketHours(ts).ToString("HH:mm:ss");
-                        if (optType == "CE") { row.CELast = price.ToString("F2"); row.CEPrice = price; row.CEUpdateTime = timeStr; }
-                        else { row.PELast = price.ToString("F2"); row.PEPrice = price; row.PEUpdateTime = timeStr; }
-                        needsRefresh = true;
-                    }
+                    row.PESymbol = pe.symbol;
+                    row.PEStatus = "Pending";
+                    _symbolToRowMap[pe.symbol] = (row, "PE");
+                    SubscribeForPersistence(pe.symbol);
                 }
-                _pendingPriceUpdates.Clear();
 
-                foreach (var kvp in _pendingStatusUpdates)
+                if (_expiry.HasValue && ce != null && pe != null)
                 {
-                    if (_symbolToRowMap.TryGetValue(kvp.Key, out var mapping))
-                    {
-                        if (mapping.optionType == "CE") mapping.row.CEStatus = kvp.Value;
-                        else mapping.row.PEStatus = kvp.Value;
-                        needsRefresh = true;
-                    }
+                    string monthAbbr = _expiry.Value.ToString("MMM").ToUpper();
+                    string straddleSymbol = $"{_underlying}{_expiry.Value:yy}{monthAbbr}{group.Key:F0}_STRDL";
+                    row.StraddleSymbol = straddleSymbol;
+                    _straddleSymbolToRowMap[straddleSymbol] = row;
                 }
-                _pendingStatusUpdates.Clear();
 
-                foreach (var kvp in _pendingStraddleUpdates)
-                {
-                    if (_straddleSymbolToRowMap.TryGetValue(kvp.Key, out var row))
-                    {
-                        row.SyntheticStraddlePrice = kvp.Value.price;
-                        needsRefresh = true;
-                    }
-                }
-                _pendingStraddleUpdates.Clear();
-
-                foreach (var kvp in _pendingVWAPUpdates)
-                {
-                    var vwap = kvp.Value;
-                    if (_symbolToRowMap.TryGetValue(kvp.Key, out var mapping))
-                    {
-                        if (mapping.optionType == "CE") { mapping.row.CEVWAP = vwap.VWAP; if (mapping.row.CEPrice > 0) mapping.row.CEVWAPPosition = vwap.GetPosition(mapping.row.CEPrice); }
-                        else { mapping.row.PEVWAP = vwap.VWAP; if (mapping.row.PEPrice > 0) mapping.row.PEVWAPPosition = vwap.GetPosition(mapping.row.PEPrice); }
-                        needsRefresh = true;
-                    }
-                    else if (_straddleSymbolToRowMap.TryGetValue(kvp.Key, out var strRow))
-                    {
-                        strRow.StraddleVWAP = vwap.VWAP;
-                        needsRefresh = true;
-                    }
-                }
-                _pendingVWAPUpdates.Clear();
+                _rows.Add(row);
             }
 
-            if (needsRefresh) UpdateATMAndHistograms();
+            _statusBarControl.StatusText = $"Loaded {_rows.Count} strikes for {_underlying}";
+            _listViewControl.Refresh();
+        }
+
+        private void OnOptionPriceBatch(IList<OptionPriceUpdate> batch)
+        {
+            _needsUIRefresh = false;
+
+            foreach (var update in batch)
+            {
+                // Also notify MarketAnalyzerLogic for ATM tracking
+                MarketAnalyzerLogic.Instance.UpdateOptionPrice(update.Symbol, (decimal)update.Price, update.Timestamp);
+
+                if (_symbolToRowMap.TryGetValue(update.Symbol, out var mapping))
+                {
+                    var (row, optType) = mapping;
+                    string timeStr = DateTimeHelper.ClampToMarketHours(update.Timestamp).ToString("HH:mm:ss");
+
+                    if (optType == "CE")
+                    {
+                        row.CELast = update.Price.ToString("F2");
+                        row.CEPrice = update.Price;
+                        row.CEUpdateTime = timeStr;
+                    }
+                    else
+                    {
+                        row.PELast = update.Price.ToString("F2");
+                        row.PEPrice = update.Price;
+                        row.PEUpdateTime = timeStr;
+                    }
+                    _needsUIRefresh = true;
+                }
+            }
+
+            if (_needsUIRefresh)
+            {
+                UpdateATMAndHistograms();
+            }
+        }
+
+        private void OnOptionStatus(OptionStatusUpdate update)
+        {
+            if (_symbolToRowMap.TryGetValue(update.Symbol, out var mapping))
+            {
+                if (mapping.optionType == "CE")
+                    mapping.row.CEStatus = update.Status;
+                else
+                    mapping.row.PEStatus = update.Status;
+            }
+        }
+
+        private void OnSymbolResolved((string generated, string zerodha) resolved)
+        {
+            _generatedToZerodhaMap[resolved.generated] = resolved.zerodha;
+            if (_symbolToRowMap.TryGetValue(resolved.generated, out var m))
+            {
+                _symbolToRowMap[resolved.zerodha] = m;
+                SubscribeForPersistence(resolved.zerodha);
+            }
+        }
+
+        private void OnVWAPUpdate(VWAPUpdate vwap)
+        {
+            if (_symbolToRowMap.TryGetValue(vwap.Symbol, out var mapping))
+            {
+                if (mapping.optionType == "CE")
+                {
+                    mapping.row.CEVWAP = vwap.VWAP;
+                    if (mapping.row.CEPrice > 0)
+                        mapping.row.CEVWAPPosition = vwap.GetPosition(mapping.row.CEPrice);
+                }
+                else
+                {
+                    mapping.row.PEVWAP = vwap.VWAP;
+                    if (mapping.row.PEPrice > 0)
+                        mapping.row.PEVWAPPosition = vwap.GetPosition(mapping.row.PEPrice);
+                }
+            }
+            else if (_straddleSymbolToRowMap.TryGetValue(vwap.Symbol, out var strRow))
+            {
+                strRow.StraddleVWAP = vwap.VWAP;
+            }
+        }
+
+        private void OnStraddlePriceBatch(IList<StraddlePriceUpdate> batch)
+        {
+            foreach (var update in batch)
+            {
+                if (_straddleSymbolToRowMap.TryGetValue(update.Symbol, out var row))
+                {
+                    row.SyntheticStraddlePrice = update.Price;
+                }
+            }
         }
 
         private void UpdateATMAndHistograms()
@@ -325,23 +364,6 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             }
         }
 
-        private void OnOptionPriceUpdated(string s, double p)
-        {
-            MarketAnalyzerLogic.Instance.UpdateOptionPrice(s, (decimal)p, DateTime.Now);
-            lock (_throttleLock) _pendingPriceUpdates[s] = (p, DateTime.Now);
-        }
-
-        private void OnOptionStatusUpdated(string s, string st) { lock (_throttleLock) _pendingStatusUpdates[s] = st; }
-        private void OnVWAPUpdated(string s, VWAPData v) { lock (_throttleLock) _pendingVWAPUpdates[s] = v; }
-        private void OnStraddlePriceCalculated(string s, double p, double c, double pe) { lock (_throttleLock) _pendingStraddleUpdates[s] = (p, c, pe); }
-        private void OnSymbolResolved(string g, string z)
-        {
-            Dispatcher.InvokeAsync(() => {
-                _generatedToZerodhaMap[g] = z;
-                if (_symbolToRowMap.TryGetValue(g, out var m)) { _symbolToRowMap[z] = m; SubscribeForPersistence(z); }
-            });
-        }
-
         private void SubscribeForPersistence(string s)
         {
             if (_persistenceSubscribedSymbols.Contains(s)) return;
@@ -358,7 +380,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             set { if (_instrument != value) { _instrument = value; if (value != null) _headerControl.SelectedInstrument = value.FullName; UpdateHeader(); } }
         }
 
-        public override void Cleanup() { _uiUpdateTimer?.Stop(); base.Cleanup(); }
+        public override void Cleanup()
+        {
+            _subscriptions?.Dispose();
+            base.Cleanup();
+        }
+
         protected override string GetHeaderPart(string variable) => _instrument?.FullName ?? (_underlying != null ? $"{_underlying} Options" : "Option Chain");
         protected override void Restore(XElement element) { var attr = element.Attribute("LastInstrument"); if (attr != null) Instrument = Instrument.GetInstrument(attr.Value); }
         protected override void Save(XElement element) { if (_instrument != null) element.SetAttributeValue("LastInstrument", _instrument.FullName); }
