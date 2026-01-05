@@ -14,6 +14,7 @@ using Newtonsoft.Json;
 using NinjaTrader.Cbi;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 
 namespace ZerodhaDatafeedAdapter.Services.Analysis
@@ -760,6 +761,154 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         {
             System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
             Logger.Info("[MarketAnalyzerLogic] ResetOptionsGeneration(): Options can now be regenerated");
+        }
+
+        /// <summary>
+        /// Triggers option generation from external source (e.g., MarketDataReactiveHub).
+        /// Called when projected opens are ready via reactive stream.
+        /// </summary>
+        public void TriggerOptionsGeneration(double niftyProjected, double sensexProjected)
+        {
+            Logger.Info($"[MarketAnalyzerLogic] TriggerOptionsGeneration(): Called with NIFTY={niftyProjected:F0}, SENSEX={sensexProjected:F0}");
+
+            // Store projected values
+            ProjectedNiftyOpenPrice = niftyProjected;
+            ProjectedSensexOpenPrice = sensexProjected;
+
+            // Update ticker projected values
+            if (NiftyTicker != null) NiftyTicker.ProjectedOpen = niftyProjected;
+            if (SensexTicker != null) SensexTicker.ProjectedOpen = sensexProjected;
+
+            // Use Interlocked to prevent duplicate generation
+            if (System.Threading.Interlocked.CompareExchange(ref _optionsAlreadyGenerated, 1, 0) == 0)
+            {
+                Logger.Info("[MarketAnalyzerLogic] TriggerOptionsGeneration(): Starting option generation...");
+                GenerateOptionsAndPublishToHub(niftyProjected, sensexProjected);
+            }
+            else
+            {
+                Logger.Debug("[MarketAnalyzerLogic] TriggerOptionsGeneration(): Options already generated, skipping");
+            }
+        }
+
+        /// <summary>
+        /// Generates options and publishes to MarketDataReactiveHub.
+        /// </summary>
+        private async void GenerateOptionsAndPublishToHub(double niftyProjected, double sensexProjected)
+        {
+            Logger.Info($"[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Starting with niftyProjected={niftyProjected:F2}, sensexProjected={sensexProjected:F2}");
+
+            try
+            {
+                // Fetch expiries from database
+                var niftyExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlyingAsync("NIFTY");
+                var sensexExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlyingAsync("SENSEX");
+
+                // Cache expiries
+                lock (_expiryLock)
+                {
+                    _cachedExpiries["NIFTY"] = new List<DateTime>(niftyExpiries);
+                    _cachedExpiries["SENSEX"] = new List<DateTime>(sensexExpiries);
+                }
+
+                // Fetch and cache lot sizes
+                var niftyLotSize = InstrumentManager.Instance.GetLotSizeForUnderlying("NIFTY");
+                var sensexLotSize = InstrumentManager.Instance.GetLotSizeForUnderlying("SENSEX");
+                lock (_lotSizeLock)
+                {
+                    if (niftyLotSize > 0) _cachedLotSizes["NIFTY"] = niftyLotSize;
+                    if (sensexLotSize > 0) _cachedLotSizes["SENSEX"] = sensexLotSize;
+                }
+
+                // Get nearest expiries
+                var niftyNear = GetNearestExpiry(niftyExpiries);
+                var sensexNear = GetNearestExpiry(sensexExpiries);
+
+                // Calculate DTE
+                double niftyDTE = (niftyNear.Date - DateTime.Today).TotalDays;
+                double sensexDTE = (sensexNear.Date - DateTime.Today).TotalDays;
+
+                // DTE-based priority selection
+                string selectedUnderlying;
+                DateTime selectedExpiry;
+                int stepSize;
+                double projectedPrice;
+                int dte;
+
+                if (niftyDTE == 0)
+                {
+                    selectedUnderlying = "NIFTY"; selectedExpiry = niftyNear; stepSize = 50; projectedPrice = niftyProjected; dte = 0;
+                }
+                else if (sensexDTE == 0)
+                {
+                    selectedUnderlying = "SENSEX"; selectedExpiry = sensexNear; stepSize = 100; projectedPrice = sensexProjected; dte = 0;
+                }
+                else if (niftyDTE == 1)
+                {
+                    selectedUnderlying = "NIFTY"; selectedExpiry = niftyNear; stepSize = 50; projectedPrice = niftyProjected; dte = 1;
+                }
+                else if (sensexDTE == 1)
+                {
+                    selectedUnderlying = "SENSEX"; selectedExpiry = sensexNear; stepSize = 100; projectedPrice = sensexProjected; dte = 1;
+                }
+                else
+                {
+                    selectedUnderlying = "NIFTY"; selectedExpiry = niftyNear; stepSize = 50; projectedPrice = niftyProjected; dte = (int)niftyDTE;
+                }
+
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Selected {selectedUnderlying} DTE={dte}");
+
+                // Round projected price to step size for ATM strike
+                double atmStrike = Math.Round(projectedPrice / stepSize) * stepSize;
+
+                // Determine if monthly expiry
+                var allExpiries = selectedUnderlying == "NIFTY" ? niftyExpiries : sensexExpiries;
+                bool isMonthlyExpiry = IsMonthlyExpiry(selectedExpiry, allExpiries);
+
+                // Store selection
+                SelectedUnderlying = selectedUnderlying;
+                SelectedExpiry = selectedExpiry.ToString("dd-MMM-yyyy");
+                SelectedIsMonthlyExpiry = isMonthlyExpiry;
+
+                // Generate options (ATM +/- 30 = 61 strikes x 2 types = 122 options)
+                var generated = new List<MappedInstrument>();
+                string segment = selectedUnderlying == "SENSEX" ? "BFO-OPT" : "NFO-OPT";
+                int lotSize = _cachedLotSizes.TryGetValue(selectedUnderlying, out var ls) ? ls : (selectedUnderlying == "NIFTY" ? 50 : 10);
+
+                for (int i = -30; i <= 30; i++)
+                {
+                    double strike = atmStrike + (i * stepSize);
+
+                    var (ceToken, ceSymbol) = InstrumentManager.Instance.LookupOptionDetails(segment, selectedUnderlying, selectedExpiry.ToString("yyyy-MM-dd"), strike, "CE");
+                    if (ceToken > 0)
+                        generated.Add(CreateOption(selectedUnderlying, selectedExpiry, strike, "CE", ceToken, ceSymbol, segment, lotSize, isMonthlyExpiry));
+
+                    var (peToken, peSymbol) = InstrumentManager.Instance.LookupOptionDetails(segment, selectedUnderlying, selectedExpiry.ToString("yyyy-MM-dd"), strike, "PE");
+                    if (peToken > 0)
+                        generated.Add(CreateOption(selectedUnderlying, selectedExpiry, strike, "PE", peToken, peSymbol, segment, lotSize, isMonthlyExpiry));
+                }
+
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Generated {generated.Count} options, ATM={atmStrike}");
+
+                // Publish to reactive hub
+                MarketDataReactiveHub.Instance.PublishOptionsGenerated(
+                    generated,
+                    selectedUnderlying,
+                    selectedExpiry,
+                    dte,
+                    atmStrike,
+                    projectedPrice);
+
+                // Also fire legacy event for backward compatibility
+                OptionsGenerated?.Invoke(generated);
+
+                Logger.Info("[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Completed successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Exception - {ex.Message}", ex);
+                System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
+            }
         }
     }
 

@@ -229,6 +229,11 @@
     <!-- Phase 7: Modular components for MarketAnalyzerLogic -->
     <Compile Include="Services\Analysis\MarketDataHub.cs" />
     <Compile Include="Services\Analysis\OptionGenerationService.cs" />
+    <!-- Reactive Architecture: Single source of truth for market data streams -->
+    <Compile Include="Models\Reactive\IndexPriceUpdate.cs" />
+    <Compile Include="Models\Reactive\ProjectedOpenState.cs" />
+    <Compile Include="Models\Reactive\OptionsGeneratedEvent.cs" />
+    <Compile Include="Services\Analysis\MarketDataReactiveHub.cs" />
     <!-- Phase 7: Modular components for InstrumentManager -->
     <Compile Include="Services\Instruments\InstrumentDbService.cs" />
     <Compile Include="Services\Instruments\SymbolMappingService.cs" />

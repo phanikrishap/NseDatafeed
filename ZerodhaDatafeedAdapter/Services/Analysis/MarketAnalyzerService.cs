@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reactive.Disposables;
+using System.Reactive.Linq;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.MarketData;
 
@@ -23,20 +26,67 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         private readonly MarketAnalyzerLogic _logic;
         private readonly SubscriptionManager _subscriptionManager;
+        private readonly MarketDataReactiveHub _hub;
+        private readonly CompositeDisposable _subscriptions = new CompositeDisposable();
         private bool _isRunning = false;
 
         private MarketAnalyzerService()
         {
             _logic = MarketAnalyzerLogic.Instance;
             _subscriptionManager = SubscriptionManager.Instance;
+            _hub = MarketDataReactiveHub.Instance;
 
             Logger.Info("[MarketAnalyzerService] Constructor: Initializing singleton instance");
 
-            // Wire up events
-            _logic.OptionsGenerated += OnOptionsGenerated;
-            _logic.StatusUpdated += msg => Logger.Debug($"[MarketAnalyzerService] StatusUpdate: {msg}");
+            // Wire up reactive streams
+            SetupReactiveSubscriptions();
 
-            Logger.Info("[MarketAnalyzerService] Constructor: Events wired up successfully");
+            Logger.Info("[MarketAnalyzerService] Constructor: Reactive subscriptions wired up successfully");
+        }
+
+        /// <summary>
+        /// Sets up reactive subscriptions to hub streams.
+        /// </summary>
+        private void SetupReactiveSubscriptions()
+        {
+            // Subscribe to OptionsGenerated stream from hub
+            _subscriptions.Add(
+                _hub.OptionsGeneratedStream
+                    .Subscribe(
+                        evt => OnOptionsGenerated(evt),
+                        ex => Logger.Error($"[MarketAnalyzerService] OptionsGeneratedStream error: {ex.Message}", ex)));
+
+            // Subscribe to ProjectedOpen stream to trigger option generation
+            _subscriptions.Add(
+                _hub.ProjectedOpenStream
+                    .Where(state => state.IsComplete)
+                    .Take(1)
+                    .Subscribe(
+                        state => TriggerOptionGeneration(state),
+                        ex => Logger.Error($"[MarketAnalyzerService] ProjectedOpenStream error: {ex.Message}", ex)));
+
+            Logger.Info("[MarketAnalyzerService] Reactive subscriptions configured");
+        }
+
+        /// <summary>
+        /// Triggers option generation when projected opens are ready.
+        /// </summary>
+        private void TriggerOptionGeneration(ProjectedOpenState state)
+        {
+            Logger.Info($"[MarketAnalyzerService] TriggerOptionGeneration: Projected opens ready - NIFTY={state.NiftyProjectedOpen:F0}, SENSEX={state.SensexProjectedOpen:F0}");
+
+            // Delegate to logic for actual generation
+            Task.Run(() =>
+            {
+                try
+                {
+                    _logic.TriggerOptionsGeneration(state.NiftyProjectedOpen, state.SensexProjectedOpen);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerService] TriggerOptionGeneration error: {ex.Message}", ex);
+                }
+            });
         }
 
         /// <summary>
@@ -194,7 +244,31 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 if (created)
                 {
                     Logger.Info($"[MarketAnalyzerService] CreateInstrumentFromMapping({symbol}): Successfully created NT instrument '{ntName}'");
-                    return Instrument.GetInstrument(ntName);
+
+                    // NinjaTrader needs time to register the instrument after creation
+                    // Retry with delay to wait for registration to complete
+                    Instrument result = null;
+                    int maxRetries = 10;
+                    int retryDelayMs = 100;
+
+                    for (int i = 0; i < maxRetries; i++)
+                    {
+                        result = Instrument.GetInstrument(ntName);
+                        if (result != null)
+                        {
+                            Logger.Info($"[MarketAnalyzerService] CreateInstrumentFromMapping({symbol}): Instrument available after {i * retryDelayMs}ms");
+                            return result;
+                        }
+
+                        if (i < maxRetries - 1)
+                        {
+                            Logger.Debug($"[MarketAnalyzerService] CreateInstrumentFromMapping({symbol}): Instrument not yet available, retry {i + 1}/{maxRetries}...");
+                            System.Threading.Thread.Sleep(retryDelayMs);
+                        }
+                    }
+
+                    Logger.Warn($"[MarketAnalyzerService] CreateInstrumentFromMapping({symbol}): Instrument '{ntName}' not available after {maxRetries * retryDelayMs}ms");
+                    return null;
                 }
                 else
                 {
@@ -211,7 +285,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Subscribes to market data with proper closure for instrument name
+        /// Subscribes to market data with proper closure for instrument name.
+        /// Publishes prices to MarketDataReactiveHub for reactive consumption.
         /// </summary>
         private void SubscribeToIndicatorWithClosure(Instrument instrument, string instrumentName)
         {
@@ -222,16 +297,30 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             {
                 Logger.Info($"[MarketAnalyzerService] SubscribeToIndicatorWithClosure({instrumentName}): Adapter found, calling SubscribeMarketData()");
 
+                // Track the current close for this symbol to include in price updates
+                double currentClose = 0;
+
                 adapter.SubscribeMarketData(instrument, (type, price, vol, time, unk) => {
                     if (type == MarketDataType.Last)
                     {
                         Logger.Debug($"[MarketAnalyzerService] MarketData({instrumentName}): Last={price}");
+
+                        // Publish to reactive hub (primary)
+                        _hub.PublishIndexPrice(instrumentName, price, currentClose);
+
+                        // Also update legacy logic for backward compatibility
                         _logic.UpdatePrice(instrumentName, price);
                     }
                     else if (type == MarketDataType.LastClose)
                     {
-                        // LastClose is the prior day's close - update the Close property, NOT the current price
+                        // LastClose is the prior day's close
                         Logger.Debug($"[MarketAnalyzerService] MarketData({instrumentName}): LastClose={price}");
+                        currentClose = price;
+
+                        // Publish to reactive hub
+                        _hub.PublishIndexClose(instrumentName, price);
+
+                        // Also update legacy logic for backward compatibility
                         _logic.UpdateClose(instrumentName, price);
                     }
                 });
@@ -375,6 +464,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesViaWebSocket({niftyFutSymbol}): Token={token}, subscribing via SharedWebSocket");
 
+                // Add the resolved symbol as an alias in the hub
+                _hub.AddNiftyFuturesAlias(niftyFutSymbol);
+
                 // Subscribe via MarketDataService (uses SharedWebSocketService)
                 var marketDataService = MarketDataService.Instance;
                 bool subscribed = await marketDataService.SubscribeToSymbolDirectAsync(
@@ -384,6 +476,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     onTick: (price, volume, timestamp) =>
                     {
                         Logger.Debug($"[MarketAnalyzerService] NIFTY_I Tick: price={price}");
+
+                        // Publish to reactive hub
+                        _hub.PublishIndexPrice(niftyFutSymbol, price);
+
+                        // Also update legacy logic
                         _logic.UpdatePrice(niftyFutSymbol, price);
                     });
 
@@ -459,12 +556,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                         Logger.Info($"[MarketAnalyzerService] RequestNiftyFuturesHistoricalData({niftyFutSymbol}): LastPrice={lastPrice}, PriorClose={priorClose}");
 
-                        // Update the logic - use niftyFutSymbol which routes to NiftyFuturesTicker
+                        // Update both hub and legacy logic
                         if (priorClose > 0)
                         {
+                            _hub.PublishIndexClose(niftyFutSymbol, priorClose);
                             _logic.UpdateClose(niftyFutSymbol, priorClose);
                         }
 
+                        _hub.PublishIndexPrice(niftyFutSymbol, lastPrice, priorClose);
                         _logic.UpdatePrice(niftyFutSymbol, lastPrice);
                     }
                     else
@@ -540,13 +639,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                         Logger.Info($"[MarketAnalyzerService] RequestHistoricalData({instrumentName}): LastPrice={lastPrice} from {lastRecord.TimeStamp:yyyy-MM-dd HH:mm}, PriorClose={priorClose}");
 
-                        // Update the logic with prior close first (so it's available when price update triggers calculations)
+                        // Update both hub and legacy logic with prior close first
                         if (priorClose > 0)
                         {
+                            _hub.PublishIndexClose(instrumentName, priorClose);
                             _logic.UpdateClose(instrumentName, priorClose);
                         }
 
-                        // Update the logic with last price
+                        // Update with last price
+                        _hub.PublishIndexPrice(instrumentName, lastPrice, priorClose);
                         _logic.UpdatePrice(instrumentName, lastPrice);
                     }
                     else
@@ -564,19 +665,22 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Callback when options are generated by MarketAnalyzerLogic
+        /// Callback when options are generated (via reactive stream from hub).
         /// </summary>
-        private void OnOptionsGenerated(List<MappedInstrument> options)
+        private void OnOptionsGenerated(OptionsGeneratedEvent evt)
         {
-            Logger.Info($"[MarketAnalyzerService] OnOptionsGenerated(): Received {options.Count} options from logic engine");
-
-            if (options.Count > 0)
+            if (evt?.Options == null || evt.Options.Count == 0)
             {
-                Logger.Info($"[MarketAnalyzerService] OnOptionsGenerated(): First option - {options[0].underlying} {options[0].expiry:yyyy-MM-dd} {options[0].strike} {options[0].option_type}");
+                Logger.Warn("[MarketAnalyzerService] OnOptionsGenerated(): No options in event");
+                return;
             }
 
+            Logger.Info($"[MarketAnalyzerService] OnOptionsGenerated(): Received {evt.Options.Count} options - {evt.SelectedUnderlying} {evt.SelectedExpiry:dd-MMM-yyyy} (DTE={evt.DTE})");
+
+            Logger.Info($"[MarketAnalyzerService] OnOptionsGenerated(): First option - {evt.Options[0].underlying} {evt.Options[0].expiry:yyyy-MM-dd} {evt.Options[0].strike} {evt.Options[0].option_type}");
+
             Logger.Info($"[MarketAnalyzerService] OnOptionsGenerated(): Queueing options for subscription...");
-            _subscriptionManager.QueueSubscription(options);
+            _subscriptionManager.QueueSubscription(evt.Options);
             Logger.Info($"[MarketAnalyzerService] OnOptionsGenerated(): Options queued successfully");
         }
     }

@@ -14,6 +14,7 @@ using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript;
 using ZerodhaDatafeedAdapter;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Instruments;
@@ -335,14 +336,20 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 // Subscribe to Service Events (indices only - options handled by OptionChainWindow)
                 Logger.Debug("[MarketAnalyzerWindow] Constructor: Subscribing to MarketAnalyzerLogic events");
                 MarketAnalyzerLogic.Instance.StatusUpdated += OnStatusUpdated;
-                MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
                 MarketAnalyzerLogic.Instance.TickerUpdated += OnTickerUpdated;
                 MarketAnalyzerLogic.Instance.HistoricalDataStatusChanged += OnHistoricalDataStatusChanged;
 
-                // Subscribe to System.Reactive stream for projected opens (event-driven, fires ONCE)
-                // Using Dispatcher.InvokeAsync inside the handler instead of ObserveOn to avoid WinForms reference
-                _projectedOpenSubscription = MarketAnalyzerLogic.Instance.ProjectedOpenStream
-                    .Subscribe(update => Dispatcher.InvokeAsync(() => OnProjectedOpenCalculated(update)));
+                // Subscribe to MarketDataReactiveHub streams (single source of truth)
+                var hub = MarketDataReactiveHub.Instance;
+
+                // Subscribe to projected opens stream from hub
+                _projectedOpenSubscription = hub.ProjectedOpenStream
+                    .Where(state => state.IsComplete)
+                    .Subscribe(state => Dispatcher.InvokeAsync(() => OnProjectedOpenCalculated(state)));
+
+                // Subscribe to options generated stream from hub
+                hub.OptionsGeneratedStream
+                    .Subscribe(evt => Dispatcher.InvokeAsync(() => OnOptionsGeneratedFromHub(evt)));
 
                 Logger.Info("[MarketAnalyzerWindow] Constructor: Window created successfully");
             }
@@ -572,7 +579,6 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             Logger.Info("[MarketAnalyzerWindow] OnWindowUnloaded: Cleaning up event handlers");
 
             MarketAnalyzerLogic.Instance.StatusUpdated -= OnStatusUpdated;
-            MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
             MarketAnalyzerLogic.Instance.TickerUpdated -= OnTickerUpdated;
             MarketAnalyzerLogic.Instance.HistoricalDataStatusChanged -= OnHistoricalDataStatusChanged;
 
@@ -584,26 +590,26 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         }
 
         /// <summary>
-        /// System.Reactive handler for projected open calculations.
+        /// System.Reactive handler for projected open calculations from MarketDataReactiveHub.
         /// Called ONCE when all required data is available (GIFT change% + NIFTY/SENSEX prior close).
         /// </summary>
-        private void OnProjectedOpenCalculated(ProjectedOpenUpdate update)
+        private void OnProjectedOpenCalculated(ProjectedOpenState state)
         {
             try
             {
-                Logger.Info($"[MarketAnalyzerWindow] Rx: Projected Opens received - GIFT Chg%: {update.GiftChangePercent:+0.00;-0.00}%, NIFTY: {update.NiftyProjectedOpen:F0}, SENSEX: {update.SensexProjectedOpen:F0}");
+                Logger.Info($"[MarketAnalyzerWindow] Rx: Projected Opens received - GIFT Chg%: {state.GiftChangePercent:+0.00;-0.00}%, NIFTY: {state.NiftyProjectedOpen:F0}, SENSEX: {state.SensexProjectedOpen:F0}");
 
                 var niftyRow = _rows.FirstOrDefault(r => r.Symbol == "NIFTY 50");
                 var sensexRow = _rows.FirstOrDefault(r => r.Symbol == "SENSEX");
 
                 if (niftyRow != null && niftyRow.ProjOpen == "---")
                 {
-                    niftyRow.ProjOpen = update.NiftyProjectedOpen.ToString("F0");
+                    niftyRow.ProjOpen = state.NiftyProjectedOpen.ToString("F0");
                 }
 
                 if (sensexRow != null && sensexRow.ProjOpen == "---")
                 {
-                    sensexRow.ProjOpen = update.SensexProjectedOpen.ToString("F0");
+                    sensexRow.ProjOpen = state.SensexProjectedOpen.ToString("F0");
                 }
 
                 _listView.Items.Refresh();
@@ -861,6 +867,26 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                     _lblStatus.Text = $"Generated {options.Count} {first.underlying} options for {first.expiry:dd-MMM}";
                 }
             });
+        }
+
+        /// <summary>
+        /// System.Reactive handler for options generated events from MarketDataReactiveHub.
+        /// Updates the status bar with generation info and DTE.
+        /// </summary>
+        private void OnOptionsGeneratedFromHub(OptionsGeneratedEvent evt)
+        {
+            try
+            {
+                if (evt == null || evt.Options == null || evt.Options.Count == 0) return;
+
+                Logger.Info($"[MarketAnalyzerWindow] Rx: Options Generated - {evt.Options.Count} options for {evt.SelectedUnderlying}, DTE={evt.DTE}, ATM={evt.ATMStrike:F0}");
+
+                _lblStatus.Text = $"Generated {evt.Options.Count} {evt.SelectedUnderlying} options for {evt.SelectedExpiry:dd-MMM} (DTE: {evt.DTE})";
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerWindow] OnOptionsGeneratedFromHub: Exception - {ex.Message}", ex);
+            }
         }
 
         // IWorkspacePersistence Implementation
