@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Reactive.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -13,6 +14,7 @@ using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript;
 using ZerodhaDatafeedAdapter;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer;
@@ -240,13 +242,18 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         public string Symbol { get; set; }
         public string InternalSymbol { get; set; } // The actual trading symbol (e.g., NIFTY25DEC2325300CE)
         public string Last { get; set; }
-        public string Change { get; set; }
-        public string ProjOpen { get; set; }
+        public string PriorClose { get; set; } // Prior day close (static, populated once)
+        public string Change { get; set; } // Chg% = (Last - PriorClose) / PriorClose
+        public string ProjOpen { get; set; } // Projected Open based on GIFT NIFTY change from prior close
         public string Expiry { get; set; }
         public string LastUpdate { get; set; } // HH:mm:ss format
         public string Status { get; set; }
         public bool IsPositive { get; set; }
         public bool IsOption { get; set; }
+
+        // Internal values for calculations
+        public double LastValue { get; set; }
+        public double PriorCloseValue { get; set; }
     }
 
     /// <summary>
@@ -259,7 +266,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         private GridView _gridView;
         private Button _btnRefresh;
         private TextBlock _lblStatus;
+        private TextBlock _lblPriorDate;
         private ObservableCollection<AnalyzerRow> _rows;
+        private DateTime _priorWorkingDay;
+        private IDisposable _projectedOpenSubscription; // System.Reactive subscription for projected opens
 
         // NinjaTrader-style colors
         private static readonly SolidColorBrush _bgColor = new SolidColorBrush(Color.FromRgb(27, 27, 28));
@@ -277,24 +287,34 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             Logger.Info("[MarketAnalyzerWindow] Constructor: Creating window");
 
             Caption = "Index Watch";
-            Width = 650;
+            Width = 720;
             Height = 400;
 
             try
             {
                 Logger.Debug("[MarketAnalyzerWindow] Constructor: Building NinjaTrader-style UI");
 
+                // Compute prior working day from holiday calendar
+                _priorWorkingDay = HolidayCalendarService.Instance.GetPriorWorkingDay();
+                Logger.Info($"[MarketAnalyzerWindow] Prior working day: {_priorWorkingDay:dd-MMM-yyyy}");
+
                 _rows = new ObservableCollection<AnalyzerRow>();
 
-                // Initialize with index rows
-                _rows.Add(new AnalyzerRow { Symbol = "GIFT NIFTY", Last = "---", Change = "---", ProjOpen = "N/A", Expiry = "---", Status = "Pending", IsPositive = true, IsOption = false });
-                _rows.Add(new AnalyzerRow { Symbol = "NIFTY 50", Last = "---", Change = "---", ProjOpen = "---", Expiry = "---", Status = "Pending", IsPositive = true, IsOption = false });
-                _rows.Add(new AnalyzerRow { Symbol = "SENSEX", Last = "---", Change = "---", ProjOpen = "---", Expiry = "---", Status = "Pending", IsPositive = true, IsOption = false });
+                // Initialize with index rows (includes NIFTY_I for NIFTY Futures)
+                _rows.Add(new AnalyzerRow { Symbol = "GIFT NIFTY", Last = "---", PriorClose = "---", Change = "---", ProjOpen = "N/A", Expiry = "---", Status = "Pending", IsPositive = true, IsOption = false });
+                _rows.Add(new AnalyzerRow { Symbol = "NIFTY 50", Last = "---", PriorClose = "---", Change = "---", ProjOpen = "---", Expiry = "---", Status = "Pending", IsPositive = true, IsOption = false });
+                _rows.Add(new AnalyzerRow { Symbol = "SENSEX", Last = "---", PriorClose = "---", Change = "---", ProjOpen = "---", Expiry = "---", Status = "Pending", IsPositive = true, IsOption = false });
+
+                // NIFTY_I row - internal symbol will be resolved dynamically (e.g., NIFTY26JANFUT, NIFTY26MAYFUT)
+                var logic = MarketAnalyzerLogic.Instance;
+                string niftyFutInternal = !string.IsNullOrEmpty(logic.NiftyFuturesSymbol) ? logic.NiftyFuturesSymbol : "NIFTY_I";
+                string niftyFutExpiry = logic.NiftyFuturesExpiry != default ? logic.NiftyFuturesExpiry.ToString("dd-MMM") : "---";
+                _rows.Add(new AnalyzerRow { Symbol = "NIFTY_I", InternalSymbol = niftyFutInternal, Last = "---", PriorClose = "---", Change = "---", ProjOpen = "N/A", Expiry = niftyFutExpiry, Status = "Pending", IsPositive = true, IsOption = false });
 
                 var dockPanel = new DockPanel { Background = _bgColor };
                 Content = dockPanel;
 
-                // Toolbar
+                // Toolbar with Prior Date header
                 var toolbar = CreateToolbar();
                 DockPanel.SetDock(toolbar, Dock.Top);
                 dockPanel.Children.Add(toolbar);
@@ -318,6 +338,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
                 MarketAnalyzerLogic.Instance.TickerUpdated += OnTickerUpdated;
                 MarketAnalyzerLogic.Instance.HistoricalDataStatusChanged += OnHistoricalDataStatusChanged;
+
+                // Subscribe to System.Reactive stream for projected opens (event-driven, fires ONCE)
+                // Using Dispatcher.InvokeAsync inside the handler instead of ObserveOn to avoid WinForms reference
+                _projectedOpenSubscription = MarketAnalyzerLogic.Instance.ProjectedOpenStream
+                    .Subscribe(update => Dispatcher.InvokeAsync(() => OnProjectedOpenCalculated(update)));
 
                 Logger.Info("[MarketAnalyzerWindow] Constructor: Window created successfully");
             }
@@ -366,9 +391,33 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = _fgColor,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 20, 0)
             };
             panel.Children.Add(title);
+
+            // Prior Date label (static, computed from holiday calendar)
+            var priorDateLabel = new TextBlock
+            {
+                Text = "Prior Date:",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 5, 0)
+            };
+            panel.Children.Add(priorDateLabel);
+
+            _lblPriorDate = new TextBlock
+            {
+                Text = _priorWorkingDay.ToString("dd-MMM-yyyy (ddd)"),
+                FontFamily = _ntFont,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(100, 180, 255)),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            panel.Children.Add(_lblPriorDate);
 
             border.Child = panel;
             return border;
@@ -416,7 +465,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             var symbolColumn = new GridViewColumn
             {
                 Header = "Symbol",
-                Width = 120,
+                Width = 100,
                 DisplayMemberBinding = new Binding("Symbol")
             };
             _gridView.Columns.Add(symbolColumn);
@@ -425,16 +474,25 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             var lastColumn = new GridViewColumn
             {
                 Header = "Last",
-                Width = 90,
+                Width = 85,
                 DisplayMemberBinding = new Binding("Last")
             };
             _gridView.Columns.Add(lastColumn);
 
-            // Change% column - using CellTemplate for colored text
+            // Prior Close column (static, populated once)
+            var priorCloseColumn = new GridViewColumn
+            {
+                Header = "Prior Close",
+                Width = 85,
+                DisplayMemberBinding = new Binding("PriorClose")
+            };
+            _gridView.Columns.Add(priorCloseColumn);
+
+            // Change% column - (Last - PriorClose) / PriorClose
             var changeColumn = new GridViewColumn
             {
                 Header = "Chg%",
-                Width = 80
+                Width = 70
             };
             var changeTemplate = new DataTemplate();
             var changeFactory = new FrameworkElementFactory(typeof(TextBlock));
@@ -445,23 +503,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             changeColumn.CellTemplate = changeTemplate;
             _gridView.Columns.Add(changeColumn);
 
-            // Proj Open column
+            // Proj Open column - based on GIFT NIFTY change from prior close
             var projColumn = new GridViewColumn
             {
                 Header = "Proj Open",
-                Width = 90,
+                Width = 85,
                 DisplayMemberBinding = new Binding("ProjOpen")
             };
             _gridView.Columns.Add(projColumn);
-
-            // Expiry column
-            var expiryColumn = new GridViewColumn
-            {
-                Header = "Expiry",
-                Width = 90,
-                DisplayMemberBinding = new Binding("Expiry")
-            };
-            _gridView.Columns.Add(expiryColumn);
 
             // Last Update column - shows HH:mm:ss of last price update
             var lastUpdateColumn = new GridViewColumn
@@ -527,10 +576,45 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             MarketAnalyzerLogic.Instance.TickerUpdated -= OnTickerUpdated;
             MarketAnalyzerLogic.Instance.HistoricalDataStatusChanged -= OnHistoricalDataStatusChanged;
 
+            // Dispose Rx subscription
+            _projectedOpenSubscription?.Dispose();
+            _projectedOpenSubscription = null;
+
             Logger.Info("[MarketAnalyzerWindow] OnWindowUnloaded: Cleanup complete");
         }
 
-        private void OnTickerUpdated(TickerData ticker)
+        /// <summary>
+        /// System.Reactive handler for projected open calculations.
+        /// Called ONCE when all required data is available (GIFT change% + NIFTY/SENSEX prior close).
+        /// </summary>
+        private void OnProjectedOpenCalculated(ProjectedOpenUpdate update)
+        {
+            try
+            {
+                Logger.Info($"[MarketAnalyzerWindow] Rx: Projected Opens received - GIFT Chg%: {update.GiftChangePercent:+0.00;-0.00}%, NIFTY: {update.NiftyProjectedOpen:F0}, SENSEX: {update.SensexProjectedOpen:F0}");
+
+                var niftyRow = _rows.FirstOrDefault(r => r.Symbol == "NIFTY 50");
+                var sensexRow = _rows.FirstOrDefault(r => r.Symbol == "SENSEX");
+
+                if (niftyRow != null && niftyRow.ProjOpen == "---")
+                {
+                    niftyRow.ProjOpen = update.NiftyProjectedOpen.ToString("F0");
+                }
+
+                if (sensexRow != null && sensexRow.ProjOpen == "---")
+                {
+                    sensexRow.ProjOpen = update.SensexProjectedOpen.ToString("F0");
+                }
+
+                _listView.Items.Refresh();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerWindow] OnProjectedOpenCalculated: Exception - {ex.Message}", ex);
+            }
+        }
+
+        private void OnTickerUpdated(string symbol)
         {
             Dispatcher.InvokeAsync(() =>
             {
@@ -538,40 +622,129 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 {
                     var logic = MarketAnalyzerLogic.Instance;
                     AnalyzerRow row = null;
+                    AnalyzerRow giftRow = _rows.FirstOrDefault(r => r.Symbol == "GIFT NIFTY");
 
-                    if (ticker.Symbol == "GIFT NIFTY")
+                    if (symbol == "GIFT NIFTY")
                     {
-                        row = _rows.FirstOrDefault(r => r.Symbol == "GIFT NIFTY");
+                        var ticker = logic.GiftNiftyTicker;
+                        if (ticker == null) return;
+                        row = giftRow;
                         if (row != null)
                         {
+                            row.LastValue = ticker.CurrentPrice;
                             row.Last = ticker.LastPriceDisplay;
-                            row.Change = ticker.NetChangePercentDisplay;
                             row.LastUpdate = ticker.LastUpdateTimeDisplay;
-                            row.IsPositive = ticker.IsPositive;
+
+                            // GIFT NIFTY: Use Chg% directly from API (NetChangePercent computed from LastClose callback)
+                            // Don't need Prior Close column for GIFT NIFTY - the API provides the change directly
+                            if (ticker.NetChangePercent != 0)
+                            {
+                                row.Change = ticker.NetChangePercentDisplay;
+                                row.IsPositive = ticker.IsPositive;
+                                // Also set PriorClose for display if Close is available
+                                if (ticker.Close > 0)
+                                {
+                                    row.PriorCloseValue = ticker.Close;
+                                    row.PriorClose = ticker.Close.ToString("F2");
+                                }
+                                // Try to calculate projected opens when we have GIFT NIFTY change
+                                TryCalculateProjectedOpensOnce();
+                            }
                         }
                     }
-                    else if (ticker.Symbol == "NIFTY")
+                    else if (symbol == "NIFTY" || symbol == "NIFTY 50")
                     {
+                        var ticker = logic.NiftyTicker;
+                        if (ticker == null) return;
                         row = _rows.FirstOrDefault(r => r.Symbol == "NIFTY 50");
                         if (row != null)
                         {
+                            row.LastValue = ticker.CurrentPrice;
                             row.Last = ticker.LastPriceDisplay;
-                            row.Change = ticker.NetChangePercentDisplay;
-                            row.ProjOpen = logic.NiftyTicker.ProjectedOpenDisplay;
                             row.LastUpdate = ticker.LastUpdateTimeDisplay;
-                            row.IsPositive = ticker.IsPositive;
+
+                            // Set Prior Close from ticker.Close (once populated)
+                            if (ticker.Close > 0 && row.PriorCloseValue == 0)
+                            {
+                                row.PriorCloseValue = ticker.Close;
+                                row.PriorClose = ticker.Close.ToString("F2");
+                                // Try to calculate projected opens once when prior close is set
+                                TryCalculateProjectedOpensOnce();
+                            }
+
+                            // Calculate Chg% from Prior Close
+                            if (row.PriorCloseValue > 0)
+                            {
+                                double chgPercent = (row.LastValue - row.PriorCloseValue) / row.PriorCloseValue * 100;
+                                row.Change = $"{chgPercent:+0.00;-0.00;0.00}%";
+                                row.IsPositive = chgPercent >= 0;
+                            }
                         }
                     }
-                    else if (ticker.Symbol == "SENSEX")
+                    else if (symbol == "SENSEX")
                     {
+                        var ticker = logic.SensexTicker;
+                        if (ticker == null) return;
                         row = _rows.FirstOrDefault(r => r.Symbol == "SENSEX");
                         if (row != null)
                         {
+                            row.LastValue = ticker.CurrentPrice;
                             row.Last = ticker.LastPriceDisplay;
-                            row.Change = ticker.NetChangePercentDisplay;
-                            row.ProjOpen = logic.SensexTicker.ProjectedOpenDisplay;
                             row.LastUpdate = ticker.LastUpdateTimeDisplay;
-                            row.IsPositive = ticker.IsPositive;
+
+                            // Set Prior Close from ticker.Close (once populated)
+                            if (ticker.Close > 0 && row.PriorCloseValue == 0)
+                            {
+                                row.PriorCloseValue = ticker.Close;
+                                row.PriorClose = ticker.Close.ToString("F2");
+                                // Try to calculate projected opens once when prior close is set
+                                TryCalculateProjectedOpensOnce();
+                            }
+
+                            // Calculate Chg% from Prior Close
+                            if (row.PriorCloseValue > 0)
+                            {
+                                double chgPercent = (row.LastValue - row.PriorCloseValue) / row.PriorCloseValue * 100;
+                                row.Change = $"{chgPercent:+0.00;-0.00;0.00}%";
+                                row.IsPositive = chgPercent >= 0;
+                            }
+                        }
+                    }
+                    else if (symbol == "NIFTY_I")
+                    {
+                        var ticker = logic.NiftyFuturesTicker;
+                        if (ticker == null) return;
+                        row = _rows.FirstOrDefault(r => r.Symbol == "NIFTY_I");
+                        if (row != null)
+                        {
+                            row.LastValue = ticker.CurrentPrice;
+                            row.Last = ticker.LastPriceDisplay;
+                            row.LastUpdate = ticker.LastUpdateTimeDisplay;
+
+                            // Update internal symbol if it was resolved
+                            if (!string.IsNullOrEmpty(logic.NiftyFuturesSymbol))
+                            {
+                                row.InternalSymbol = logic.NiftyFuturesSymbol;
+                                if (logic.NiftyFuturesExpiry != default)
+                                {
+                                    row.Expiry = logic.NiftyFuturesExpiry.ToString("dd-MMM");
+                                }
+                            }
+
+                            // Set Prior Close from ticker.Close (once populated)
+                            if (ticker.Close > 0 && row.PriorCloseValue == 0)
+                            {
+                                row.PriorCloseValue = ticker.Close;
+                                row.PriorClose = ticker.Close.ToString("F2");
+                            }
+
+                            // Calculate Chg% from Prior Close
+                            if (row.PriorCloseValue > 0)
+                            {
+                                double chgPercent = (row.LastValue - row.PriorCloseValue) / row.PriorCloseValue * 100;
+                                row.Change = $"{chgPercent:+0.00;-0.00;0.00}%";
+                                row.IsPositive = chgPercent >= 0;
+                            }
                         }
                     }
 
@@ -584,6 +757,50 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                     Logger.Error($"[MarketAnalyzerWindow] OnTickerUpdated: Exception - {ex.Message}", ex);
                 }
             });
+        }
+
+        /// <summary>
+        /// Calculates projected opens when data is available.
+        /// Projected Open = Prior Close × (1 + GIFT NIFTY Change%)
+        /// GIFT NIFTY Change% comes from the API via NetChangePercent.
+        /// Retries on each tick until both projected opens are populated.
+        /// </summary>
+        private void TryCalculateProjectedOpensOnce()
+        {
+            var logic = MarketAnalyzerLogic.Instance;
+            var giftTicker = logic.GiftNiftyTicker;
+            var niftyRow = _rows.FirstOrDefault(r => r.Symbol == "NIFTY 50");
+            var sensexRow = _rows.FirstOrDefault(r => r.Symbol == "SENSEX");
+
+            // Need GIFT NIFTY change% from API
+            if (giftTicker == null || giftTicker.NetChangePercent == 0) return;
+
+            // GIFT NIFTY NetChangePercent is already in percentage form (e.g., 0.09 means 0.09%)
+            // Convert to decimal multiplier
+            double giftChgDecimal = giftTicker.NetChangePercent / 100.0;
+
+            bool updated = false;
+
+            // Calculate NIFTY 50 projected open: PriorClose × (1 + GIFT change%)
+            if (niftyRow != null && niftyRow.PriorCloseValue > 0 && niftyRow.ProjOpen == "---")
+            {
+                double projOpen = niftyRow.PriorCloseValue * (1 + giftChgDecimal);
+                niftyRow.ProjOpen = projOpen.ToString("F0");
+                updated = true;
+            }
+
+            // Calculate SENSEX projected open: PriorClose × (1 + GIFT change%)
+            if (sensexRow != null && sensexRow.PriorCloseValue > 0 && sensexRow.ProjOpen == "---")
+            {
+                double projOpen = sensexRow.PriorCloseValue * (1 + giftChgDecimal);
+                sensexRow.ProjOpen = projOpen.ToString("F0");
+                updated = true;
+            }
+
+            if (updated)
+            {
+                Logger.Info($"[MarketAnalyzerWindow] Projected Opens calculated - GIFT Chg%: {giftTicker.NetChangePercent:+0.00;-0.00}%, NIFTY: {niftyRow?.ProjOpen}, SENSEX: {sensexRow?.ProjOpen}");
+            }
         }
 
         private void OnHistoricalDataStatusChanged(string symbol, string status)
@@ -622,19 +839,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
 
         private void OnStatusUpdated(string msg)
         {
+            // Status updates from logic are logged but NOT shown in status bar
+            // The status bar shows only "Last update: HH:mm:ss"
             Logger.Debug($"[MarketAnalyzerWindow] OnStatusUpdated: {msg}");
-
-            Dispatcher.InvokeAsync(() =>
-            {
-                try
-                {
-                    _lblStatus.Text = msg;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[MarketAnalyzerWindow] OnStatusUpdated: Exception - {ex.Message}", ex);
-                }
-            });
         }
 
         private void OnOptionsGenerated(List<MappedInstrument> options)

@@ -1,677 +1,519 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Data.SQLite;
 using System.IO;
 using System.Linq;
+using System.Reactive.Linq;
+using System.Reactive.Subjects;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using NinjaTrader.Cbi;
-using NinjaTrader.Data;
-using ZerodhaAPI.Common.Enums;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 
-using MappedInstrument = ZerodhaDatafeedAdapter.Models.MappedInstrument;
-
 namespace ZerodhaDatafeedAdapter.Services.Analysis
 {
     /// <summary>
-    /// Data class for a single ticker row in the Market Analyzer
-    /// </summary>
-    public class TickerData : INotifyPropertyChanged
-    {
-        private string _symbol;
-        private double _lastPrice;
-        private double _netChange;
-        private double _netChangePercent;
-        private double _open;
-        private double _high;
-        private double _low;
-        private double _close;
-        private double _projectedOpen;
-        private DateTime _lastUpdateTime;
-        private string _expiry = "---";
-
-        public string Symbol
-        {
-            get => _symbol;
-            set { _symbol = value; OnPropertyChanged(); }
-        }
-
-        public double LastPrice
-        {
-            get => _lastPrice;
-            set { _lastPrice = value; OnPropertyChanged(); OnPropertyChanged(nameof(LastPriceDisplay)); }
-        }
-
-        public string LastPriceDisplay => LastPrice > 0 ? LastPrice.ToString("F2") : "---";
-
-        public double NetChange
-        {
-            get => _netChange;
-            set { _netChange = value; OnPropertyChanged(); OnPropertyChanged(nameof(NetChangeDisplay)); }
-        }
-
-        public string NetChangeDisplay => NetChange != 0 ? $"{NetChange:+0.00;-0.00;0.00}" : "---";
-
-        public double NetChangePercent
-        {
-            get => _netChangePercent;
-            set { _netChangePercent = value; OnPropertyChanged(); OnPropertyChanged(nameof(NetChangePercentDisplay)); }
-        }
-
-        public string NetChangePercentDisplay => NetChangePercent != 0 ? $"{NetChangePercent:+0.00;-0.00;0.00}%" : "---";
-
-        public double Open
-        {
-            get => _open;
-            set { _open = value; OnPropertyChanged(); }
-        }
-
-        public double High
-        {
-            get => _high;
-            set { _high = value; OnPropertyChanged(); }
-        }
-
-        public double Low
-        {
-            get => _low;
-            set { _low = value; OnPropertyChanged(); }
-        }
-
-        public double Close
-        {
-            get => _close;
-            set { _close = value; OnPropertyChanged(); }
-        }
-
-        public double ProjectedOpen
-        {
-            get => _projectedOpen;
-            set { _projectedOpen = value; OnPropertyChanged(); OnPropertyChanged(nameof(ProjectedOpenDisplay)); }
-        }
-
-        public string ProjectedOpenDisplay => ProjectedOpen > 0 ? ProjectedOpen.ToString("F0") : "---";
-
-        public DateTime LastUpdateTime
-        {
-            get => _lastUpdateTime;
-            set { _lastUpdateTime = value; OnPropertyChanged(); OnPropertyChanged(nameof(LastUpdateTimeDisplay)); }
-        }
-
-        public string LastUpdateTimeDisplay => _lastUpdateTime != DateTime.MinValue ? _lastUpdateTime.ToString("HH:mm:ss") : "---";
-
-        public string Expiry
-        {
-            get => _expiry;
-            set { _expiry = value; OnPropertyChanged(); }
-        }
-
-        public bool IsPositive => NetChange >= 0;
-
-        public event PropertyChangedEventHandler PropertyChanged;
-
-        protected void OnPropertyChanged([CallerMemberName] string propertyName = null)
-        {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-        }
-    }
-
-    /// <summary>
-    /// Core logic engine for Market Analyzer - calculates projected opens and generates option symbols
+    /// Core coordinator for Market Analyzer logic.
+    /// Manages the ticker list and orchestrates price updates and option generation.
+    /// Calculates projected opens based on GIFT NIFTY change and auto-generates options.
     /// </summary>
     public class MarketAnalyzerLogic
     {
-        private static MarketAnalyzerLogic _instance;
-        public static MarketAnalyzerLogic Instance => _instance ?? (_instance = new MarketAnalyzerLogic());
+        private static readonly Lazy<MarketAnalyzerLogic> _instance = new Lazy<MarketAnalyzerLogic>(() => new MarketAnalyzerLogic());
+        public static MarketAnalyzerLogic Instance => _instance.Value;
 
-        // Hardcoded symbols for now as per requirements
-        private const string SYMBOL_GIFT_NIFTY = "GIFT_NIFTY";
-        private const string SYMBOL_NIFTY_SPOT = "NIFTY";
-        private const string SYMBOL_SENSEX_SPOT = "SENSEX";
-        private const string SYMBOL_O_NIFTY = "NIFTY"; // Underlying name in DB
-        private const string SYMBOL_O_SENSEX = "SENSEX";
+        // Static ticker instances - always available (symbol names match zerodhaSymbol from index_mappings.json)
+        public TickerData GiftNiftyTicker { get; } = new TickerData { Symbol = "GIFT NIFTY" };
+        public TickerData NiftyTicker { get; } = new TickerData { Symbol = "NIFTY 50" };
+        public TickerData SensexTicker { get; } = new TickerData { Symbol = "SENSEX" };
+        public TickerData NiftyFuturesTicker { get; } = new TickerData { Symbol = "NIFTY_I" }; // NIFTY Futures (current month)
 
-        // State
+        // Observable collection for UI binding (contains the 4 static tickers)
+        public ObservableCollection<TickerData> Tickers { get; } = new ObservableCollection<TickerData>();
+
+        // Spot prices - stored locally for calculations
         public double GiftNiftyPrice { get; private set; }
         public double NiftySpotPrice { get; private set; }
         public double SensexSpotPrice { get; private set; }
+        public double NiftyFuturesPrice { get; private set; }
 
-        // Current dynamic instrument list for straddles
-        private InstrumentList _currentInstrumentList;
-        public InstrumentList CurrentStraddleList => _currentInstrumentList;
+        // Prior close for GIFT NIFTY (needed for projected open calculation)
         public double GiftNiftyPriorClose { get; private set; }
 
-        // Ticker data for UI binding
-        public TickerData GiftNiftyTicker { get; } = new TickerData { Symbol = "GIFT NIFTY" };
-        public TickerData NiftyTicker { get; } = new TickerData { Symbol = "NIFTY" };
-        public TickerData SensexTicker { get; } = new TickerData { Symbol = "SENSEX" };
+        // Projected open prices
+        public double ProjectedNiftyOpenPrice { get; private set; }
+        public double ProjectedSensexOpenPrice { get; private set; }
+
+        // NIFTY Futures contract info (resolved dynamically at startup)
+        public string NiftyFuturesSymbol { get; private set; }
+        public long NiftyFuturesToken { get; private set; }
+        public DateTime NiftyFuturesExpiry { get; private set; }
+
+        // Symbol normalization sets (all aliases that map to each index)
+        private static readonly HashSet<string> GiftNiftyAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "GIFT_NIFTY", "GIFT NIFTY", "GIFTNIFTY" };
+        private static readonly HashSet<string> NiftyAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "NIFTY", "NIFTY 50", "NIFTY_50", "NIFTY50", "NIFTY_SPOT" };
+        private static readonly HashSet<string> SensexAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "SENSEX", "SENSEX_SPOT", "BSE:SENSEX" };
+        // NIFTY_I aliases - matches any symbol starting with NIFTY and ending with FUT (e.g., NIFTY26JANFUT)
+        private HashSet<string> _niftyFuturesAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "NIFTY_I" };
+
+        // System.Reactive - Price update subjects for event-driven architecture
+        private readonly Subject<TickerPriceUpdate> _priceUpdateSubject = new Subject<TickerPriceUpdate>();
+        private readonly Subject<ProjectedOpenUpdate> _projectedOpenSubject = new Subject<ProjectedOpenUpdate>();
+        private IDisposable _projectedOpenSubscription;
+
+        // Observable streams for UI binding
+        public IObservable<TickerPriceUpdate> PriceUpdateStream => _priceUpdateSubject.AsObservable();
+        public IObservable<ProjectedOpenUpdate> ProjectedOpenStream => _projectedOpenSubject.AsObservable();
+
+        // Selection State
+        public string SelectedExpiry { get; set; }
+        public string SelectedUnderlying { get; set; }
+        public bool SelectedIsMonthlyExpiry { get; set; }
 
         // Events
         public event Action<string> StatusUpdated;
+        public event Action<string> TickerUpdated;
+        public event Action<string, string> HistoricalDataStatusChanged;
         public event Action<List<MappedInstrument>> OptionsGenerated;
-        public event Action<TickerData> TickerUpdated;
-        public event Action<string, string> HistoricalDataStatusChanged; // symbol, status
-        public event Action<string, decimal> ATMStrikeUpdated; // underlying, atmStrike
+        public event Action PriceSyncReady;
+        public event Action<string, double> OptionPriceUpdated;
+        public event Action<string, double> PriceUpdated;
 
-        /// <summary>
-        /// Event fired when price data is ready (enough option prices have been received).
-        /// This replaces the hardcoded 45-second delay for TBS initialization.
-        /// Fires with (underlying, priceCount) when at least MIN_PRICES_FOR_READY symbols have prices.
-        /// </summary>
-        public event Action<string, int> PriceSyncReady;
         private bool _priceSyncFired = false;
-        private const int MIN_PRICES_FOR_READY = 10; // Minimum option prices before considering data ready
-
-        // Current ATM strike per underlying (set by Option Chain, consumed by TBS Manager)
-        private readonly Dictionary<string, decimal> _currentATMStrikes = new Dictionary<string, decimal>();
-        private readonly object _atmLock = new object();
-
-        // ============================================================================
-        // EXPIRY CACHE: Cached expiries per underlying for symbol generation
-        // ============================================================================
-        private readonly Dictionary<string, List<DateTime>> _cachedExpiries = new Dictionary<string, List<DateTime>>();
-        private readonly object _expiryLock = new object();
-        private string _selectedUnderlying;
-        private DateTime? _selectedExpiry;
-        private bool _selectedIsMonthlyExpiry;
-
-        // ============================================================================
-        // LOT SIZE CACHE: Cached lot sizes per underlying from instrument masters DB
-        // ============================================================================
-        private readonly Dictionary<string, int> _cachedLotSizes = new Dictionary<string, int>();
-        private readonly object _lotSizeLock = new object();
-
-        /// <summary>
-        /// Get cached expiries for an underlying. Returns empty list if not cached.
-        /// </summary>
-        public List<DateTime> GetCachedExpiries(string underlying)
-        {
-            if (string.IsNullOrEmpty(underlying)) return new List<DateTime>();
-            lock (_expiryLock)
-            {
-                if (_cachedExpiries.TryGetValue(underlying.ToUpperInvariant(), out var expiries))
-                    return new List<DateTime>(expiries); // Return copy
-            }
-            return new List<DateTime>();
-        }
-
-        /// <summary>
-        /// Get cached lot size for an underlying. Returns 0 if not cached.
-        /// </summary>
-        public int GetCachedLotSize(string underlying)
-        {
-            if (string.IsNullOrEmpty(underlying)) return 0;
-            lock (_lotSizeLock)
-            {
-                if (_cachedLotSizes.TryGetValue(underlying.ToUpperInvariant(), out var lotSize))
-                    return lotSize;
-            }
-            return 0;
-        }
-
-        /// <summary>
-        /// Get the currently selected underlying from Option Chain
-        /// </summary>
-        public string SelectedUnderlying => _selectedUnderlying;
-
-        /// <summary>
-        /// Get the currently selected expiry from Option Chain
-        /// </summary>
-        public DateTime? SelectedExpiry => _selectedExpiry;
-
-        /// <summary>
-        /// Whether the selected expiry is a monthly expiry
-        /// </summary>
-        public bool SelectedIsMonthlyExpiry => _selectedIsMonthlyExpiry;
-
-        // ============================================================================
-        // PRICE HUB: Centralized price cache to avoid duplicate WebSocket subscriptions
-        // Option Chain populates this, TBS Manager and other consumers read from it
-        // ============================================================================
-        private readonly Dictionary<string, decimal> _priceHub = new Dictionary<string, decimal>();
-        private readonly Dictionary<string, DateTime> _priceTimestamps = new Dictionary<string, DateTime>();
-        private readonly object _priceHubLock = new object();
-
-        /// <summary>
-        /// Event fired when a price is updated in the hub (for consumers who want real-time updates)
-        /// </summary>
-        public event Action<string, decimal> PriceUpdated;
-
-        /// <summary>
-        /// Get current price for a symbol from the centralized price hub.
-        /// Returns 0 if symbol not found or price not available.
-        /// </summary>
-        public decimal GetPrice(string symbol)
-        {
-            if (string.IsNullOrEmpty(symbol)) return 0;
-            lock (_priceHubLock)
-            {
-                if (_priceHub.TryGetValue(symbol, out decimal price))
-                    return price;
-            }
-            return 0;
-        }
-
-        /// <summary>
-        /// Get current price with timestamp for a symbol.
-        /// </summary>
-        public (decimal price, DateTime timestamp) GetPriceWithTimestamp(string symbol)
-        {
-            if (string.IsNullOrEmpty(symbol)) return (0, DateTime.MinValue);
-            lock (_priceHubLock)
-            {
-                if (_priceHub.TryGetValue(symbol, out decimal price))
-                {
-                    var timestamp = _priceTimestamps.TryGetValue(symbol, out DateTime ts) ? ts : DateTime.MinValue;
-                    return (price, timestamp);
-                }
-            }
-            return (0, DateTime.MinValue);
-        }
-
-        /// <summary>
-        /// Update option price in the centralized hub (called by Option Chain or any WebSocket consumer).
-        /// Only fires event if price actually changed.
-        /// </summary>
-        public void UpdateOptionPrice(string symbol, decimal price, DateTime? timestamp = null)
-        {
-            if (string.IsNullOrEmpty(symbol) || price <= 0) return;
-
-            bool priceChanged = false;
-            int priceCount = 0;
-            lock (_priceHubLock)
-            {
-                if (!_priceHub.TryGetValue(symbol, out decimal existingPrice) || existingPrice != price)
-                {
-                    _priceHub[symbol] = price;
-                    _priceTimestamps[symbol] = timestamp ?? DateTime.Now;
-                    priceChanged = true;
-                }
-                priceCount = _priceHub.Count;
-            }
-
-            // Fire event outside lock to avoid deadlocks
-            if (priceChanged)
-            {
-                PriceUpdated?.Invoke(symbol, price);
-
-                // Check if we should fire PriceSyncReady (only once per session)
-                CheckAndFirePriceSyncReady(priceCount);
-            }
-        }
-
-        /// <summary>
-        /// Check if enough prices have been received to fire PriceSyncReady event.
-        /// Only fires once per session to avoid repeated notifications.
-        /// </summary>
-        private void CheckAndFirePriceSyncReady(int priceCount)
-        {
-            if (_priceSyncFired || priceCount < MIN_PRICES_FOR_READY) return;
-
-            // Double-check with lock to prevent race condition
-            lock (_priceHubLock)
-            {
-                if (_priceSyncFired) return;
-                _priceSyncFired = true;
-            }
-
-            var underlying = _selectedUnderlying ?? "NIFTY";
-            Logger.Info($"[MarketAnalyzerLogic] PriceSyncReady: {priceCount} option prices received for {underlying}");
-            PriceSyncReady?.Invoke(underlying, priceCount);
-        }
-
-        /// <summary>
-        /// Reset the PriceSyncReady flag (call when underlying changes or on new session)
-        /// </summary>
-        public void ResetPriceSyncReady()
-        {
-            lock (_priceHubLock)
-            {
-                _priceSyncFired = false;
-            }
-        }
-
-        /// <summary>
-        /// Bulk update prices (more efficient for batch updates from Option Chain)
-        /// </summary>
-        public void UpdatePrices(IEnumerable<(string symbol, decimal price)> updates)
-        {
-            var changedPrices = new List<(string symbol, decimal price)>();
-
-            lock (_priceHubLock)
-            {
-                var now = DateTime.Now;
-                foreach (var (symbol, price) in updates)
-                {
-                    if (string.IsNullOrEmpty(symbol) || price <= 0) continue;
-
-                    if (!_priceHub.TryGetValue(symbol, out decimal existingPrice) || existingPrice != price)
-                    {
-                        _priceHub[symbol] = price;
-                        _priceTimestamps[symbol] = now;
-                        changedPrices.Add((symbol, price));
-                    }
-                }
-            }
-
-            // Fire events outside lock
-            foreach (var (symbol, price) in changedPrices)
-            {
-                PriceUpdated?.Invoke(symbol, price);
-            }
-        }
-
-        /// <summary>
-        /// Get all cached prices (for debugging/diagnostics)
-        /// </summary>
-        public Dictionary<string, decimal> GetAllPrices()
-        {
-            lock (_priceHubLock)
-            {
-                return new Dictionary<string, decimal>(_priceHub);
-            }
-        }
-
-        /// <summary>
-        /// Get count of cached prices
-        /// </summary>
-        public int PriceCount
-        {
-            get
-            {
-                lock (_priceHubLock)
-                {
-                    return _priceHub.Count;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Clear all cached prices (call when switching underlyings or on new session)
-        /// </summary>
-        public void ClearPriceHub()
-        {
-            lock (_priceHubLock)
-            {
-                _priceHub.Clear();
-                _priceTimestamps.Clear();
-                _priceSyncFired = false;
-            }
-            Logger.Info("[MarketAnalyzerLogic] Price hub cleared");
-        }
-
-        /// <summary>
-        /// Remove stale prices older than specified age (for memory management)
-        /// </summary>
-        public int PruneStalePrice(TimeSpan maxAge)
-        {
-            var cutoff = DateTime.Now - maxAge;
-            var staleSymbols = new List<string>();
-
-            lock (_priceHubLock)
-            {
-                foreach (var kvp in _priceTimestamps)
-                {
-                    if (kvp.Value < cutoff)
-                    {
-                        staleSymbols.Add(kvp.Key);
-                    }
-                }
-
-                foreach (var symbol in staleSymbols)
-                {
-                    _priceHub.Remove(symbol);
-                    _priceTimestamps.Remove(symbol);
-                }
-            }
-
-            if (staleSymbols.Count > 0)
-            {
-                Logger.Debug($"[MarketAnalyzerLogic] Pruned {staleSymbols.Count} stale prices older than {maxAge.TotalMinutes:F0} minutes");
-            }
-            return staleSymbols.Count;
-        }
-
-        /// <summary>
-        /// Get the current ATM strike for an underlying (as calculated by Option Chain)
-        /// </summary>
-        public decimal GetATMStrike(string underlying)
-        {
-            if (string.IsNullOrEmpty(underlying)) return 0;
-            lock (_atmLock)
-            {
-                if (_currentATMStrikes.TryGetValue(underlying.ToUpperInvariant(), out decimal strike))
-                    return strike;
-            }
-            return 0;
-        }
-
-        /// <summary>
-        /// Set the current ATM strike for an underlying (called by Option Chain)
-        /// </summary>
-        public void SetATMStrike(string underlying, decimal strike)
-        {
-            if (string.IsNullOrEmpty(underlying) || strike <= 0) return;
-            var key = underlying.ToUpperInvariant();
-            lock (_atmLock)
-            {
-                _currentATMStrikes[key] = strike;
-            }
-            Logger.Debug($"[MarketAnalyzerLogic] ATM strike updated: {key} = {strike}");
-            ATMStrikeUpdated?.Invoke(key, strike);
-        }
-
-        // Track if we've already generated options to avoid duplicates
         private bool _optionsAlreadyGenerated = false;
+        private readonly object _syncLock = new object();
 
-        // Lock object for straddles_config.json file access to prevent concurrent write errors
-        private static readonly object _straddlesConfigLock = new object();
+        // Cached expiries and lot sizes
+        private readonly Dictionary<string, List<DateTime>> _cachedExpiries = new Dictionary<string, List<DateTime>>();
+        private readonly Dictionary<string, int> _cachedLotSizes = new Dictionary<string, int>();
+        private readonly object _expiryLock = new object();
+        private readonly object _lotSizeLock = new object();
 
         private MarketAnalyzerLogic()
         {
             Logger.Info("[MarketAnalyzerLogic] Constructor: Initializing singleton instance");
-        }
 
-        /// <summary>
-        /// Reset all state for a new trading session.
-        /// Call this when underlying changes or at start of new trading day.
-        /// </summary>
-        public void Reset()
-        {
-            Logger.Info("[MarketAnalyzerLogic] Resetting state for new session");
+            // Initialize Tickers collection with static instances
+            Tickers.Add(GiftNiftyTicker);
+            Tickers.Add(NiftyTicker);
+            Tickers.Add(SensexTicker);
+            Tickers.Add(NiftyFuturesTicker);
 
-            // Reset prices
-            GiftNiftyPrice = 0;
-            NiftySpotPrice = 0;
-            SensexSpotPrice = 0;
-            GiftNiftyPriorClose = 0;
+            // Resolve NIFTY Futures contract dynamically
+            ResolveNiftyFuturesContract();
 
-            // Reset ticker data
-            ResetTickerData(GiftNiftyTicker);
-            ResetTickerData(NiftyTicker);
-            ResetTickerData(SensexTicker);
-
-            // Clear price hub
-            ClearPriceHub();
-
-            // Clear ATM strikes
-            lock (_atmLock)
+            MarketDataHub.Instance.PriceUpdated += (s, p) =>
             {
-                _currentATMStrikes.Clear();
-            }
+                // Don't re-invoke UpdatePrice here - it causes recursion
+                // Just fire external events
+                OptionPriceUpdated?.Invoke(s, p);
+                PriceUpdated?.Invoke(s, p);
+            };
 
-            // Reset selection
-            _selectedUnderlying = null;
-            _selectedExpiry = null;
-            _selectedIsMonthlyExpiry = false;
-
-            // Allow options to be regenerated
-            _optionsAlreadyGenerated = false;
-
-            // Clear instrument list reference
-            _currentInstrumentList = null;
-
-            Logger.Info("[MarketAnalyzerLogic] State reset complete");
-        }
-
-        private void ResetTickerData(TickerData ticker)
-        {
-            if (ticker == null) return;
-            ticker.LastPrice = 0;
-            ticker.NetChange = 0;
-            ticker.NetChangePercent = 0;
-            ticker.Open = 0;
-            ticker.High = 0;
-            ticker.Low = 0;
-            ticker.Close = 0;
-            ticker.ProjectedOpen = 0;
-            ticker.LastUpdateTime = DateTime.MinValue;
+            // Setup System.Reactive pipeline for projected opens calculation
+            // This fires ONCE when all required data is available (GIFT change% + NIFTY/SENSEX prior close)
+            SetupReactiveProjectedOpensPipeline();
         }
 
         /// <summary>
-        /// Notify that historical data request status changed for a symbol
+        /// Resolves the current month's NIFTY Futures contract from the instrument database.
+        /// Query: segment='NFO-FUT', name='NIFTY', expiry >= today, order by expiry ASC, take first
         /// </summary>
-        public void NotifyHistoricalDataStatus(string symbol, string status)
+        private void ResolveNiftyFuturesContract()
         {
-            Logger.Info($"[MarketAnalyzerLogic] NotifyHistoricalDataStatus: {symbol} = {status}");
-            HistoricalDataStatusChanged?.Invoke(symbol, status);
+            try
+            {
+                string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "ZerodhaAdapter");
+                string dbPath = Path.Combine(folder, "InstrumentMasters.db");
+
+                if (!File.Exists(dbPath))
+                {
+                    Logger.Warn("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Database not found, will retry later");
+                    return;
+                }
+
+                using (var conn = new SQLiteConnection($"Data Source={dbPath};Version=3;Read Only=True;"))
+                {
+                    conn.Open();
+                    // Query: NFO-FUT segment, name='NIFTY', expiry >= today, earliest expiry first
+                    string sql = @"SELECT instrument_token, tradingsymbol, expiry
+                                   FROM instruments
+                                   WHERE segment = 'NFO-FUT'
+                                   AND name = 'NIFTY'
+                                   AND expiry >= @today
+                                   ORDER BY expiry ASC
+                                   LIMIT 1";
+
+                    using (var cmd = new SQLiteCommand(sql, conn))
+                    {
+                        cmd.Parameters.AddWithValue("@today", DateTime.Today.ToString("yyyy-MM-dd"));
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                NiftyFuturesToken = reader.GetInt64(0);
+                                NiftyFuturesSymbol = reader.GetString(1);
+                                if (DateTime.TryParse(reader.GetString(2), out var expiry))
+                                {
+                                    NiftyFuturesExpiry = expiry;
+                                }
+
+                                // Add the trading symbol to aliases for matching
+                                _niftyFuturesAliases.Add(NiftyFuturesSymbol);
+
+                                Logger.Info($"[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Resolved NIFTY_I -> {NiftyFuturesSymbol} (token={NiftyFuturesToken}, expiry={NiftyFuturesExpiry:yyyy-MM-dd})");
+                            }
+                            else
+                            {
+                                Logger.Warn("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): No NIFTY futures contract found");
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Exception - {ex.Message}", ex);
+            }
         }
 
-        public void UpdatePrice(string symbol, double price, double priorClose = 0, double open = 0, double high = 0, double low = 0, double close = 0)
+        /// <summary>
+        /// Checks if a symbol is a NIFTY Futures alias (starts with NIFTY and ends with FUT)
+        /// </summary>
+        private bool IsNiftyFuturesAlias(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol)) return false;
+            if (_niftyFuturesAliases.Contains(symbol)) return true;
+            // Match pattern: starts with NIFTY, ends with FUT (e.g., NIFTY26JANFUT, NIFTY26FEBFUT)
+            return symbol.StartsWith("NIFTY", StringComparison.OrdinalIgnoreCase) &&
+                   symbol.EndsWith("FUT", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Sets up System.Reactive pipeline for calculating projected opens.
+        /// Uses CombineLatest to wait for all required data before calculating.
+        /// </summary>
+        private void SetupReactiveProjectedOpensPipeline()
+        {
+            // Create observables for each data point we need
+            var giftChangeStream = _priceUpdateSubject
+                .Where(u => u.TickerSymbol == "GIFT NIFTY" && u.NetChangePercent != 0)
+                .Select(u => u.NetChangePercent)
+                .DistinctUntilChanged();
+
+            var niftyCloseStream = _priceUpdateSubject
+                .Where(u => u.TickerSymbol == "NIFTY 50" && u.Close > 0)
+                .Select(u => u.Close)
+                .Take(1); // Only need first close value
+
+            var sensexCloseStream = _priceUpdateSubject
+                .Where(u => u.TickerSymbol == "SENSEX" && u.Close > 0)
+                .Select(u => u.Close)
+                .Take(1); // Only need first close value
+
+            // Combine streams - fires when we have GIFT change% and at least one prior close
+            _projectedOpenSubscription = giftChangeStream
+                .CombineLatest(niftyCloseStream, sensexCloseStream, (giftChg, niftyClose, sensexClose) => new { giftChg, niftyClose, sensexClose })
+                .Take(1) // Calculate projected opens ONCE
+                .Subscribe(data =>
+                {
+                    // giftChg is in percentage form (e.g., 0.09 means 0.09%)
+                    double giftChgDecimal = data.giftChg / 100.0;
+
+                    double niftyProjOpen = data.niftyClose * (1 + giftChgDecimal);
+                    double sensexProjOpen = data.sensexClose * (1 + giftChgDecimal);
+
+                    ProjectedNiftyOpenPrice = niftyProjOpen;
+                    ProjectedSensexOpenPrice = sensexProjOpen;
+
+                    // Fire projected open update event
+                    _projectedOpenSubject.OnNext(new ProjectedOpenUpdate
+                    {
+                        NiftyProjectedOpen = niftyProjOpen,
+                        SensexProjectedOpen = sensexProjOpen,
+                        GiftChangePercent = data.giftChg
+                    });
+
+                    Logger.Info($"[MarketAnalyzerLogic] Rx Pipeline: Projected Opens calculated - GIFT Chg%: {data.giftChg:+0.00;-0.00}%, NIFTY: {niftyProjOpen:F0}, SENSEX: {sensexProjOpen:F0}");
+                },
+                ex => Logger.Error($"[MarketAnalyzerLogic] Rx Pipeline: Error - {ex.Message}", ex));
+        }
+
+        public void NotifyHistoricalDataStatus(string symbol, string status) => HistoricalDataStatusChanged?.Invoke(symbol, status);
+
+        public void UpdateOptionPrice(string symbol, decimal price, DateTime timestamp)
+        {
+            MarketDataHub.Instance.UpdatePrice(symbol, (double)price, timestamp);
+            CheckAndFirePriceSyncReady();
+        }
+
+        public void UpdatePrice(string symbol, double price)
+        {
+            UpdatePrice(symbol, price, 0);
+        }
+
+        public void UpdatePrice(string symbol, double price, double priorClose)
         {
             Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): symbol='{symbol}', price={price}, priorClose={priorClose}");
 
             TickerData ticker = null;
 
-            // Normalize symbol - handle "GIFT NIFTY" (with space) and "GIFT_NIFTY" (with underscore)
-            string normalizedSymbol = symbol?.Replace(" ", "_").ToUpperInvariant() ?? "";
-
-            if (normalizedSymbol.Equals(SYMBOL_GIFT_NIFTY, StringComparison.OrdinalIgnoreCase) ||
-                symbol.Equals("GIFT NIFTY", StringComparison.OrdinalIgnoreCase))
+            // Normalize and route to the correct static ticker
+            if (GiftNiftyAliases.Contains(symbol))
             {
                 GiftNiftyPrice = price;
-                if (priorClose > 0) GiftNiftyPriorClose = priorClose;
-                Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): GIFT_NIFTY updated - Price={GiftNiftyPrice}, PriorClose={GiftNiftyPriorClose}");
-
                 ticker = GiftNiftyTicker;
-                ticker.LastPrice = price;
-                ticker.Open = open > 0 ? open : ticker.Open;
-                ticker.High = high > 0 ? high : ticker.High;
-                ticker.Low = low > 0 ? low : ticker.Low;
-                ticker.Close = close > 0 ? close : (priorClose > 0 ? priorClose : ticker.Close);
-                if (ticker.Close > 0)
+                ticker.UpdatePrice(price);
+                if (priorClose > 0)
                 {
-                    ticker.NetChange = price - ticker.Close;
-                    ticker.NetChangePercent = (ticker.NetChange / ticker.Close) * 100;
+                    GiftNiftyPriorClose = priorClose;
+                    ticker.Close = priorClose;
+                    Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): GiftNiftyPriorClose set to {priorClose}");
                 }
             }
-            else if (normalizedSymbol.Equals(SYMBOL_NIFTY_SPOT, StringComparison.OrdinalIgnoreCase) ||
-                     symbol.Equals("NIFTY 50", StringComparison.OrdinalIgnoreCase) ||
-                     symbol.Equals("NIFTY", StringComparison.OrdinalIgnoreCase))
+            else if (NiftyAliases.Contains(symbol))
             {
                 NiftySpotPrice = price;
-                Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): NIFTY_SPOT updated - Price={NiftySpotPrice}");
-
                 ticker = NiftyTicker;
-                ticker.LastPrice = price;
-                ticker.Open = open > 0 ? open : ticker.Open;
-                ticker.High = high > 0 ? high : ticker.High;
-                ticker.Low = low > 0 ? low : ticker.Low;
-                ticker.Close = close > 0 ? close : ticker.Close;
-                if (ticker.Close > 0)
+                ticker.UpdatePrice(price);
+                if (priorClose > 0)
                 {
-                    ticker.NetChange = price - ticker.Close;
-                    ticker.NetChangePercent = (ticker.NetChange / ticker.Close) * 100;
+                    ticker.Close = priorClose;
                 }
             }
-            else if (normalizedSymbol.Equals(SYMBOL_SENSEX_SPOT, StringComparison.OrdinalIgnoreCase) ||
-                     symbol.Equals("SENSEX", StringComparison.OrdinalIgnoreCase))
+            else if (SensexAliases.Contains(symbol))
             {
                 SensexSpotPrice = price;
-                Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): SENSEX_SPOT updated - Price={SensexSpotPrice}");
-
                 ticker = SensexTicker;
-                ticker.LastPrice = price;
-                ticker.Open = open > 0 ? open : ticker.Open;
-                ticker.High = high > 0 ? high : ticker.High;
-                ticker.Low = low > 0 ? low : ticker.Low;
-                ticker.Close = close > 0 ? close : ticker.Close;
-                if (ticker.Close > 0)
+                ticker.UpdatePrice(price);
+                if (priorClose > 0)
                 {
-                    ticker.NetChange = price - ticker.Close;
-                    ticker.NetChangePercent = (ticker.NetChange / ticker.Close) * 100;
+                    ticker.Close = priorClose;
+                }
+            }
+            else if (IsNiftyFuturesAlias(symbol))
+            {
+                NiftyFuturesPrice = price;
+                ticker = NiftyFuturesTicker;
+                ticker.UpdatePrice(price);
+                if (priorClose > 0)
+                {
+                    ticker.Close = priorClose;
                 }
             }
             else
             {
-                Logger.Warn($"[MarketAnalyzerLogic] UpdatePrice(): Unknown symbol '{symbol}' - ignoring");
-                return;
+                // Not one of the tracked indices - just log and store in hub
+                Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): Symbol '{symbol}' not a tracked index");
             }
 
-            // Fire ticker update event
+            // Also store price in MarketDataHub (for option chain and other lookups)
+            MarketDataHub.Instance.UpdatePrice(symbol, price, DateTime.Now);
+
+            CheckAndFirePriceSyncReady();
+            CheckAndCalculate();
+
+            // Fire event with the ticker object (not just symbol string)
             if (ticker != null)
             {
-                ticker.LastUpdateTime = DateTime.Now;
-                TickerUpdated?.Invoke(ticker);
-            }
+                TickerUpdated?.Invoke(ticker.Symbol);
 
-            CheckAndCalculate();
+                // Emit to System.Reactive stream for event-driven updates
+                _priceUpdateSubject.OnNext(new TickerPriceUpdate
+                {
+                    TickerSymbol = ticker.Symbol,
+                    Price = ticker.CurrentPrice,
+                    Close = ticker.Close,
+                    NetChangePercent = ticker.NetChangePercent
+                });
+            }
         }
 
+        public void UpdatePrice(string symbol, double price, DateTime timestamp)
+        {
+            UpdatePrice(symbol, price, 0);
+        }
+
+        /// <summary>
+        /// Updates the Close (prior day close) for a symbol - does NOT affect CurrentPrice
+        /// </summary>
+        public void UpdateClose(string symbol, double closePrice)
+        {
+            Logger.Debug($"[MarketAnalyzerLogic] UpdateClose(): symbol='{symbol}', closePrice={closePrice}");
+
+            TickerData ticker = null;
+
+            // Normalize and route to the correct static ticker
+            if (GiftNiftyAliases.Contains(symbol))
+            {
+                GiftNiftyPriorClose = closePrice;
+                ticker = GiftNiftyTicker;
+                ticker.Close = closePrice;
+                Logger.Info($"[MarketAnalyzerLogic] UpdateClose(): GiftNiftyPriorClose set to {closePrice}");
+                // Re-check and calculate after prior close is set
+                CheckAndCalculate();
+            }
+            else if (NiftyAliases.Contains(symbol))
+            {
+                ticker = NiftyTicker;
+                ticker.Close = closePrice;
+            }
+            else if (SensexAliases.Contains(symbol))
+            {
+                ticker = SensexTicker;
+                ticker.Close = closePrice;
+            }
+            else if (IsNiftyFuturesAlias(symbol))
+            {
+                ticker = NiftyFuturesTicker;
+                ticker.Close = closePrice;
+            }
+            else
+            {
+                Logger.Debug($"[MarketAnalyzerLogic] UpdateClose(): Symbol '{symbol}' not a tracked index");
+            }
+
+            // Emit to System.Reactive stream for event-driven updates
+            if (ticker != null)
+            {
+                _priceUpdateSubject.OnNext(new TickerPriceUpdate
+                {
+                    TickerSymbol = ticker.Symbol,
+                    Price = ticker.CurrentPrice,
+                    Close = ticker.Close,
+                    NetChangePercent = ticker.NetChangePercent
+                });
+            }
+        }
+
+        // Cache Facades
+        public List<string> GetCachedExpiries(string underlying) => OptionGenerationService.Instance.GetCachedExpiries(underlying);
+        public int GetLotSize(string underlying) => OptionGenerationService.Instance.GetLotSize(underlying);
+        public int GetCachedLotSize(string underlying) => OptionGenerationService.Instance.GetLotSize(underlying);
+
+        public async Task GenerateOptionsAsync(string underlying, double price, DateTime expiry)
+        {
+            var options = await OptionGenerationService.Instance.GenerateOptionsAsync(underlying, price, expiry);
+            OptionsGenerated?.Invoke(options);
+        }
+
+        public void SetATMStrike(string underlying, decimal strike) => OptionGenerationService.Instance.SetATMStrike(underlying, strike);
+        public decimal GetATMStrike(string underlying) => OptionGenerationService.Instance.GetATMStrike(underlying);
+
+        public double GetPrice(string symbol) => MarketDataHub.Instance.GetPrice(symbol);
+
+        public void Reset()
+        {
+            MarketDataHub.Instance.Clear();
+            _priceSyncFired = false;
+            _optionsAlreadyGenerated = false;
+
+            // Reset prices
+            GiftNiftyPrice = 0;
+            NiftySpotPrice = 0;
+            SensexSpotPrice = 0;
+            NiftyFuturesPrice = 0;
+            GiftNiftyPriorClose = 0;
+            ProjectedNiftyOpenPrice = 0;
+            ProjectedSensexOpenPrice = 0;
+
+            // Reset static tickers (don't remove from collection, just reset values)
+            ResetTicker(GiftNiftyTicker);
+            ResetTicker(NiftyTicker);
+            ResetTicker(SensexTicker);
+            ResetTicker(NiftyFuturesTicker);
+
+            // Re-setup the Rx pipeline for projected opens
+            _projectedOpenSubscription?.Dispose();
+            SetupReactiveProjectedOpensPipeline();
+        }
+
+        private void ResetTicker(TickerData ticker)
+        {
+            ticker.CurrentPrice = 0;
+            ticker.Open = 0;
+            ticker.High = 0;
+            ticker.Low = 0;
+            ticker.Close = 0;
+            ticker.ProjectedOpen = 0;
+        }
+
+        private void CheckAndFirePriceSyncReady()
+        {
+            lock (_syncLock)
+            {
+                if (_priceSyncFired) return;
+                if (MarketDataHub.Instance.GetPrice("NIFTY 50") > 0 && MarketDataHub.Instance.GetPrice("SENSEX") > 0)
+                {
+                    _priceSyncFired = true;
+                    PriceSyncReady?.Invoke();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks if we have enough price data to calculate projected opens and trigger option generation.
+        /// Called after each price update.
+        /// </summary>
         private void CheckAndCalculate()
         {
-            Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): GIFT={GiftNiftyPrice}, NIFTY={NiftySpotPrice}, SENSEX={SensexSpotPrice}, PriorClose={GiftNiftyPriorClose}");
+            double giftPrice = GiftNiftyPrice;
+            double niftyPrice = NiftySpotPrice;
+            double sensexPrice = SensexSpotPrice;
+
+            Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): GIFT={giftPrice}, NIFTY={niftyPrice}, SENSEX={sensexPrice}, PriorClose={GiftNiftyPriorClose}");
 
             // We need at least GIFT NIFTY and one Spot to proceed
-            if (GiftNiftyPrice <= 0)
+            if (giftPrice <= 0)
             {
                 Logger.Debug("[MarketAnalyzerLogic] CheckAndCalculate(): GIFT NIFTY price not available yet, waiting...");
                 return;
             }
 
-            // Simple logic: If we have prices, try to calculate projected open
+            // Calculate change percent from GIFT NIFTY
             double changePercent = 0.0;
             if (GiftNiftyPriorClose > 0)
             {
-                changePercent = (GiftNiftyPrice - GiftNiftyPriorClose) / GiftNiftyPriorClose;
-                Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): Change% = ({GiftNiftyPrice} - {GiftNiftyPriorClose}) / {GiftNiftyPriorClose} = {changePercent:P4}");
+                changePercent = (giftPrice - GiftNiftyPriorClose) / GiftNiftyPriorClose;
+                Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): Change% = ({giftPrice} - {GiftNiftyPriorClose}) / {GiftNiftyPriorClose} = {changePercent:P4}");
             }
             else
             {
                 Logger.Warn("[MarketAnalyzerLogic] CheckAndCalculate(): GIFT NIFTY PriorClose not available, using 0% change");
-                StatusUpdated?.Invoke($"Waiting for GIFT NIFTY Prior Close... (Current: {GiftNiftyPrice})");
+                StatusUpdated?.Invoke($"Waiting for GIFT NIFTY Prior Close... (Current: {giftPrice})");
             }
 
             // Calculate Projected Opens
-            double niftyProjected = NiftySpotPrice > 0 ? NiftySpotPrice * (1 + changePercent) : 0;
-            double sensexProjected = SensexSpotPrice > 0 ? SensexSpotPrice * (1 + changePercent) : 0;
+            double niftyProjected = niftyPrice > 0 ? niftyPrice * (1 + changePercent) : 0;
+            double sensexProjected = sensexPrice > 0 ? sensexPrice * (1 + changePercent) : 0;
 
-            // Update ticker projected values
-            NiftyTicker.ProjectedOpen = niftyProjected;
-            SensexTicker.ProjectedOpen = sensexProjected;
+            // Store projected values
+            ProjectedNiftyOpenPrice = niftyProjected;
+            ProjectedSensexOpenPrice = sensexProjected;
+
+            // Update ticker projected values if they exist
+            var niftyTicker = NiftyTicker;
+            var sensexTicker = SensexTicker;
+            if (niftyTicker != null) niftyTicker.ProjectedOpen = niftyProjected;
+            if (sensexTicker != null) sensexTicker.ProjectedOpen = sensexProjected;
 
             Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): Projected Opens - NIFTY={niftyProjected:F2}, SENSEX={sensexProjected:F2}");
-            StatusUpdated?.Invoke($"GIFT: {GiftNiftyPrice} ({changePercent:P2}) | Proj Nifty: {niftyProjected:F0} | Proj Sensex: {sensexProjected:F0}");
+            // NOTE: Removed StatusUpdated call here - it was causing flashing text in the status bar every tick
 
+            // Trigger option generation if we have projected prices and haven't generated yet
             if ((niftyProjected > 0 || sensexProjected > 0) && !_optionsAlreadyGenerated)
             {
-                // Only trigger if we have a reasonably valid projected price
-                double minValidPrice = (niftyProjected > sensexProjected ? 1000 : 10000); // Rough check for NIFTY vs SENSEX
-                
-                if (niftyProjected >= 1000 || sensexProjected >= 10000)
-                {
-                    Logger.Info($"[MarketAnalyzerLogic] CheckAndCalculate(): Conditions met. Triggering option generation (Nifty Proj={niftyProjected:F0}, Sensex Proj={sensexProjected:F0})...");
-                    GenerateOptionsAsync(niftyProjected, sensexProjected).SafeFireAndForget("MarketAnalyzerLogic.GenerateOptionsAsync");
-                }
-                else
-                {
-                    Logger.Debug($"[MarketAnalyzerLogic] CheckAndCalculate(): Waiting for more realistic projected prices (Nifty={niftyProjected:F0}, Sensex={sensexProjected:F0})");
-                    StatusUpdated?.Invoke("Waiting for price data...");
-                }
+                Logger.Info("[MarketAnalyzerLogic] CheckAndCalculate(): Triggering option generation...");
+                GenerateOptions(niftyProjected, sensexProjected);
             }
             else if (_optionsAlreadyGenerated)
             {
@@ -679,75 +521,68 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
         }
 
-        internal async Task GenerateOptionsAsync(double niftyProjected, double sensexProjected)
+        /// <summary>
+        /// Generates option symbols based on DTE priority:
+        /// 1. NIFTY 0DTE, 2. SENSEX 0DTE, 3. NIFTY 1DTE, 4. SENSEX 1DTE, 5. Default NIFTY
+        /// </summary>
+        private async void GenerateOptions(double niftyProjected, double sensexProjected)
         {
-            Logger.Info($"[MarketAnalyzerLogic] GenerateOptionsAsync(): Starting with niftyProjected={niftyProjected:F2}, sensexProjected={sensexProjected:F2}");
+            Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Starting with niftyProjected={niftyProjected:F2}, sensexProjected={sensexProjected:F2}");
 
             try
             {
                 // Mark as generated to prevent duplicate runs
                 _optionsAlreadyGenerated = true;
 
-                // FETCH EXPIRIES from database
-                Logger.Info("[MarketAnalyzerLogic] GenerateOptionsAsync(): Fetching NIFTY expiries from database...");
-                var niftyExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlying("NIFTY");
-                
-                Logger.Info("[MarketAnalyzerLogic] GenerateOptionsAsync(): Fetching SENSEX expiries from database...");
-                var sensexExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlying("SENSEX");
+                // Fetch expiries from database
+                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Fetching NIFTY expiries from database...");
+                var niftyExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlyingAsync("NIFTY");
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Found {niftyExpiries.Count} NIFTY expiries");
 
-                // Cache expiries globally for TBS Manager and other consumers
+                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Fetching SENSEX expiries from database...");
+                var sensexExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlyingAsync("SENSEX");
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Found {sensexExpiries.Count} SENSEX expiries");
+
+                // Cache expiries
                 lock (_expiryLock)
                 {
                     _cachedExpiries["NIFTY"] = new List<DateTime>(niftyExpiries);
                     _cachedExpiries["SENSEX"] = new List<DateTime>(sensexExpiries);
                 }
-                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Cached expiries for NIFTY and SENSEX");
 
-                // FETCH LOT SIZES from database and cache them
-                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Fetching lot sizes from database...");
-                var niftyLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("NIFTY");
-                var sensexLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("SENSEX");
-                var bankniftyLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("BANKNIFTY");
-                var finniftyLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("FINNIFTY");
-                var midcpniftyLotSize = await InstrumentManager.Instance.GetLotSizeForUnderlying("MIDCPNIFTY");
-
+                // Fetch and cache lot sizes
+                var niftyLotSize = InstrumentManager.Instance.GetLotSizeForUnderlying("NIFTY");
+                var sensexLotSize = InstrumentManager.Instance.GetLotSizeForUnderlying("SENSEX");
                 lock (_lotSizeLock)
                 {
                     if (niftyLotSize > 0) _cachedLotSizes["NIFTY"] = niftyLotSize;
                     if (sensexLotSize > 0) _cachedLotSizes["SENSEX"] = sensexLotSize;
-                    if (bankniftyLotSize > 0) _cachedLotSizes["BANKNIFTY"] = bankniftyLotSize;
-                    if (finniftyLotSize > 0) _cachedLotSizes["FINNIFTY"] = finniftyLotSize;
-                    if (midcpniftyLotSize > 0) _cachedLotSizes["MIDCPNIFTY"] = midcpniftyLotSize;
                 }
-                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Cached lot sizes - NIFTY={niftyLotSize}, SENSEX={sensexLotSize}, BANKNIFTY={bankniftyLotSize}");
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Lot sizes - NIFTY={niftyLotSize}, SENSEX={sensexLotSize}");
 
+                // Get nearest expiries
                 var niftyNear = GetNearestExpiry(niftyExpiries);
                 var sensexNear = GetNearestExpiry(sensexExpiries);
 
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Nearest expiries - NIFTY={niftyNear:yyyy-MM-dd}, SENSEX={sensexNear:yyyy-MM-dd}");
 
-                string selectedUnderlying = "NIFTY";
-                DateTime selectedExpiry = niftyNear;
-                double projectedPrice = niftyProjected;
-                int stepSize = 50;
-
-                double sensexDTE = (sensexNear.Date - DateTime.Today).TotalDays;
+                // Calculate DTE
                 double niftyDTE = (niftyNear.Date - DateTime.Today).TotalDays;
+                double sensexDTE = (sensexNear.Date - DateTime.Today).TotalDays;
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): DTE - NIFTY={niftyDTE}, SENSEX={sensexDTE}");
 
-                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): DTE calculations - NIFTY DTE={niftyDTE}, SENSEX DTE={sensexDTE}");
-
-                // Priority Rules based on DTE:
-                // 1. NIFTY DTE = 0 (0DTE)
-                // 2. SENSEX DTE = 0
-                // 3. NIFTY DTE = 1 (1DTE)
-                // 4. SENSEX DTE = 1
-                // 5. Default: NIFTY
+                // DTE-based priority selection
+                string selectedUnderlying;
+                DateTime selectedExpiry;
+                int stepSize;
+                double projectedPrice;
 
                 if (niftyDTE == 0)
                 {
                     selectedUnderlying = "NIFTY";
                     selectedExpiry = niftyNear;
                     stepSize = 50;
+                    projectedPrice = niftyProjected;
                     Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Selected NIFTY 0DTE (Priority 1)");
                 }
                 else if (sensexDTE == 0)
@@ -755,6 +590,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     selectedUnderlying = "SENSEX";
                     selectedExpiry = sensexNear;
                     stepSize = 100;
+                    projectedPrice = sensexProjected;
                     Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Selected SENSEX 0DTE (Priority 2)");
                 }
                 else if (niftyDTE == 1)
@@ -762,6 +598,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     selectedUnderlying = "NIFTY";
                     selectedExpiry = niftyNear;
                     stepSize = 50;
+                    projectedPrice = niftyProjected;
                     Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Selected NIFTY 1DTE (Priority 3)");
                 }
                 else if (sensexDTE == 1)
@@ -769,6 +606,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     selectedUnderlying = "SENSEX";
                     selectedExpiry = sensexNear;
                     stepSize = 100;
+                    projectedPrice = sensexProjected;
                     Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Selected SENSEX 1DTE (Priority 4)");
                 }
                 else
@@ -776,136 +614,118 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     selectedUnderlying = "NIFTY";
                     selectedExpiry = niftyNear;
                     stepSize = 50;
+                    projectedPrice = niftyProjected;
                     Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Default to NIFTY (DTE={niftyDTE})");
                 }
 
-                // Projected price is already validated by CheckAndCalculate before calling this method.
-                // No more polling loop!
-                projectedPrice = selectedUnderlying == "NIFTY" ? niftyProjected : sensexProjected;
+                // Wait for projected price if not available
+                double minValidPrice = selectedUnderlying == "NIFTY" ? 1000 : 10000;
+                if (projectedPrice < minValidPrice)
+                {
+                    Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Waiting for {selectedUnderlying} projected price (current={projectedPrice:F0}, min={minValidPrice})...");
+                    StatusUpdated?.Invoke($"Waiting for {selectedUnderlying} price data...");
+
+                    int waitedMs = 0;
+                    const int maxWaitMs = 30000;
+                    const int pollIntervalMs = 500;
+
+                    while (waitedMs < maxWaitMs)
+                    {
+                        await Task.Delay(pollIntervalMs);
+                        waitedMs += pollIntervalMs;
+
+                        double spotPrice = selectedUnderlying == "NIFTY" ? NiftySpotPrice : SensexSpotPrice;
+                        if (spotPrice > 0 && GiftNiftyPriorClose > 0 && GiftNiftyPrice > 0)
+                        {
+                            double changePercent = (GiftNiftyPrice - GiftNiftyPriorClose) / GiftNiftyPriorClose;
+                            projectedPrice = spotPrice * (1 + changePercent);
+                        }
+
+                        if (projectedPrice >= minValidPrice)
+                        {
+                            Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Got {selectedUnderlying} price={projectedPrice:F0} after {waitedMs}ms");
+                            break;
+                        }
+                    }
+
+                    if (projectedPrice < minValidPrice)
+                    {
+                        Logger.Error($"[MarketAnalyzerLogic] GenerateOptions(): Timeout waiting for {selectedUnderlying} price - aborting");
+                        _optionsAlreadyGenerated = false;
+                        StatusUpdated?.Invoke($"Timeout: No {selectedUnderlying} price received");
+                        return;
+                    }
+                }
 
                 // Round projected price to step size for ATM strike
                 double atmStrike = Math.Round(projectedPrice / stepSize) * stepSize;
 
-                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Final selection - Underlying={selectedUnderlying}, Expiry={selectedExpiry:yyyy-MM-dd}, ATM={atmStrike}, StepSize={stepSize}");
+                // Determine if monthly expiry
+                var allExpiries = selectedUnderlying == "NIFTY" ? niftyExpiries : sensexExpiries;
+                bool isMonthlyExpiry = IsMonthlyExpiry(selectedExpiry, allExpiries);
+
+                // Store selection
+                SelectedUnderlying = selectedUnderlying;
+                SelectedExpiry = selectedExpiry.ToString("dd-MMM-yyyy");
+                SelectedIsMonthlyExpiry = isMonthlyExpiry;
+
+                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Selected {selectedUnderlying} {selectedExpiry:yyyy-MM-dd} ATM={atmStrike} (Monthly={isMonthlyExpiry})");
                 StatusUpdated?.Invoke($"Selected: {selectedUnderlying} {selectedExpiry:ddMMM} at Strike {atmStrike}");
 
-                // Generate Strikes (ATM +/- 30 = 61 strikes x 2 types = 122 options)
+                // Generate options (ATM +/- 30 = 61 strikes x 2 types = 122 options)
                 var generated = new List<MappedInstrument>();
-                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Generating option symbols (ATM +/- 30)...");
-
-                // Determine if selected expiry is monthly (last expiry of that month)
-                var allExpiries = selectedUnderlying == "NIFTY" ? niftyExpiries : sensexExpiries;
-                bool isMonthlyExpiry = SymbolHelper.IsMonthlyExpiry(selectedExpiry, allExpiries);
-                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Expiry {selectedExpiry:yyyy-MM-dd} is {(isMonthlyExpiry ? "MONTHLY" : "WEEKLY")}");
-
-                // Cache the selected values for TBS Manager and other consumers
-                _selectedUnderlying = selectedUnderlying;
-                _selectedExpiry = selectedExpiry;
-                _selectedIsMonthlyExpiry = isMonthlyExpiry;
-                Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Cached selection - Underlying={selectedUnderlying}, Expiry={selectedExpiry:yyyy-MM-dd}, IsMonthly={isMonthlyExpiry}");
+                string segment = selectedUnderlying == "SENSEX" ? "BFO-OPT" : "NFO-OPT";
+                int lotSize = _cachedLotSizes.TryGetValue(selectedUnderlying, out var ls) ? ls : (selectedUnderlying == "NIFTY" ? 50 : 10);
 
                 for (int i = -30; i <= 30; i++)
                 {
                     double strike = atmStrike + (i * stepSize);
 
-                    // Create CE
-                    var ceOption = CreateOption(selectedUnderlying, selectedExpiry, strike, "CE", stepSize, isMonthlyExpiry);
-                    generated.Add(ceOption);
+                    // Lookup CE
+                    var (ceToken, ceSymbol) = InstrumentManager.Instance.LookupOptionDetails(segment, selectedUnderlying, selectedExpiry.ToString("yyyy-MM-dd"), strike, "CE");
+                    if (ceToken > 0)
+                    {
+                        generated.Add(CreateOption(selectedUnderlying, selectedExpiry, strike, "CE", ceToken, ceSymbol, segment, lotSize, isMonthlyExpiry));
+                    }
 
-                    // Create PE
-                    var peOption = CreateOption(selectedUnderlying, selectedExpiry, strike, "PE", stepSize, isMonthlyExpiry);
-                    generated.Add(peOption);
+                    // Lookup PE
+                    var (peToken, peSymbol) = InstrumentManager.Instance.LookupOptionDetails(segment, selectedUnderlying, selectedExpiry.ToString("yyyy-MM-dd"), strike, "PE");
+                    if (peToken > 0)
+                    {
+                        generated.Add(CreateOption(selectedUnderlying, selectedExpiry, strike, "PE", peToken, peSymbol, segment, lotSize, isMonthlyExpiry));
+                    }
                 }
 
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Generated {generated.Count} option symbols");
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Strike range = {atmStrike - (30 * stepSize)} to {atmStrike + (30 * stepSize)}");
 
-                // Generate straddles_config.json from the generated options
-                GenerateStraddlesConfig(generated, selectedUnderlying, selectedExpiry);
-
-                // Fire event to notify subscribers
+                // Fire event to notify subscribers (Option Chain Window)
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Invoking OptionsGenerated event...");
                 OptionsGenerated?.Invoke(generated);
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Completed successfully");
             }
             catch (Exception ex)
             {
-                Logger.Error($"[MarketAnalyzerLogic] GenerateOptions(): Exception occurred - {ex.Message}", ex);
+                Logger.Error($"[MarketAnalyzerLogic] GenerateOptions(): Exception - {ex.Message}", ex);
                 StatusUpdated?.Invoke("Error generating options: " + ex.Message);
-                _optionsAlreadyGenerated = false; // Allow retry on error
+                _optionsAlreadyGenerated = false;
             }
         }
-        
-        /// <summary>
-        /// Creates a MappedInstrument with the correct Zerodha symbol format.
-        ///
-        /// Zerodha Option Symbol Formats:
-        /// - Monthly Expiry: UNDERLYING + YY + MMM + STRIKE + TYPE (e.g., NIFTY25DEC24700CE)
-        /// - Weekly Expiry (Jan-Sep): UNDERLYING + YY + M + DD + STRIKE + TYPE (e.g., NIFTY25D2924700CE where M=1-9)
-        /// - Weekly Expiry (Oct-Dec): UNDERLYING + YY + X + DD + STRIKE + TYPE (e.g., NIFTY25O0324700CE where X=O/N/D)
-        /// </summary>
-        private MappedInstrument CreateOption(string underlying, DateTime expiry, double strike, string type, int step, bool isMonthlyExpiry)
+
+        private MappedInstrument CreateOption(string underlying, DateTime expiry, double strike, string type, long token, string symbol, string segment, int lotSize, bool isMonthlyExpiry)
         {
-            string zerodhaSymbol;
-
-            if (isMonthlyExpiry)
-            {
-                // Monthly format: UNDERLYING + YY + MMM + STRIKE + TYPE
-                // Example: NIFTY25DEC24700CE, BANKNIFTY25OCT40000CE
-                string monthAbbr = expiry.ToString("MMM").ToUpper();
-                zerodhaSymbol = $"{underlying}{expiry:yy}{monthAbbr}{strike:F0}{type}";
-            }
-            else
-            {
-                // Weekly format depends on month
-                int month = expiry.Month;
-                int day = expiry.Day;
-                int year = expiry.Year % 100; // 2-digit year
-
-                string monthIndicator;
-                if (month >= 1 && month <= 9)
-                {
-                    // Jan-Sep: Use single digit 1-9
-                    // Example: NIFTY25D2924700CE (D=12=December? NO, this is wrong)
-                    // Actually: NIFTY + 25 + 1 (for Jan) + 29 (day) + strike + type
-                    // Wait, let me re-read: BANKNIFTY+23+9+20+40000+CE means Sep 20
-                    monthIndicator = month.ToString();
-                }
-                else
-                {
-                    // Oct-Dec: Use O, N, D respectively
-                    // Month 10=O, 11=N, 12=D
-                    monthIndicator = month switch
-                    {
-                        10 => "O",
-                        11 => "N",
-                        12 => "D",
-                        _ => month.ToString() // Fallback
-                    };
-                }
-
-                // Weekly format: UNDERLYING + YY + M + DD + STRIKE + TYPE
-                // Day is always 2 digits (padded with 0 if needed)
-                zerodhaSymbol = $"{underlying}{year}{monthIndicator}{day:D2}{strike:F0}{type}";
-            }
-
-            // NT symbol uses the Zerodha symbol directly
-            string ntSymbol = zerodhaSymbol;
-
-            Logger.Debug($"[MarketAnalyzerLogic] CreateOption(): Created {ntSymbol} - {underlying} {expiry:yyyy-MM-dd} {strike} {type} (Monthly={isMonthlyExpiry})");
-
             return new MappedInstrument
             {
-                symbol = ntSymbol,
-                zerodhaSymbol = zerodhaSymbol,
+                symbol = symbol,
+                zerodhaSymbol = symbol,
                 underlying = underlying,
                 expiry = expiry,
                 strike = strike,
                 option_type = type,
-                segment = underlying == "SENSEX" ? "BFO-OPT" : "NFO-OPT",
+                segment = segment,
                 tick_size = 0.05,
-                lot_size = Helpers.SymbolHelper.GetLotSize(underlying), // Get from cache or defaults
-                instrument_token = 0 // Will be looked up by SubscriptionManager
+                lot_size = lotSize,
+                instrument_token = token
             };
         }
 
@@ -916,231 +736,150 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             return nearest;
         }
 
-        private bool IsSameDay(DateTime d1, DateTime d2)
+        private bool IsMonthlyExpiry(DateTime expiry, List<DateTime> allExpiries)
         {
-            return d1.Date == d2.Date;
+            var sameMonthExpiries = allExpiries
+                .Where(e => e.Year == expiry.Year && e.Month == expiry.Month)
+                .OrderBy(e => e)
+                .ToList();
+
+            if (sameMonthExpiries.Count == 0) return true;
+
+            DateTime lastExpiry = sameMonthExpiries.Last();
+            return expiry.Date == lastExpiry.Date;
         }
 
         /// <summary>
-        /// Generates straddles_config.json from the generated options
-        /// Creates straddle definitions for each strike (CE + PE pair)
+        /// Resets the option generation flag to allow re-generation
         /// </summary>
-        private void GenerateStraddlesConfig(List<MappedInstrument> options, string underlying, DateTime expiry)
+        public void ResetOptionsGeneration()
         {
-            try
+            _optionsAlreadyGenerated = false;
+            Logger.Info("[MarketAnalyzerLogic] ResetOptionsGeneration(): Options can now be regenerated");
+        }
+    }
+
+    public class TickerData : INotifyPropertyChanged
+    {
+        private string _symbol;
+        private double _currentPrice;
+        private double _open;
+        private double _high;
+        private double _low;
+        private double _close;
+        private double _netChange;
+        private double _netChangePercent;
+        private double _projectedOpen;
+        private DateTime _lastUpdate;
+
+        public string Symbol { get => _symbol; set { _symbol = value; OnPropertyChanged(); } }
+        public double CurrentPrice
+        {
+            get => _currentPrice;
+            set
             {
-                Logger.Info($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Creating straddles for {underlying} expiry {expiry:yyyy-MM-dd}");
-
-                // Group options by strike
-                var strikeGroups = options
-                    .Where(o => o.strike.HasValue)
-                    .GroupBy(o => o.strike.Value)
-                    .OrderBy(g => g.Key);
-
-                var straddles = new List<object>();
-
-                foreach (var group in strikeGroups)
+                _currentPrice = value;
+                _lastUpdate = DateTime.Now;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(LastPriceDisplay));
+                OnPropertyChanged(nameof(LastUpdateTimeDisplay));
+                OnPropertyChanged(nameof(IsPositive));
+                // Recompute change if Close is available
+                if (_close > 0)
                 {
-                    var ce = group.FirstOrDefault(o => o.option_type == "CE");
-                    var pe = group.FirstOrDefault(o => o.option_type == "PE");
-
-                    if (ce != null && pe != null)
-                    {
-                        // Create synthetic straddle symbol: NIFTY25DEC23400_STRDL
-                        string monthAbbr = expiry.ToString("MMM").ToUpper();
-                        string syntheticSymbol = $"{underlying}{expiry:yy}{monthAbbr}{group.Key:F0}_STRDL";
-
-                        straddles.Add(new
-                        {
-                            SyntheticSymbolNinjaTrader = syntheticSymbol,
-                            CESymbol = ce.symbol,
-                            PESymbol = pe.symbol
-                        });
-                    }
+                    NetChange = _currentPrice - _close;
+                    NetChangePercent = (NetChange / _close) * 100;
                 }
-
-                // Write to straddles_config.json (synchronized to prevent concurrent access errors)
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "straddles_config.json");
-
-                lock (_straddlesConfigLock)
-                {
-                    // Ensure directory exists
-                    string dir = Path.GetDirectoryName(configPath);
-                    if (!Directory.Exists(dir))
-                    {
-                        Directory.CreateDirectory(dir);
-                    }
-
-                    var config = new { Straddles = straddles };
-                    string json = JsonConvert.SerializeObject(config, Formatting.Indented);
-                    File.WriteAllText(configPath, json);
-
-                    Logger.Info($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Written {straddles.Count} straddles to {configPath}");
-                }
-
-                // Reload straddle configurations in the service (outside lock to avoid deadlock)
-                try
-                {
-                    var adapter = Connector.Instance.GetAdapter() as ZerodhaAdapter;
-                    adapter?.SyntheticStraddleService?.ReloadConfigurations();
-                    Logger.Info("[MarketAnalyzerLogic] GenerateStraddlesConfig(): Triggered straddle config reload");
-                }
-                catch (Exception reloadEx)
-                {
-                    Logger.Warn($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Could not reload straddle config - {reloadEx.Message}");
-                }
-
-                // Create NinjaTrader instruments for synthetic straddles
-                CreateSyntheticStraddleInstruments(strikeGroups, underlying, expiry);
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[MarketAnalyzerLogic] GenerateStraddlesConfig(): Exception - {ex.Message}", ex);
             }
         }
 
-        /// <summary>
-        /// Creates NinjaTrader instruments for synthetic straddle symbols
-        /// </summary>
-        private void CreateSyntheticStraddleInstruments(IOrderedEnumerable<IGrouping<double, MappedInstrument>> strikeGroups, string underlying, DateTime expiry)
+        public double Open { get => _open; set { _open = value; OnPropertyChanged(); } }
+        public double High { get => _high; set { _high = value; OnPropertyChanged(); } }
+        public double Low { get => _low; set { _low = value; OnPropertyChanged(); } }
+        public double Close
         {
-            try
+            get => _close;
+            set
             {
-                Logger.Info($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Creating NT instruments for {underlying} straddles");
-                int created = 0;
-
-                foreach (var group in strikeGroups)
+                _close = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(PriorCloseDisplay));
+                // Recompute change when Close is set
+                if (_currentPrice > 0 && _close > 0)
                 {
-                    var ce = group.FirstOrDefault(o => o.option_type == "CE");
-                    var pe = group.FirstOrDefault(o => o.option_type == "PE");
-
-                    if (ce != null && pe != null)
-                    {
-                        string monthAbbr = expiry.ToString("MMM").ToUpper();
-                        string straddleSymbol = $"{underlying}{expiry:yy}{monthAbbr}{group.Key:F0}_STRDL";
-
-                        // Create instrument definition for the synthetic straddle
-                        var instrumentDef = new InstrumentDefinition
-                        {
-                            Symbol = straddleSymbol,
-                            BrokerSymbol = straddleSymbol,
-                            Segment = underlying == "SENSEX" ? "BSE" : "NSE",
-                            MarketType = MarketType.UsdM // Synthetic options use UsdM
-                        };
-
-                        // Create instrument on UI thread
-                        NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
-                        {
-                            try
-                            {
-                                bool success = InstrumentManager.Instance.CreateInstrument(instrumentDef, out string ntName);
-                                if (success)
-                                {
-                                    Logger.Debug($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Created NT instrument {ntName}");
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Logger.Error($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Error creating {straddleSymbol} - {ex.Message}");
-                            }
-                        });
-
-                        created++;
-                    }
+                    NetChange = _currentPrice - _close;
+                    NetChangePercent = (NetChange / _close) * 100;
                 }
-
-                Logger.Info($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Queued {created} synthetic straddle instruments for creation");
-
-                // Create dynamic instrument list after a delay to allow instruments to be created
-                Task.Delay(2000).ContinueWith(_ =>
-                {
-                    NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
-                    {
-                        CreateDynamicInstrumentList(strikeGroups, underlying, expiry);
-                    });
-                });
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[MarketAnalyzerLogic] CreateSyntheticStraddleInstruments(): Exception - {ex.Message}", ex);
             }
         }
 
-        /// <summary>
-        /// Creates a dynamic NinjaTrader InstrumentList containing all generated straddle instruments.
-        /// List naming: SX_DDMMMYY for SENSEX, NF_DDMMMYY for NIFTY
-        /// </summary>
-        private void CreateDynamicInstrumentList(IOrderedEnumerable<IGrouping<double, MappedInstrument>> strikeGroups, string underlying, DateTime expiry)
+        // NetChange and NetChangePercent - can be set directly from API or computed
+        public double NetChange
         {
-            try
+            get => _netChange;
+            set { _netChange = value; OnPropertyChanged(); OnPropertyChanged(nameof(NetChangeDisplay)); OnPropertyChanged(nameof(IsPositive)); }
+        }
+
+        public double NetChangePercent
+        {
+            get => _netChangePercent;
+            set { _netChangePercent = value; OnPropertyChanged(); OnPropertyChanged(nameof(NetChangePercentDisplay)); }
+        }
+
+        public double ProjectedOpen
+        {
+            get => _projectedOpen;
+            set
             {
-                // Create list name: SX_24DEC24 for SENSEX, NF_24DEC24 for NIFTY
-                string prefix = underlying == "SENSEX" ? "SX" : "NF";
-                string listName = $"{prefix}_{expiry:ddMMMyy}".ToUpper();
-
-                Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Creating instrument list '{listName}'");
-
-                // Check if list already exists and remove it
-                var existingList = InstrumentList.All.FirstOrDefault(l => l.Name == listName);
-                if (existingList != null)
-                {
-                    existingList.Instruments.Clear();
-                    Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Cleared existing list '{listName}'");
-                }
-                else
-                {
-                    // Create new list
-                    existingList = new InstrumentList { Name = listName };
-                    Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Created new list '{listName}'");
-                }
-
-                int addedCount = 0;
-
-                // Add straddle instruments to the list
-                foreach (var group in strikeGroups)
-                {
-                    var ce = group.FirstOrDefault(o => o.option_type == "CE");
-                    var pe = group.FirstOrDefault(o => o.option_type == "PE");
-
-                    if (ce != null && pe != null)
-                    {
-                        string monthAbbr = expiry.ToString("MMM").ToUpper();
-                        string straddleSymbol = $"{underlying}{expiry:yy}{monthAbbr}{group.Key:F0}_STRDL";
-
-                        // Find the instrument in NinjaTrader's instrument database
-                        var instrument = Instrument.All.FirstOrDefault(i =>
-                            i.FullName.Equals(straddleSymbol, StringComparison.OrdinalIgnoreCase) ||
-                            i.MasterInstrument.Name.Equals(straddleSymbol, StringComparison.OrdinalIgnoreCase));
-
-                        if (instrument != null)
-                        {
-                            if (!existingList.Instruments.Contains(instrument))
-                            {
-                                existingList.Instruments.Add(instrument);
-                                addedCount++;
-                                Logger.Debug($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Added {straddleSymbol} to list");
-                            }
-                        }
-                        else
-                        {
-                            Logger.Debug($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Instrument '{straddleSymbol}' not found in database");
-                        }
-                    }
-                }
-
-                Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Added {addedCount} instruments to list '{listName}'");
-
-                // Store reference for use by Market Analyzer / other components
-                // Note: Programmatically created InstrumentLists may not appear in Control Center GUI
-                // but can be accessed via InstrumentList.All for use in scripts
-                _currentInstrumentList = existingList;
-                Logger.Info($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): List '{listName}' ready for use");
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[MarketAnalyzerLogic] CreateDynamicInstrumentList(): Exception - {ex.Message}", ex);
+                _projectedOpen = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(ProjectedOpenDisplay));
             }
         }
+
+        // Alias properties for compatibility
+        public double LastPrice { get => CurrentPrice; set => CurrentPrice = value; }
+        public DateTime LastUpdateTime { get => _lastUpdate; set { _lastUpdate = value; OnPropertyChanged(); } }
+
+        // Display properties
+        public string LastPriceDisplay => CurrentPrice.ToString("F2");
+        public string PriorCloseDisplay => Close > 0 ? Close.ToString("F2") : "-";
+        public string NetChangeDisplay => NetChange != 0 ? $"{NetChange:+0.00;-0.00;0.00}" : "---";
+        public string NetChangePercentDisplay => NetChangePercent != 0 ? $"{NetChangePercent:+0.00;-0.00;0.00}%" : "---";
+        public string LastUpdateTimeDisplay => _lastUpdate.ToString("HH:mm:ss");
+        public bool IsPositive => NetChange >= 0;
+        public string ProjectedOpenDisplay => ProjectedOpen > 0 ? ProjectedOpen.ToString("F2") : "-";
+
+        public void UpdatePrice(double price)
+        {
+            if (Open == 0) Open = price;
+            if (price > High) High = price;
+            if (Low == 0 || price < Low) Low = price;
+            CurrentPrice = price;
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+        protected void OnPropertyChanged([CallerMemberName] string name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
+
+    /// <summary>
+    /// Data class for System.Reactive price update events
+    /// </summary>
+    public class TickerPriceUpdate
+    {
+        public string TickerSymbol { get; set; }
+        public double Price { get; set; }
+        public double Close { get; set; }
+        public double NetChangePercent { get; set; }
+    }
+
+    /// <summary>
+    /// Data class for System.Reactive projected open calculation events
+    /// </summary>
+    public class ProjectedOpenUpdate
+    {
+        public double NiftyProjectedOpen { get; set; }
+        public double SensexProjectedOpen { get; set; }
+        public double GiftChangePercent { get; set; }
     }
 }

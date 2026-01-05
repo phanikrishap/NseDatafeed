@@ -151,7 +151,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 _log.Debug($"Processing historical request for {request.Symbol} ({request.FromDate} to {request.ToDate})");
 
                 // Get the instrument token
-                long instrumentToken = await _instrumentManager.GetInstrumentToken(request.Symbol);
+                long instrumentToken = _instrumentManager.GetInstrumentToken(request.Symbol);
                 if (instrumentToken == 0)
                 {
                     _log.Error($"Could not find instrument token for {request.Symbol}");

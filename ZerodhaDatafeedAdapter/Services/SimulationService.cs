@@ -663,7 +663,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
                 if (cePrice > 0 && pePrice > 0)
                 {
-                    var straddle = cePrice + pePrice;
+                    var straddle = (decimal)cePrice + (decimal)pePrice;
                     if (straddle < minStraddle)
                     {
                         minStraddle = straddle;

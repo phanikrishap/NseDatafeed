@@ -7,178 +7,57 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using ZerodhaDatafeedAdapter.Helpers;
-using ZerodhaDatafeedAdapter.Logging;
-using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.MarketData;
-using ZerodhaDatafeedAdapter.Services.Configuration;
-using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.Zerodha;
 
 namespace ZerodhaDatafeedAdapter.Services.WebSocket
 {
-    // Note: WebSocketConnectionState enum has been extracted to ZerodhaDatafeedAdapter.Models namespace
-
     /// <summary>
     /// Manages a single shared WebSocket connection for all symbol subscriptions.
-    /// Zerodha allows 3 connections with up to 1000 symbols each.
-    /// This service uses one connection for all symbols (typically &lt;100).
-    /// Uses state machine pattern for reliable connection management.
+    /// Orchestrates connection lifecycle, heartbeats, and subscription requests.
+    /// Uses WebSocketManager for connection management (same as original).
     /// </summary>
     public class SharedWebSocketService : IDisposable
     {
-        private static SharedWebSocketService _instance;
-        private static readonly object _instanceLock = new object();
+        private static readonly Lazy<SharedWebSocketService> _instance = new Lazy<SharedWebSocketService>(() => new SharedWebSocketService());
+        public static SharedWebSocketService Instance => _instance.Value;
 
-        // Shared WebSocket connection
-        private ClientWebSocket _sharedWebSocket;
-        private CancellationTokenSource _connectionCts;
-        private Task _messageLoopTask;
-
-        // State machine - replaces boolean flags for atomic transitions
-        private int _connectionState = (int)WebSocketConnectionState.Disconnected;
-
-        // ═══════════════════════════════════════════════════════════════════
-        // TIMEOUT & BACKOFF CONFIGURATION (centralized - no magic numbers)
-        // ═══════════════════════════════════════════════════════════════════
-
-        /// <summary>Timeout for access token ready wait (ms)</summary>
-        private const int TOKEN_READY_TIMEOUT_MS = 30000;
-
-        /// <summary>Timeout for general connection wait (ms)</summary>
-        private const int CONNECTION_TIMEOUT_MS = 30000;
-
-        /// <summary>Timeout for WebSocket close during reconnect (ms)</summary>
-        private const int CLOSE_TIMEOUT_MS = 1000;
-
-        /// <summary>Brief delay after message receive error (ms)</summary>
-        private const int ERROR_RECOVERY_DELAY_MS = 100;
-
-        /// <summary>Initial backoff delay for reconnection (ms)</summary>
-        private const int BACKOFF_INITIAL_MS = 1000;
-
-        /// <summary>Maximum backoff delay for reconnection (ms)</summary>
-        private const int BACKOFF_MAX_MS = 16000;
-
-        /// <summary>Maximum retry attempts before giving up (0 = infinite)</summary>
-        private const int MAX_RETRY_ATTEMPTS = 0; // Infinite retries
-
-        // Current backoff state
-        private int _currentBackoffMs = BACKOFF_INITIAL_MS;
-        private int _retryAttempts = 0;
-
-        // TCS for waiting on backoff completion (event-driven, no polling)
-        private TaskCompletionSource<bool> _backoffCompleteTcs;
-
-        private readonly SemaphoreSlim _connectionSemaphore = new SemaphoreSlim(1, 1);
-
-        // Semaphore to serialize WebSocket send operations (WebSocket only allows one outstanding SendAsync at a time)
-        private readonly SemaphoreSlim _sendSemaphore = new SemaphoreSlim(1, 1);
-
-        // Subscription management
+        private readonly WebSocketManager _webSocketManager;
         private readonly ConcurrentDictionary<int, string> _tokenToSymbolMap = new ConcurrentDictionary<int, string>();
         private readonly ConcurrentDictionary<string, int> _symbolToTokenMap = new ConcurrentDictionary<string, int>();
         private readonly ConcurrentDictionary<string, SymbolSubscription> _subscriptions = new ConcurrentDictionary<string, SymbolSubscription>();
-
-        // Pending subscriptions (queued while connecting)
         private readonly ConcurrentQueue<(string symbol, int token)> _pendingSubscriptions = new ConcurrentQueue<(string, int)>();
+        private readonly SemaphoreSlim _sendSemaphore = new SemaphoreSlim(1, 1);
+        private readonly SemaphoreSlim _connectionSemaphore = new SemaphoreSlim(1, 1);
+
+        private ClientWebSocket _webSocket;
+        private CancellationTokenSource _cts;
+        private Task _messageLoopTask;
+        private int _connectionState = (int)WebSocketConnectionState.Disconnected;
         private bool _isProcessingPending = false;
 
-        // Dependencies
-        private readonly WebSocketManager _webSocketManager;
-        private readonly InstrumentManager _instrumentManager;
-
-        // Event for tick data
         public event Action<string, ZerodhaTickData> TickReceived;
-
-        // Event fired when WebSocket connection is established and ready for subscriptions
-        // Subscribers can use this to trigger pending subscriptions reliably
         public event Action ConnectionReady;
-
-        // Event fired when WebSocket connection is lost
         public event Action ConnectionLost;
 
-        // TaskCompletionSource for robust connection ready signaling (replaces fire-once events)
-        // Unlike events, late subscribers can await this and get the result
-        private TaskCompletionSource<bool> _connectionReadyTcs = new TaskCompletionSource<bool>();
-        private readonly object _tcsLock = new object();
-
-        /// <summary>
-        /// Task that completes when connection is established.
-        /// Late subscribers can await this - unlike events, they won't miss it.
-        /// </summary>
-        public Task<bool> WhenConnectionReady => _connectionReadyTcs.Task;
-
-        /// <summary>
-        /// Resets the connection ready TCS for new connection attempts.
-        /// Called when connection is lost to allow new wait cycles.
-        /// </summary>
-        private void ResetConnectionReadyTcs()
-        {
-            lock (_tcsLock)
-            {
-                // Only reset if already completed (allows new wait cycle)
-                if (_connectionReadyTcs.Task.IsCompleted)
-                {
-                    _connectionReadyTcs = new TaskCompletionSource<bool>();
-                    Logger.Debug("[SharedWS] ConnectionReady TCS reset for new connection cycle");
-                }
-            }
-        }
-
-        /// <summary>
-        /// Signals connection ready via TCS (thread-safe, idempotent)
-        /// </summary>
-        private void SignalConnectionReady(bool success)
-        {
-            lock (_tcsLock)
-            {
-                _connectionReadyTcs.TrySetResult(success);
-            }
-        }
-
-        /// <summary>
-        /// Gets the singleton instance
-        /// </summary>
-        public static SharedWebSocketService Instance
-        {
-            get
-            {
-                if (_instance == null)
-                {
-                    lock (_instanceLock)
-                    {
-                        if (_instance == null)
-                            _instance = new SharedWebSocketService();
-                    }
-                }
-                return _instance;
-            }
-        }
+        public bool IsConnected => CurrentState == WebSocketConnectionState.Connected && _webSocket?.State == System.Net.WebSockets.WebSocketState.Open;
+        public int SubscriptionCount => _subscriptions.Count;
 
         private SharedWebSocketService()
         {
             _webSocketManager = WebSocketManager.Instance;
-            _instrumentManager = InstrumentManager.Instance;
             Logger.Info("[SharedWS] SharedWebSocketService initialized");
         }
 
         #region State Machine Helpers
 
-        /// <summary>
-        /// Gets the current connection state (thread-safe read)
-        /// </summary>
         private WebSocketConnectionState CurrentState => (WebSocketConnectionState)Volatile.Read(ref _connectionState);
 
-        /// <summary>
-        /// Attempts atomic state transition. Returns true if transition succeeded.
-        /// </summary>
         private bool TryTransition(WebSocketConnectionState fromState, WebSocketConnectionState toState)
         {
-            int result = Interlocked.CompareExchange(
-                ref _connectionState,
-                (int)toState,
-                (int)fromState);
+            int result = Interlocked.CompareExchange(ref _connectionState, (int)toState, (int)fromState);
             bool success = result == (int)fromState;
             if (success)
             {
@@ -187,332 +66,119 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             return success;
         }
 
-        /// <summary>
-        /// Forces state transition (use sparingly - mainly for cleanup/dispose)
-        /// Logs a warning since this bypasses normal state machine validation.
-        /// </summary>
         private void ForceState(WebSocketConnectionState newState)
         {
             var oldState = (WebSocketConnectionState)Interlocked.Exchange(ref _connectionState, (int)newState);
             Logger.Info($"[SharedWS] State: {oldState} -> {newState} (forced)");
         }
 
-        /// <summary>
-        /// Transitions to Disconnected state from any valid source state.
-        /// Returns true if transition succeeded.
-        /// </summary>
-        private bool TransitionToDisconnected()
-        {
-            var current = CurrentState;
-            // Valid transitions to Disconnected: Connecting, Connected, Reconnecting
-            if (current == WebSocketConnectionState.Connected ||
-                current == WebSocketConnectionState.Connecting ||
-                current == WebSocketConnectionState.Reconnecting)
-            {
-                return TryTransition(current, WebSocketConnectionState.Disconnected);
-            }
-            // Already disconnected or disposing - no-op
-            if (current == WebSocketConnectionState.Disconnected)
-                return true;
-            // Disposing - don't change state
-            return false;
-        }
-
-        /// <summary>
-        /// Checks if currently in a connected or connecting state (including backoff)
-        /// </summary>
-        private bool IsConnectedOrConnecting => CurrentState == WebSocketConnectionState.Connected ||
-                                                  CurrentState == WebSocketConnectionState.Connecting ||
-                                                  CurrentState == WebSocketConnectionState.Reconnecting ||
-                                                  CurrentState == WebSocketConnectionState.BackingOff;
-
-        /// <summary>
-        /// Resets backoff state after successful connection.
-        /// Called when connection is established successfully.
-        /// </summary>
-        private void ResetBackoff()
-        {
-            _currentBackoffMs = BACKOFF_INITIAL_MS;
-            _retryAttempts = 0;
-            Logger.Debug("[SharedWS] Backoff state reset");
-        }
-
-        /// <summary>
-        /// Calculates next backoff delay with exponential growth.
-        /// Pattern: 1s → 2s → 4s → 8s → 16s (capped)
-        /// </summary>
-        private int GetNextBackoffDelay()
-        {
-            int delay = _currentBackoffMs;
-            _currentBackoffMs = Math.Min(_currentBackoffMs * 2, BACKOFF_MAX_MS);
-            _retryAttempts++;
-            return delay;
-        }
-
-        /// <summary>
-        /// Transitions to BackingOff state and waits for the backoff period.
-        /// Uses TCS for event-driven waiting (no polling loop).
-        /// Returns false if max retries exceeded or disposal requested.
-        /// </summary>
-        private async Task<bool> EnterBackoffAndWaitAsync(CancellationToken token)
-        {
-            // Check max retries (0 = infinite)
-            if (MAX_RETRY_ATTEMPTS > 0 && _retryAttempts >= MAX_RETRY_ATTEMPTS)
-            {
-                Logger.Warn($"[SharedWS] Max retry attempts ({MAX_RETRY_ATTEMPTS}) exceeded, giving up");
-                TransitionToDisconnected();
-                return false;
-            }
-
-            int backoffMs = GetNextBackoffDelay();
-
-            // Transition to BackingOff state
-            var current = CurrentState;
-            if (current == WebSocketConnectionState.Disposing)
-            {
-                return false;
-            }
-
-            // Force to BackingOff (valid from Connected, Connecting, Reconnecting, or Disconnected after failure)
-            ForceState(WebSocketConnectionState.BackingOff);
-
-            Logger.Info($"[SharedWS] Backing off for {backoffMs}ms before retry (attempt {_retryAttempts})");
-
-            // Create TCS for this backoff period
-            _backoffCompleteTcs = new TaskCompletionSource<bool>();
-
-            try
-            {
-                // Wait for backoff period using Task.Delay (interruptible via token)
-                await Task.Delay(backoffMs, token);
-
-                // Backoff complete - transition to Reconnecting
-                if (TryTransition(WebSocketConnectionState.BackingOff, WebSocketConnectionState.Reconnecting))
-                {
-                    _backoffCompleteTcs?.TrySetResult(true);
-                    return true;
-                }
-                else
-                {
-                    // State changed during backoff (e.g., Disposing)
-                    _backoffCompleteTcs?.TrySetResult(false);
-                    return false;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                Logger.Debug("[SharedWS] Backoff cancelled");
-                _backoffCompleteTcs?.TrySetResult(false);
-                return false;
-            }
-        }
-
         #endregion
 
         /// <summary>
-        /// Waits for WebSocket connection to be ready with timeout.
-        /// Uses TaskCompletionSource pattern - safe for late callers.
-        /// Returns true if connected, false if timeout or failure.
-        /// </summary>
-        /// <param name="timeoutMs">Timeout in milliseconds (default 30 seconds)</param>
-        /// <param name="cancellationToken">Optional cancellation token</param>
-        public async Task<bool> WaitForConnectionAsync(int timeoutMs = 30000, CancellationToken cancellationToken = default)
-        {
-            // Fast path - already connected
-            if (IsConnected && _connectionReadyTcs.Task.IsCompleted && _connectionReadyTcs.Task.Result)
-            {
-                Logger.Debug("[SharedWS] WaitForConnectionAsync: Already connected (fast path)");
-                return true;
-            }
-
-            // First, try to initiate connection if not already connecting
-            if (CurrentState == WebSocketConnectionState.Disconnected)
-            {
-                Logger.Info("[SharedWS] WaitForConnectionAsync: Initiating connection...");
-                _ = EnsureConnectedAsync();
-            }
-
-            // Wait using TCS with timeout
-            Logger.Info($"[SharedWS] WaitForConnectionAsync: Waiting up to {timeoutMs}ms for connection...");
-            try
-            {
-                using (var timeoutCts = new CancellationTokenSource(timeoutMs))
-                using (var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token))
-                {
-                    var timeoutTask = Task.Delay(Timeout.Infinite, linkedCts.Token);
-                    var completedTask = await Task.WhenAny(_connectionReadyTcs.Task, timeoutTask);
-
-                    if (completedTask == _connectionReadyTcs.Task)
-                    {
-                        var result = await _connectionReadyTcs.Task;
-                        Logger.Info($"[SharedWS] WaitForConnectionAsync: TCS completed with result={result}");
-                        return result;
-                    }
-                    else
-                    {
-                        // Check if it was user cancellation vs timeout
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            Logger.Warn("[SharedWS] WaitForConnectionAsync: Cancelled by caller");
-                            return false;
-                        }
-                        Logger.Warn($"[SharedWS] WaitForConnectionAsync: Timeout after {timeoutMs}ms, state={CurrentState}");
-                        return false;
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                Logger.Warn("[SharedWS] WaitForConnectionAsync: Cancelled");
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[SharedWS] WaitForConnectionAsync error: {ex.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Ensures the WebSocket connection is established.
-        /// Uses TCS-based waiting instead of polling loops.
+        /// Ensures the WebSocket connection is established (uses WebSocketManager internally).
         /// </summary>
         public async Task<bool> EnsureConnectedAsync()
         {
             var state = CurrentState;
 
             // Fast path - already connected
-            if (state == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
+            if (state == WebSocketConnectionState.Connected && _webSocket?.State == System.Net.WebSockets.WebSocketState.Open)
                 return true;
 
             // If disposing, reject
             if (state == WebSocketConnectionState.Disposing)
                 return false;
 
-            // If already connecting/reconnecting/backing off, wait for completion via TCS
-            // This replaces the old polling loop with event-driven waiting
-            if (state == WebSocketConnectionState.Connecting ||
-                state == WebSocketConnectionState.Reconnecting ||
-                state == WebSocketConnectionState.BackingOff)
+            // If already connecting/reconnecting, wait for it
+            if (state == WebSocketConnectionState.Connecting || state == WebSocketConnectionState.Reconnecting)
             {
-                Logger.Debug($"[SharedWS] EnsureConnectedAsync: Connection in progress (state={state}), waiting via TCS...");
-                return await WaitForConnectionAsync(timeoutMs: CONNECTION_TIMEOUT_MS);
+                for (int i = 0; i < 100; i++)
+                {
+                    await Task.Delay(100);
+                    state = CurrentState;
+                    if (state == WebSocketConnectionState.Connected && _webSocket?.State == System.Net.WebSockets.WebSocketState.Open)
+                        return true;
+                    if (state != WebSocketConnectionState.Connecting && state != WebSocketConnectionState.Reconnecting)
+                        break;
+                }
+                return CurrentState == WebSocketConnectionState.Connected && _webSocket?.State == System.Net.WebSockets.WebSocketState.Open;
             }
 
             return await ConnectAsync();
         }
 
-        /// <summary>
-        /// Establishes the WebSocket connection
-        /// </summary>
+        public async Task<bool> WaitForConnectionAsync(int timeoutMs)
+        {
+            // First ensure connection is initiated
+            var connectTask = EnsureConnectedAsync();
+
+            // Wait for connection with timeout
+            var completedTask = await Task.WhenAny(connectTask, Task.Delay(timeoutMs));
+
+            return IsConnected;
+        }
+
         private async Task<bool> ConnectAsync(bool isReconnect = false)
         {
-            StartupLogger.LogWebSocketPhase(isReconnect ? "Reconnecting" : "Connecting", true, "Starting WebSocket connection...");
-
-            // Reset TCS for new connection cycle (allows new waiters)
-            ResetConnectionReadyTcs();
-
-            // Attempt state transition: Disconnected -> Connecting (or Disconnected -> Reconnecting)
             var targetState = isReconnect ? WebSocketConnectionState.Reconnecting : WebSocketConnectionState.Connecting;
             if (!TryTransition(WebSocketConnectionState.Disconnected, targetState))
             {
                 var current = CurrentState;
-                // If already connected, return success
-                if (current == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
+                if (current == WebSocketConnectionState.Connected && _webSocket?.State == System.Net.WebSockets.WebSocketState.Open)
                     return true;
-                // If already connecting, wait for it via TCS
                 if (current == WebSocketConnectionState.Connecting || current == WebSocketConnectionState.Reconnecting)
                 {
-                    Logger.Debug("[SharedWS] Connection already in progress, waiting via TCS...");
-                    return await WaitForConnectionAsync(timeoutMs: CONNECTION_TIMEOUT_MS);
+                    Logger.Debug("[SharedWS] Connection already in progress, waiting...");
+                    await _connectionSemaphore.WaitAsync();
+                    _connectionSemaphore.Release();
+                    return CurrentState == WebSocketConnectionState.Connected && _webSocket?.State == System.Net.WebSockets.WebSocketState.Open;
                 }
-                // If disposing, reject
                 if (current == WebSocketConnectionState.Disposing)
-                {
-                    SignalConnectionReady(false);
                     return false;
-                }
             }
 
-            // Use semaphore to prevent concurrent connection attempts
             await _connectionSemaphore.WaitAsync();
 
             try
             {
-                // Double-check after acquiring semaphore
-                if (CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
-                {
-                    SignalConnectionReady(true);
+                if (CurrentState == WebSocketConnectionState.Connected && _webSocket?.State == System.Net.WebSockets.WebSocketState.Open)
                     return true;
-                }
 
                 // Cleanup existing connection
-                if (_sharedWebSocket != null)
+                if (_webSocket != null)
                 {
                     try
                     {
-                        if (_sharedWebSocket.State == WebSocketState.Open)
+                        if (_webSocket.State == System.Net.WebSockets.WebSocketState.Open)
                         {
-                            _sharedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Reconnecting", CancellationToken.None).Wait(CLOSE_TIMEOUT_MS);
+                            _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Reconnecting", CancellationToken.None).Wait(1000);
                         }
-                        _sharedWebSocket.Dispose();
+                        _webSocket.Dispose();
                     }
                     catch { }
-                    _sharedWebSocket = null;
+                    _webSocket = null;
                 }
 
-                if (_connectionCts != null)
+                if (_cts != null)
                 {
-                    _connectionCts.Cancel();
-                    _connectionCts.Dispose();
+                    _cts.Cancel();
+                    _cts.Dispose();
                 }
-                _connectionCts = new CancellationTokenSource();
-
-                // CRITICAL: Wait for token to be ready before connecting
-                // WebSocket URL includes the access token - must be valid!
-                StartupLogger.LogWebSocketPhase("Token Wait", true, "Waiting for access token...");
-                Logger.Info("[SharedWS] Waiting for access token to be ready...");
-                var tokenReady = await Connector.Instance.WaitForTokenReadyAsync(timeoutMs: TOKEN_READY_TIMEOUT_MS);
-                if (!tokenReady)
-                {
-                    Logger.Error("[SharedWS] Access token not ready after 30s - cannot connect WebSocket");
-                    StartupLogger.LogWebSocketFailed("Access token not ready after 30s timeout");
-                    StartupLogger.LogCriticalError("WebSocket",
-                        "Cannot connect WebSocket - access token not ready",
-                        "No market data will be received. Check token generation.");
-                    TransitionToDisconnected();
-                    SignalConnectionReady(false);
-                    return false;
-                }
-                StartupLogger.LogWebSocketPhase("Token Ready", true, "Access token validated");
-                Logger.Info("[SharedWS] Access token is ready, proceeding with WebSocket connection...");
+                _cts = new CancellationTokenSource();
 
                 Logger.Info("[SharedWS] Connecting to Zerodha WebSocket...");
-                StartupLogger.LogWebSocketPhase("Connecting", true, "Establishing WebSocket connection...");
 
-                _sharedWebSocket = _webSocketManager.CreateWebSocketClient();
-                await _webSocketManager.ConnectAsync(_sharedWebSocket);
+                // Use WebSocketManager which handles URL/credentials internally
+                _webSocket = _webSocketManager.CreateWebSocketClient();
+                await _webSocketManager.ConnectAsync(_webSocket);
 
-                // Transition to Connected state using proper state machine
-                // Try both Connecting -> Connected and Reconnecting -> Connected
-                if (!TryTransition(WebSocketConnectionState.Connecting, WebSocketConnectionState.Connected))
-                {
-                    if (!TryTransition(WebSocketConnectionState.Reconnecting, WebSocketConnectionState.Connected))
-                    {
-                        // Fallback: Force state only if above transitions failed (shouldn't happen)
-                        Logger.Warn("[SharedWS] State transition to Connected failed, forcing state");
-                        ForceState(WebSocketConnectionState.Connected);
-                    }
-                }
+                ForceState(WebSocketConnectionState.Connected);
+                Logger.Info($"[SharedWS] Connected successfully. State={_webSocket.State}");
 
-                Logger.Info($"[SharedWS] Connected successfully. State={_sharedWebSocket.State}");
-                StartupLogger.LogWebSocketConnected(_subscriptions.Count);
-
-                // Reset backoff state on successful connection
-                ResetBackoff();
+                ConnectionReady?.Invoke();
 
                 // Start message processing loop
-                _messageLoopTask = Task.Run(() => ProcessMessagesAsync(_connectionCts.Token));
+                _messageLoopTask = Task.Run(() => ProcessMessagesAsync(_cts.Token));
 
                 // Re-subscribe to any existing subscriptions
                 await ResubscribeAllAsync();
@@ -520,31 +186,12 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 // Process any pending subscriptions
                 await ProcessPendingSubscriptionsAsync();
 
-                // Signal connection ready via TCS (idempotent, safe for late callers)
-                SignalConnectionReady(true);
-
-                // Fire ConnectionReady event for backward compatibility
-                Logger.Info("[SharedWS] Firing ConnectionReady event and signaling TCS");
-                try
-                {
-                    ConnectionReady?.Invoke();
-                }
-                catch (Exception eventEx)
-                {
-                    Logger.Error($"[SharedWS] ConnectionReady event handler error: {eventEx.Message}");
-                }
-
                 return true;
             }
             catch (Exception ex)
             {
                 Logger.Error($"[SharedWS] Connection failed: {ex.Message}", ex);
-                StartupLogger.LogWebSocketFailed(ex.Message);
-                StartupLogger.LogCriticalError("WebSocket",
-                    $"WebSocket connection exception: {ex.Message}",
-                    "No market data will be received until connection is established.");
-                TransitionToDisconnected();
-                SignalConnectionReady(false);
+                ForceState(WebSocketConnectionState.Disconnected);
                 return false;
             }
             finally
@@ -574,13 +221,10 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 };
 
                 // If not connected, queue for later
-                if (CurrentState != WebSocketConnectionState.Connected || _sharedWebSocket?.State != WebSocketState.Open)
+                if (CurrentState != WebSocketConnectionState.Connected || _webSocket?.State != System.Net.WebSockets.WebSocketState.Open)
                 {
                     Logger.Info($"[SharedWS] Connection not ready (state={CurrentState}), queueing subscription for {symbol}");
-                    StartupLogger.LogSubscription(symbol, instrumentToken, isIndex, false);
                     _pendingSubscriptions.Enqueue((symbol, instrumentToken));
-
-                    // Try to connect
                     _ = EnsureConnectedAsync();
                     return true;
                 }
@@ -590,7 +234,6 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 await SendModeAsync(new List<int> { instrumentToken }, "quote");
 
                 Logger.Info($"[SharedWS] Subscribed to {symbol} (token={instrumentToken})");
-                StartupLogger.LogSubscription(symbol, instrumentToken, isIndex, true);
                 return true;
             }
             catch (Exception ex)
@@ -600,94 +243,9 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             }
         }
 
-        /// <summary>
-        /// Batch subscribes to multiple symbols
-        /// </summary>
-        public async Task<bool> BatchSubscribeAsync(List<(string symbol, int token, bool isIndex)> symbols)
-        {
-            try
-            {
-                Logger.Info($"[SharedWS] Batch subscribe request for {symbols.Count} symbols");
-
-                var tokens = new List<int>();
-                foreach (var (symbol, token, isIndex) in symbols)
-                {
-                    _tokenToSymbolMap[token] = symbol;
-                    _symbolToTokenMap[symbol] = token;
-                    _subscriptions[symbol] = new SymbolSubscription
-                    {
-                        Symbol = symbol,
-                        Token = token,
-                        IsIndex = isIndex,
-                        SubscribedAt = DateTime.UtcNow
-                    };
-                    tokens.Add(token);
-                }
-
-                if (CurrentState != WebSocketConnectionState.Connected || _sharedWebSocket?.State != WebSocketState.Open)
-                {
-                    Logger.Info($"[SharedWS] Connection not ready (state={CurrentState}), queueing {symbols.Count} subscriptions");
-                    foreach (var (symbol, token, _) in symbols)
-                    {
-                        _pendingSubscriptions.Enqueue((symbol, token));
-                    }
-                    _ = EnsureConnectedAsync();
-                    return true;
-                }
-
-                // Send batch subscription
-                await SendSubscriptionAsync(tokens, "subscribe");
-                await SendModeAsync(tokens, "quote");
-
-                Logger.Info($"[SharedWS] Batch subscribed to {tokens.Count} symbols");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[SharedWS] Batch subscribe failed: {ex.Message}", ex);
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Unsubscribes from a symbol
-        /// </summary>
-        public async Task UnsubscribeAsync(string symbol)
-        {
-            try
-            {
-                if (!_symbolToTokenMap.TryGetValue(symbol, out int token))
-                {
-                    Logger.Debug($"[SharedWS] UnsubscribeAsync: Symbol {symbol} not found in mappings");
-                    return;
-                }
-
-                Logger.Info($"[SharedWS] ACTUAL UnsubscribeAsync called for {symbol} (token={token}) - Checking if this is unexpected!");
-
-                // Remove from mappings
-                _tokenToSymbolMap.TryRemove(token, out _);
-                _symbolToTokenMap.TryRemove(symbol, out _);
-                _subscriptions.TryRemove(symbol, out _);
-
-                // Send unsubscribe message if connected
-                if (CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open)
-                {
-                    await SendSubscriptionAsync(new List<int> { token }, "unsubscribe");
-                    Logger.Info($"[SharedWS] Unsubscribed from {symbol} (token={token})");
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[SharedWS] Unsubscribe failed for {symbol}: {ex.Message}", ex);
-            }
-        }
-
-        /// <summary>
-        /// Sends subscription message for multiple tokens
-        /// </summary>
         private async Task SendSubscriptionAsync(List<int> tokens, string action)
         {
-            if (_sharedWebSocket?.State != WebSocketState.Open)
+            if (_webSocket?.State != System.Net.WebSockets.WebSocketState.Open)
             {
                 Logger.Warn($"[SharedWS] Cannot send {action} - WebSocket not open");
                 return;
@@ -698,12 +256,9 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             Logger.Debug($"[SharedWS] Sent {action} for {tokens.Count} tokens");
         }
 
-        /// <summary>
-        /// Sets the mode for multiple tokens
-        /// </summary>
         private async Task SendModeAsync(List<int> tokens, string mode)
         {
-            if (_sharedWebSocket?.State != WebSocketState.Open)
+            if (_webSocket?.State != System.Net.WebSockets.WebSocketState.Open)
             {
                 Logger.Warn($"[SharedWS] Cannot set mode - WebSocket not open");
                 return;
@@ -714,28 +269,23 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             Logger.Debug($"[SharedWS] Set {mode} mode for {tokens.Count} tokens");
         }
 
-        /// <summary>
-        /// Sends a text message over the WebSocket (serialized via semaphore)
-        /// </summary>
         private async Task SendTextMessageAsync(string message)
         {
-            // WebSocket only allows one outstanding SendAsync at a time - serialize with semaphore
-            await _sendSemaphore.WaitAsync(_connectionCts.Token);
+            await _sendSemaphore.WaitAsync(_cts.Token);
             try
             {
-                // Double-check WebSocket is still open after acquiring semaphore
-                if (_sharedWebSocket?.State != WebSocketState.Open)
+                if (_webSocket?.State != System.Net.WebSockets.WebSocketState.Open)
                 {
                     Logger.Warn("[SharedWS] SendTextMessage: WebSocket not open, skipping send");
                     return;
                 }
 
                 byte[] messageBytes = Encoding.UTF8.GetBytes(message);
-                await _sharedWebSocket.SendAsync(
+                await _webSocket.SendAsync(
                     new ArraySegment<byte>(messageBytes),
                     WebSocketMessageType.Text,
                     true,
-                    _connectionCts.Token);
+                    _cts.Token);
             }
             catch (Exception ex)
             {
@@ -748,9 +298,6 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             }
         }
 
-        /// <summary>
-        /// Resubscribes to all existing subscriptions (after reconnect)
-        /// </summary>
         private async Task ResubscribeAllAsync()
         {
             var tokens = _subscriptions.Values.Select(s => s.Token).ToList();
@@ -761,9 +308,6 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             await SendModeAsync(tokens, "quote");
         }
 
-        /// <summary>
-        /// Processes queued subscriptions
-        /// </summary>
         private async Task ProcessPendingSubscriptionsAsync()
         {
             if (_isProcessingPending) return;
@@ -790,9 +334,6 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             }
         }
 
-        /// <summary>
-        /// Main message processing loop
-        /// </summary>
         private async Task ProcessMessagesAsync(CancellationToken token)
         {
             Logger.Info("[SharedWS] Message processing loop started");
@@ -800,11 +341,11 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
 
             try
             {
-                while (_sharedWebSocket?.State == WebSocketState.Open && !token.IsCancellationRequested)
+                while (_webSocket?.State == System.Net.WebSockets.WebSocketState.Open && !token.IsCancellationRequested)
                 {
                     try
                     {
-                        var result = await _sharedWebSocket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                        var result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
 
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
@@ -824,7 +365,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                     catch (Exception ex)
                     {
                         Logger.Error($"[SharedWS] Message receive error: {ex.Message}");
-                        await Task.Delay(ERROR_RECOVERY_DELAY_MS, token);
+                        await Task.Delay(100, token);
                     }
                 }
             }
@@ -832,41 +373,23 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             {
                 ArrayPool<byte>.Shared.Return(buffer);
 
-                // Transition to Disconnected using proper state machine (if not already disposing)
                 if (CurrentState != WebSocketConnectionState.Disposing)
                 {
-                    TransitionToDisconnected();
-
-                    // Fire ConnectionLost event to notify subscribers
-                    Logger.Info("[SharedWS] Firing ConnectionLost event");
-                    try
-                    {
-                        ConnectionLost?.Invoke();
-                    }
-                    catch (Exception eventEx)
-                    {
-                        Logger.Error($"[SharedWS] ConnectionLost event handler error: {eventEx.Message}");
-                    }
+                    ForceState(WebSocketConnectionState.Disconnected);
                 }
                 Logger.Info("[SharedWS] Message processing loop ended");
+                ConnectionLost?.Invoke();
 
-                // Attempt reconnection with exponential backoff (only if not disposing)
+                // Attempt reconnection
                 if (!token.IsCancellationRequested && CurrentState != WebSocketConnectionState.Disposing)
                 {
-                    // Use state machine: Disconnected -> BackingOff -> Reconnecting -> Connected
-                    bool shouldRetry = await EnterBackoffAndWaitAsync(token);
-                    if (shouldRetry)
-                    {
-                        // State is already Reconnecting after backoff
-                        _ = ConnectAsync(isReconnect: true);
-                    }
+                    Logger.Info("[SharedWS] Attempting reconnection in 2 seconds...");
+                    await Task.Delay(2000);
+                    _ = ConnectAsync(isReconnect: true);
                 }
             }
         }
 
-        /// <summary>
-        /// Processes a binary message containing one or more tick packets
-        /// </summary>
         private void ProcessBinaryMessage(byte[] data, int length)
         {
             try
@@ -884,27 +407,16 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
 
                     if (offset + packetLength > length) break;
 
-                    // Get instrument token
                     int instrumentToken = BinaryHelper.ReadInt32BE(data, offset);
 
-                    // Find the symbol for this token
                     if (_tokenToSymbolMap.TryGetValue(instrumentToken, out string symbol))
                     {
                         _subscriptions.TryGetValue(symbol, out var subscription);
                         bool isIndex = subscription?.IsIndex ?? false;
 
-                        // DEBUG: Heartbeat for specific options to trace data flow
-                        if (!isIndex && symbol.Contains("SENSEX") && packetCount > 10) // Log occasionally
-                        {
-                             // Reduce spam via modulo if needed, or just log
-                             // Logger.Info($"[SharedWS-HEARTBEAT] Received tick for {symbol}");
-                        }
-
                         var tickData = ParseTickPacket(data, offset, packetLength, symbol, isIndex);
                         if (tickData != null)
                         {
-                            // POOL FIX: Check if there are any listeners before invoking
-                            // If no listeners, return tickData to pool immediately
                             var handler = TickReceived;
                             if (handler != null)
                             {
@@ -912,16 +424,9 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                             }
                             else
                             {
-                                // No listeners - return to pool to prevent leak
                                 ZerodhaTickDataPool.Return(tickData);
                             }
                         }
-                    }
-                    else
-                    {
-                         // Token not found in map - vital debug info
-                         if (instrumentToken > 0)
-                            Logger.Debug($"[SharedWS-DROP] Token {instrumentToken} received but not in map!");
                     }
 
                     offset += packetLength;
@@ -933,14 +438,10 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             }
         }
 
-        /// <summary>
-        /// Parses a single tick packet
-        /// </summary>
         private ZerodhaTickData ParseTickPacket(byte[] data, int offset, int packetLength, string symbol, bool isIndex)
         {
             try
             {
-                // OPTIMIZATION: Use object pool to reduce GC pressure in hot path
                 var tickData = ZerodhaTickDataPool.Rent();
                 tickData.InstrumentToken = BinaryHelper.ReadInt32BE(data, offset);
                 tickData.InstrumentIdentifier = symbol;
@@ -948,18 +449,12 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 tickData.LastTradeTime = DateTime.Now;
                 tickData.ExchangeTimestamp = DateTime.Now;
 
-                // Determine packet type by length
-                // Index packets: 8 (LTP), 28 (Quote), 32 (Full)
-                // Tradeable: 8 (LTP), 44 (Quote), 184 (Full)
-
                 if (packetLength == 8)
                 {
-                    // LTP packet
                     tickData.LastTradePrice = BinaryHelper.ReadInt32BE(data, offset + 4) / 100.0;
                 }
                 else if (isIndex && (packetLength == 28 || packetLength == 32))
                 {
-                    // Index quote/full packet
                     tickData.LastTradePrice = BinaryHelper.ReadInt32BE(data, offset + 4) / 100.0;
                     if (offset + 12 <= data.Length) tickData.High = BinaryHelper.ReadInt32BE(data, offset + 8) / 100.0;
                     if (offset + 16 <= data.Length) tickData.Low = BinaryHelper.ReadInt32BE(data, offset + 12) / 100.0;
@@ -968,7 +463,6 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                 }
                 else if (packetLength >= 44)
                 {
-                    // Quote or full packet for tradeable instruments
                     tickData.LastTradePrice = BinaryHelper.ReadInt32BE(data, offset + 4) / 100.0;
                     if (offset + 12 <= data.Length) tickData.LastTradeQty = BinaryHelper.ReadInt32BE(data, offset + 8);
                     if (offset + 16 <= data.Length) tickData.AverageTradePrice = BinaryHelper.ReadInt32BE(data, offset + 12) / 100.0;
@@ -990,42 +484,24 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             }
         }
 
-        // Note: ReadInt16BE and ReadInt32BE have been extracted to BinaryHelper class
-
-        /// <summary>
-        /// Gets the current connection status
-        /// </summary>
-        public bool IsConnected => CurrentState == WebSocketConnectionState.Connected && _sharedWebSocket?.State == WebSocketState.Open;
-
-        /// <summary>
-        /// Gets the current connection state for diagnostics
-        /// </summary>
-        public WebSocketConnectionState ConnectionState => CurrentState;
-
-        /// <summary>
-        /// Gets the number of active subscriptions
-        /// </summary>
-        public int SubscriptionCount => _subscriptions.Count;
-
         public void Dispose()
         {
-            // Set disposing state first to prevent reconnection attempts
             ForceState(WebSocketConnectionState.Disposing);
 
             try
             {
-                _connectionCts?.Cancel();
+                _cts?.Cancel();
 
-                if (_sharedWebSocket != null)
+                if (_webSocket != null)
                 {
-                    if (_sharedWebSocket.State == WebSocketState.Open)
+                    if (_webSocket.State == System.Net.WebSockets.WebSocketState.Open)
                     {
-                        _sharedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None).Wait(CLOSE_TIMEOUT_MS);
+                        _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None).Wait(1000);
                     }
-                    _sharedWebSocket.Dispose();
+                    _webSocket.Dispose();
                 }
 
-                _connectionCts?.Dispose();
+                _cts?.Dispose();
                 _connectionSemaphore?.Dispose();
                 _sendSemaphore?.Dispose();
                 Logger.Info("[SharedWS] Disposed");
@@ -1038,7 +514,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
     }
 
     /// <summary>
-    /// Represents a symbol subscription
+    /// Represents a symbol subscription with metadata
     /// </summary>
     public class SymbolSubscription
     {
@@ -1046,5 +522,17 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
         public int Token { get; set; }
         public bool IsIndex { get; set; }
         public DateTime SubscribedAt { get; set; }
+    }
+
+    /// <summary>
+    /// WebSocket connection states (matching original implementation)
+    /// </summary>
+    public enum WebSocketConnectionState
+    {
+        Disconnected,
+        Connecting,
+        Connected,
+        Reconnecting,
+        Disposing
     }
 }

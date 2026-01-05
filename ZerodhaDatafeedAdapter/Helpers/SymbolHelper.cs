@@ -174,6 +174,24 @@ namespace ZerodhaDatafeedAdapter.Helpers
         }
 
         /// <summary>
+        /// Determines if a given expiry is a monthly expiry (last Thursday of month).
+        /// Overload that accepts string-formatted expiries.
+        /// </summary>
+        public static bool IsMonthlyExpiry(DateTime expiry, System.Collections.Generic.List<string> allExpiryStrings)
+        {
+            if (allExpiryStrings == null || allExpiryStrings.Count == 0)
+                return false;
+
+            var allExpiries = allExpiryStrings
+                .Select(s => DateTime.TryParse(s, out var dt) ? dt : (DateTime?)null)
+                .Where(d => d.HasValue)
+                .Select(d => d.Value)
+                .ToList();
+
+            return IsMonthlyExpiry(expiry, allExpiries);
+        }
+
+        /// <summary>
         /// Get lot size for an underlying index.
         /// First tries to get from cached values (loaded from instrument masters DB),
         /// then falls back to hardcoded defaults.

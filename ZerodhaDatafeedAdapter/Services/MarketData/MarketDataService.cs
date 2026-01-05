@@ -169,12 +169,13 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     ws = _webSocketManager.CreateWebSocketClient();
                     await _webSocketManager.ConnectAsync(ws);
 
-                    int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
+                    long token = _instrumentManager.GetInstrumentToken(symbol);
+                    int tokenInt = (int)token;
                     await _webSocketManager.SubscribeAsync(ws, tokenInt, "full");
 
                     buffer = ArrayPool<byte>.Shared.Rent(16384);
 
-                    while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
+                    while (ws.State == System.Net.WebSockets.WebSocketState.Open && !cts.Token.IsCancellationRequested)
                     {
                         WebSocketReceiveResult result = await _webSocketManager.ReceiveMessageAsync(ws, buffer, cts.Token);
 
@@ -472,7 +473,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 await EnsureSharedWebSocketInitializedAsync(l1Subscriptions);
 
                 // Get instrument token
-                int tokenInt = (int)(await _instrumentManager.GetInstrumentToken(symbol));
+                int tokenInt = (int)_instrumentManager.GetInstrumentToken(symbol);
                 Logger.Debug($"[TICK-SHARED] Got token {tokenInt} for symbol='{symbol}'");
 
                 // Determine if this is an index

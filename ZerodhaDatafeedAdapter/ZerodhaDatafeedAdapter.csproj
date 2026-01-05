@@ -114,80 +114,6 @@
     <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Annotations\AspChildControlTypeAttribute.cs" />
-    <Compile Include="Annotations\AspDataFieldAttribute.cs" />
-    <Compile Include="Annotations\AspDataFieldsAttribute.cs" />
-    <Compile Include="Annotations\AspMethodPropertyAttribute.cs" />
-    <Compile Include="Annotations\AspMvcActionAttribute.cs" />
-    <Compile Include="Annotations\AspMvcActionSelectorAttribute.cs" />
-    <Compile Include="Annotations\AspMvcAreaAttribute.cs" />
-    <Compile Include="Annotations\AspMvcAreaMasterLocationFormatAttribute.cs" />
-    <Compile Include="Annotations\AspMvcAreaPartialViewLocationFormatAttribute.cs" />
-    <Compile Include="Annotations\AspMvcAreaViewLocationFormatAttribute.cs" />
-    <Compile Include="Annotations\AspMvcControllerAttribute.cs" />
-    <Compile Include="Annotations\AspMvcDisplayTemplateAttribute.cs" />
-    <Compile Include="Annotations\AspMvcEditorTemplateAttribute.cs" />
-    <Compile Include="Annotations\AspMvcMasterAttribute.cs" />
-    <Compile Include="Annotations\AspMvcMasterLocationFormatAttribute.cs" />
-    <Compile Include="Annotations\AspMvcModelTypeAttribute.cs" />
-    <Compile Include="Annotations\AspMvcPartialViewAttribute.cs" />
-    <Compile Include="Annotations\AspMvcPartialViewLocationFormatAttribute.cs" />
-    <Compile Include="Annotations\AspMvcSuppressViewErrorAttribute.cs" />
-    <Compile Include="Annotations\AspMvcTemplateAttribute.cs" />
-    <Compile Include="Annotations\AspMvcViewAttribute.cs" />
-    <Compile Include="Annotations\AspMvcViewComponentAttribute.cs" />
-    <Compile Include="Annotations\AspMvcViewComponentViewAttribute.cs" />
-    <Compile Include="Annotations\AspMvcViewLocationFormatAttribute.cs" />
-    <Compile Include="Annotations\AspRequiredAttributeAttribute.cs" />
-    <Compile Include="Annotations\AspTypePropertyAttribute.cs" />
-    <Compile Include="Annotations\AssertionConditionAttribute.cs" />
-    <Compile Include="Annotations\AssertionConditionType.cs" />
-    <Compile Include="Annotations\AssertionMethodAttribute.cs" />
-    <Compile Include="Annotations\BaseTypeRequiredAttribute.cs" />
-    <Compile Include="Annotations\CanBeNullAttribute.cs" />
-    <Compile Include="Annotations\CannotApplyEqualityOperatorAttribute.cs" />
-    <Compile Include="Annotations\CollectionAccessAttribute.cs" />
-    <Compile Include="Annotations\CollectionAccessType.cs" />
-    <Compile Include="Annotations\ContractAnnotationAttribute.cs" />
-    <Compile Include="Annotations\HtmlAttributeValueAttribute.cs" />
-    <Compile Include="Annotations\HtmlElementAttributesAttribute.cs" />
-    <Compile Include="Annotations\ImplicitUseKindFlags.cs" />
-    <Compile Include="Annotations\ImplicitUseTargetFlags.cs" />
-    <Compile Include="Annotations\InstantHandleAttribute.cs" />
-    <Compile Include="Annotations\InvokerParameterNameAttribute.cs" />
-    <Compile Include="Annotations\ItemCanBeNullAttribute.cs" />
-    <Compile Include="Annotations\ItemNotNullAttribute.cs" />
-    <Compile Include="Annotations\LinqTunnelAttribute.cs" />
-    <Compile Include="Annotations\LocalizationRequiredAttribute.cs" />
-    <Compile Include="Annotations\MacroAttribute.cs" />
-    <Compile Include="Annotations\MeansImplicitUseAttribute.cs" />
-    <Compile Include="Annotations\MustUseReturnValueAttribute.cs" />
-    <Compile Include="Annotations\NoEnumerationAttribute.cs" />
-    <Compile Include="Annotations\NoReorderAttribute.cs" />
-    <Compile Include="Annotations\NotifyPropertyChangedInvocatorAttribute.cs" />
-    <Compile Include="Annotations\NotNullAttribute.cs" />
-    <Compile Include="Annotations\PathReferenceAttribute.cs" />
-    <Compile Include="Annotations\ProvidesContextAttribute.cs" />
-    <Compile Include="Annotations\PublicAPIAttribute.cs" />
-    <Compile Include="Annotations\PureAttribute.cs" />
-    <Compile Include="Annotations\RazorDirectiveAttribute.cs" />
-    <Compile Include="Annotations\RazorHelperCommonAttribute.cs" />
-    <Compile Include="Annotations\RazorImportNamespaceAttribute.cs" />
-    <Compile Include="Annotations\RazorInjectionAttribute.cs" />
-    <Compile Include="Annotations\RazorLayoutAttribute.cs" />
-    <Compile Include="Annotations\RazorPageBaseTypeAttribute.cs" />
-    <Compile Include="Annotations\RazorSectionAttribute.cs" />
-    <Compile Include="Annotations\RazorWriteLiteralMethodAttribute.cs" />
-    <Compile Include="Annotations\RazorWriteMethodAttribute.cs" />
-    <Compile Include="Annotations\RazorWriteMethodParameterAttribute.cs" />
-    <Compile Include="Annotations\RegexPatternAttribute.cs" />
-    <Compile Include="Annotations\SourceTemplateAttribute.cs" />
-    <Compile Include="Annotations\StringFormatMethodAttribute.cs" />
-    <Compile Include="Annotations\TerminatesProgramAttribute.cs" />
-    <Compile Include="Annotations\UsedImplicitlyAttribute.cs" />
-    <Compile Include="Annotations\ValueProviderAttribute.cs" />
-    <Compile Include="Annotations\XamlItemBindingOfItemsControlAttribute.cs" />
-    <Compile Include="Annotations\XamlItemsControlAttribute.cs" />
     <Compile Include="AssemblyInfo.cs" />
     <Compile Include="ZerodhaAdapter.cs" />
     <Compile Include="ZerodhaAdapter.MarketData.cs" />
@@ -252,6 +178,7 @@
     <Compile Include="Services\Auth\ZerodhaTokenGenerator.cs" />
     <Compile Include="Services\Analysis\InstrumentBackfillService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerLogic.cs" />
+    <Compile Include="Services\HolidayCalendarService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerService.cs" />
     <Compile Include="Services\Analysis\SubscriptionManager.cs" />
     <Compile Include="Services\Analysis\SubscriptionWorkQueue.cs" />
@@ -286,6 +213,34 @@
     <Compile Include="SyntheticInstruments\SyntheticStraddleService.cs" />
     <Compile Include="SyntheticInstruments\SyntheticHistoricalDataService.cs" />
     <Compile Include="SyntheticInstruments\StraddleBarCache.cs" />
+    <!-- Phase 7: Modular components for OptionChainWindow -->
+    <Compile Include="AddOns\MarketAnalyzer\Controls\OptionChainHeaderControl.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\Controls\OptionChainListView.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\Controls\OptionChainStatusBar.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\Converters\PercentageToWidthConverter.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\Converters\VWAPComparisonToColorConverter.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\Models\OptionChainRow.cs" />
+    <!-- Phase 7: Modular components for TBSManagerWindow -->
+    <Compile Include="AddOns\TBSManager\Controls\TBSConfigControl.cs" />
+    <Compile Include="AddOns\TBSManager\Controls\TBSExecutionControl.cs" />
+    <Compile Include="AddOns\TBSManager\Controls\TBSLegRowControl.cs" />
+    <Compile Include="AddOns\TBSManager\Controls\TBSTrancheRowControl.cs" />
+    <Compile Include="AddOns\TBSManager\TBSStyles.cs" />
+    <!-- Phase 7: Modular components for MarketAnalyzerLogic -->
+    <Compile Include="Services\Analysis\MarketDataHub.cs" />
+    <Compile Include="Services\Analysis\OptionGenerationService.cs" />
+    <!-- Phase 7: Modular components for InstrumentManager -->
+    <Compile Include="Services\Instruments\InstrumentDbService.cs" />
+    <Compile Include="Services\Instruments\SymbolMappingService.cs" />
+    <!-- Phase 7: Modular components for OptimizedTickProcessor -->
+    <Compile Include="Models\MarketData\SymbolState.cs" />
+    <Compile Include="Services\MarketData\ShardProcessor.cs" />
+    <Compile Include="Services\MarketData\TickCacheManager.cs" />
+    <Compile Include="Services\MarketData\TickProcessorHealthMonitor.cs" />
+    <Compile Include="Services\MarketData\TickSubscriptionRegistry.cs" />
+    <!-- Phase 7: Modular components for SharedWebSocketService -->
+    <Compile Include="Services\WebSocket\WebSocketPacketParser.cs" />
+    <Compile Include="Services\WebSocket\WebSocketStateController.cs" />
   </ItemGroup>
   <ItemGroup>
     <Page Include="Controls\CircularProgressBar.xaml">

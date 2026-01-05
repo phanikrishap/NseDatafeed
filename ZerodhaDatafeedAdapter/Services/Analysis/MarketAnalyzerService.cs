@@ -60,6 +60,33 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             SubscribeToIndicator("NIFTY");
             SubscribeToIndicator("SENSEX");
 
+            // Subscribe to NIFTY Futures (NIFTY_I) - uses dynamically resolved symbol (e.g., NIFTY26JANFUT)
+            string niftyFutSymbol = MarketAnalyzerLogic.Instance.NiftyFuturesSymbol;
+            if (!string.IsNullOrEmpty(niftyFutSymbol))
+            {
+                Logger.Info($"[MarketAnalyzerService] Start(): Subscribing to NIFTY_I via resolved symbol '{niftyFutSymbol}'");
+                SubscribeToNiftyFutures(niftyFutSymbol);
+            }
+            else
+            {
+                Logger.Warn("[MarketAnalyzerService] Start(): NIFTY Futures symbol not resolved yet, will retry");
+                // Retry after a delay
+                Task.Run(async () =>
+                {
+                    await Task.Delay(3000);
+                    string resolvedSymbol = MarketAnalyzerLogic.Instance.NiftyFuturesSymbol;
+                    if (!string.IsNullOrEmpty(resolvedSymbol))
+                    {
+                        Logger.Info($"[MarketAnalyzerService] Start(): Retry - subscribing to NIFTY_I via '{resolvedSymbol}'");
+                        SubscribeToNiftyFutures(resolvedSymbol);
+                    }
+                    else
+                    {
+                        Logger.Error("[MarketAnalyzerService] Start(): NIFTY Futures symbol still not resolved after retry");
+                    }
+                });
+            }
+
             Logger.Info("[MarketAnalyzerService] Start(): Subscription requests queued for all indicators");
         }
 
@@ -203,8 +230,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     }
                     else if (type == MarketDataType.LastClose)
                     {
+                        // LastClose is the prior day's close - update the Close property, NOT the current price
                         Logger.Debug($"[MarketAnalyzerService] MarketData({instrumentName}): LastClose={price}");
-                        _logic.UpdatePrice(instrumentName, price, price);
+                        _logic.UpdateClose(instrumentName, price);
                     }
                 });
 
@@ -217,6 +245,248 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             {
                 Logger.Error($"[MarketAnalyzerService] SubscribeToIndicatorWithClosure({instrumentName}): Adapter is NULL - cannot subscribe to market data");
             }
+        }
+
+        /// <summary>
+        /// Subscribes to NIFTY Futures (NIFTY_I) using the dynamically resolved symbol.
+        /// Routes updates to NiftyFuturesTicker via MarketAnalyzerLogic.
+        /// </summary>
+        private void SubscribeToNiftyFutures(string niftyFutSymbol)
+        {
+            Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFutures(): Subscribing to '{niftyFutSymbol}'");
+
+            Task.Run(async () => {
+                try
+                {
+                    // Wait for adapter to be available (max 30 seconds)
+                    Logger.Debug($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Waiting for adapter connection...");
+                    int maxWaitMs = 30000;
+                    int waitedMs = 0;
+                    while (waitedMs < maxWaitMs)
+                    {
+                        var adapter = Connector.Instance.GetAdapter() as ZerodhaAdapter;
+                        if (adapter != null)
+                        {
+                            Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Adapter connected after {waitedMs}ms");
+                            break;
+                        }
+                        await Task.Delay(500);
+                        waitedMs += 500;
+                    }
+
+                    if (waitedMs >= maxWaitMs)
+                    {
+                        Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Timeout waiting for adapter connection");
+                        return;
+                    }
+
+                    // Give instruments time to be created by the adapter
+                    await Task.Delay(2000);
+
+                    Logger.Debug($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Getting NT instrument on UI thread");
+
+                    Instrument ntInstrument = null;
+
+                    // Try to get or create instrument on UI thread
+                    await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() => {
+                        Logger.Debug($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Inside dispatcher, calling Instrument.GetInstrument()");
+                        ntInstrument = Instrument.GetInstrument(niftyFutSymbol);
+
+                        // If instrument doesn't exist, try to create it
+                        if (ntInstrument == null)
+                        {
+                            Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Instrument not found, attempting to create...");
+                            ntInstrument = CreateNiftyFuturesInstrument(niftyFutSymbol);
+                        }
+                    });
+
+                    if (ntInstrument != null)
+                    {
+                        string instrumentName = ntInstrument.MasterInstrument.Name;
+                        Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Instrument ready - MasterInstrument.Name='{instrumentName}'");
+
+                        // Subscribe with NIFTY_I as the logical name for routing to NiftyFuturesTicker
+                        SubscribeToNiftyFuturesWithClosure(ntInstrument, instrumentName, niftyFutSymbol);
+                        Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Successfully subscribed to market data");
+                    }
+                    else
+                    {
+                        Logger.Warn($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Failed to get or create instrument");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Exception occurred - {ex.Message}", ex);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Creates an NT instrument for NIFTY Futures using data from InstrumentDbService
+        /// </summary>
+        private Instrument CreateNiftyFuturesInstrument(string niftyFutSymbol)
+        {
+            try
+            {
+                // Get the token from MarketAnalyzerLogic
+                long token = _logic.NiftyFuturesToken;
+                DateTime expiry = _logic.NiftyFuturesExpiry;
+
+                if (token == 0)
+                {
+                    Logger.Warn($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): Token not resolved");
+                    return null;
+                }
+
+                Logger.Info($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): token={token}, expiry={expiry:yyyy-MM-dd}");
+
+                // Create an InstrumentDefinition for InstrumentManager
+                var instrumentDef = new InstrumentDefinition
+                {
+                    Symbol = niftyFutSymbol,
+                    Segment = "NFO-FUT",
+                    TickSize = 0.05,
+                    Expiry = expiry
+                };
+
+                string ntName;
+                bool created = InstrumentManager.Instance.CreateInstrument(instrumentDef, out ntName);
+
+                if (created)
+                {
+                    Logger.Info($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): Successfully created NT instrument '{ntName}'");
+                    return Instrument.GetInstrument(ntName);
+                }
+                else
+                {
+                    // Instrument might already exist
+                    Logger.Debug($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): CreateInstrument returned false, trying to get existing");
+                    return Instrument.GetInstrument(niftyFutSymbol);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): Exception - {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Subscribes to NIFTY Futures market data with proper closure.
+        /// Routes updates to NiftyFuturesTicker via the NIFTY_I alias.
+        /// </summary>
+        private void SubscribeToNiftyFuturesWithClosure(Instrument instrument, string instrumentName, string niftyFutSymbol)
+        {
+            Logger.Debug($"[MarketAnalyzerService] SubscribeToNiftyFuturesWithClosure({instrumentName}): Getting adapter");
+
+            var adapter = Connector.Instance.GetAdapter() as ZerodhaAdapter;
+            if (adapter != null)
+            {
+                Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesWithClosure({instrumentName}): Adapter found, calling SubscribeMarketData()");
+
+                // Use the actual symbol name for updates - MarketAnalyzerLogic.UpdatePrice handles NIFTY_I aliases
+                adapter.SubscribeMarketData(instrument, (type, price, vol, time, unk) => {
+                    if (type == MarketDataType.Last)
+                    {
+                        Logger.Debug($"[MarketAnalyzerService] MarketData(NIFTY_I/{instrumentName}): Last={price}");
+                        // Use niftyFutSymbol (e.g., NIFTY26JANFUT) - MarketAnalyzerLogic.UpdatePrice will route to NiftyFuturesTicker
+                        _logic.UpdatePrice(niftyFutSymbol, price);
+                    }
+                    else if (type == MarketDataType.LastClose)
+                    {
+                        Logger.Debug($"[MarketAnalyzerService] MarketData(NIFTY_I/{instrumentName}): LastClose={price}");
+                        _logic.UpdateClose(niftyFutSymbol, price);
+                    }
+                });
+
+                Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesWithClosure({instrumentName}): Market data callback registered");
+
+                // Request historical data for prior close - use NFO-FUT market type
+                RequestNiftyFuturesHistoricalData(instrument, instrumentName, niftyFutSymbol);
+            }
+            else
+            {
+                Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFuturesWithClosure({instrumentName}): Adapter is NULL - cannot subscribe to market data");
+            }
+        }
+
+        /// <summary>
+        /// Requests historical data for NIFTY Futures to get prior close
+        /// </summary>
+        private void RequestNiftyFuturesHistoricalData(Instrument instrument, string instrumentName, string niftyFutSymbol)
+        {
+            Task.Run(async () =>
+            {
+                try
+                {
+                    Logger.Info($"[MarketAnalyzerService] RequestNiftyFuturesHistoricalData({niftyFutSymbol}): Requesting 1min data for 5 days");
+                    _logic.NotifyHistoricalDataStatus("NIFTY_I", "Requesting...");
+
+                    // Calculate date range: 5 days back from now
+                    DateTime toDate = DateTime.Now;
+                    DateTime fromDate = toDate.AddDays(-5);
+
+                    // Use HistoricalDataService to fetch data from Zerodha API
+                    var historicalDataService = HistoricalDataService.Instance;
+                    var records = await historicalDataService.GetHistoricalTrades(
+                        BarsPeriodType.Minute,
+                        niftyFutSymbol,  // Use the resolved symbol (e.g., NIFTY26JANFUT)
+                        fromDate,
+                        toDate,
+                        MarketType.Futures,  // Use Futures market type
+                        null);
+
+                    if (records != null && records.Count > 0)
+                    {
+                        Logger.Info($"[MarketAnalyzerService] RequestNiftyFuturesHistoricalData({niftyFutSymbol}): Success - received {records.Count} bars");
+                        _logic.NotifyHistoricalDataStatus("NIFTY_I", $"Done ({records.Count})");
+
+                        // Extract last price and prior close
+                        var sortedRecords = records.OrderBy(r => r.TimeStamp).ToList();
+                        var lastRecord = sortedRecords.Last();
+                        double lastPrice = lastRecord.Close;
+
+                        // Find prior close - the close of the previous trading day
+                        double priorClose = 0;
+                        DateTime lastTradingDay = lastRecord.TimeStamp.Date;
+
+                        var priorDayRecord = sortedRecords
+                            .Where(r => r.TimeStamp.Date < lastTradingDay)
+                            .OrderByDescending(r => r.TimeStamp)
+                            .FirstOrDefault();
+
+                        if (priorDayRecord != null)
+                        {
+                            priorClose = priorDayRecord.Close;
+                            Logger.Info($"[MarketAnalyzerService] RequestNiftyFuturesHistoricalData({niftyFutSymbol}): PriorClose={priorClose} from {priorDayRecord.TimeStamp:yyyy-MM-dd HH:mm}");
+                        }
+                        else
+                        {
+                            Logger.Warn($"[MarketAnalyzerService] RequestNiftyFuturesHistoricalData({niftyFutSymbol}): Could not find prior day close");
+                        }
+
+                        Logger.Info($"[MarketAnalyzerService] RequestNiftyFuturesHistoricalData({niftyFutSymbol}): LastPrice={lastPrice}, PriorClose={priorClose}");
+
+                        // Update the logic - use niftyFutSymbol which routes to NiftyFuturesTicker
+                        if (priorClose > 0)
+                        {
+                            _logic.UpdateClose(niftyFutSymbol, priorClose);
+                        }
+
+                        _logic.UpdatePrice(niftyFutSymbol, lastPrice);
+                    }
+                    else
+                    {
+                        Logger.Warn($"[MarketAnalyzerService] RequestNiftyFuturesHistoricalData({niftyFutSymbol}): No data received");
+                        _logic.NotifyHistoricalDataStatus("NIFTY_I", "No Data");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerService] RequestNiftyFuturesHistoricalData({niftyFutSymbol}): Exception - {ex.Message}", ex);
+                    _logic.NotifyHistoricalDataStatus("NIFTY_I", "Error");
+                }
+            });
         }
 
         /// <summary>
@@ -278,8 +548,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                         Logger.Info($"[MarketAnalyzerService] RequestHistoricalData({instrumentName}): LastPrice={lastPrice} from {lastRecord.TimeStamp:yyyy-MM-dd HH:mm}, PriorClose={priorClose}");
 
-                        // Update the logic with historical data prices
-                        _logic.UpdatePrice(instrumentName, lastPrice, priorClose);
+                        // Update the logic with prior close first (so it's available when price update triggers calculations)
+                        if (priorClose > 0)
+                        {
+                            _logic.UpdateClose(instrumentName, priorClose);
+                        }
+
+                        // Update the logic with last price
+                        _logic.UpdatePrice(instrumentName, lastPrice);
                     }
                     else
                     {

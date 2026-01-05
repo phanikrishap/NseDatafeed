@@ -46,19 +46,18 @@ Zerodha NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader
 │  │                                                                     │    │
 │  │  ┌─────────────────────┐    ┌─────────────────────────────────┐     │    │
 │  │  │  MarketDataService  │    │   SharedWebSocketService        │     │    │
-│  │  │  • SubscribeToTicks │◄──►│   • Single WS connection        │     │    │
-│  │  │  • SubscribeToDepth │    │   • Multi-symbol subscription   │     │    │
-│  │  │  • Feature Flags    │    │   • Token-to-symbol routing     │     │    │
-│  │  └─────────┬───────────┘    │   • Auto-reconnect              │     │    │
-│  │            │                └─────────────────────────────────┘     │    │
+│  │  │  • SubscribeToTicks │◄──►│   • StateMachine Controller     │     │    │
+│  │  │  • SubscribeToDepth │    │   • Binary Packet Parser        │     │    │
+│  │  │  • Performance Mon  │    │   • Multi-symbol subscription   │     │    │
+│  │  │  • Health Monitor   │    │   • Auto-reconnect (Backoff)    │     │    │
+│  │  └─────────┬───────────┘    └─────────────────────────────────┘     │    │
 │  │            ▼                                                        │    │
 │  │  ┌─────────────────────────────────────────────────────────────┐    │    │
 │  │  │              OptimizedTickProcessor                         │    │    │
 │  │  │  ┌─────────────────────────────────────────────────────┐    │    │    │
-│  │  │  │            Sharded RingBuffer (4 Shards)            │    │    │    │
+│  │  │  │         ShardProcessors (4 Parallel Shards)         │    │    │    │
 │  │  │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐    │    │    │    │
-│  │  │  │  │Shard 0  │ │Shard 1  │ │Shard 2  │ │Shard 3  │    │    │    │    │
-│  │  │  │  │16K items│ │16K items│ │16K items│ │16K items│    │    │    │    │
+│  │  │  │  │ Shard 0 │ │ Shard 1 │ │ Shard 2 │ │ Shard 3 │    │    │    │    │
 │  │  │  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘    │    │    │    │
 │  │  │  │       │           │           │           │         │    │    │    │
 │  │  │  │       ▼           ▼           ▼           ▼         │    │    │    │
@@ -66,9 +65,9 @@ Zerodha NinjaAdapter is a comprehensive bridge solution that enables NinjaTrader
 │  │  │  │  │Worker 0 │ │Worker 1 │ │Worker 2 │ │Worker 3 │    │    │    │    │
 │  │  │  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘    │    │    │    │
 │  │  │  └─────────────────────────────────────────────────────┘    │    │    │
-│  │  │  • Tiered Backpressure (60%/80%/90% thresholds)             │    │    │
-│  │  │  • Memory Pressure Detection & GC Monitoring                │    │    │
-│  │  │  • O(1) Callback Caching                                    │    │    │
+│  │  │  • Backpressure Manager (60%/80%/90% thresholds)            │    │    │
+│  │  │  • Processor Health & Performance Monitoring                │    │    │
+│  │  │  • Tick Cache Manager & O(1) Callback Registry              │    │    │
 │  │  │  • Race Condition Protection (instrument init checks)       │    │    │
 │  │  └─────────────────────────────────────────────────────────────┘    │    │
 │  │                                                                     │    │
@@ -263,27 +262,28 @@ WebSocket Binary Message
 NseDatafeed_new/
 ├── ZerodhaDatafeedAdapter/          # Main NinjaTrader adapter project
 │   ├── AddOns/                      # NinjaTrader AddOn windows
-│   │   └── MarketAnalyzer/          # Market Analyzer & Option Chain UI
+│   │   ├── MarketAnalyzer/          # Market Analyzer & Option Chain UI
+│   │   └── TBSManager/              # Time-Based Straddle Manager (modular UI)
 │   ├── Annotations/                 # JetBrains annotations for code quality
 │   ├── Classes/                     # Constants, Records, MarketType
 │   ├── Controls/                    # Custom WPF controls (SymbolSearch, etc.)
-│   ├── Enums/                       # Shared enumerations
-│   ├── Helpers/                     # Utility helpers (PriceHelper, etc.)
+│   ├── Enums/                       # Shared enumerations (MarketType, TickType)
+│   ├── Helpers/                     # Utility helpers (PriceHelper, SymbolHelper)
 │   ├── Logging/                     # Logging configuration and custom appenders
-│   ├── Models/                      # Data models (TickData, Subscription info)
-│   ├── Services/
-│   │   ├── Analysis/                # MarketAnalyzerLogic, VWAPCalculator
-│   │   ├── Auth/                    # ZerodhaTokenGenerator (TOTP)
-│   │   ├── Configuration/           # ConfigurationManager
-│   │   ├── Instruments/             # InstrumentManager, NinjaTraderHelper
-│   │   ├── MarketData/              # MarketDataService, OptimizedTickProcessor
-│   │   ├── WebSocket/               # SharedWebSocketService, WebSocketManager
-│   │   └── Zerodha/                 # ZerodhaClient
-│   ├── SyntheticInstruments/        # Straddle processing and synthetic logic
-│   ├── ViewModels/                  # MVVM ViewModels for UI
-│   ├── ZerodhaAdapter.cs            # Main adapter entry point
-│   ├── ZerodhaConnectorOptions.cs   # NinjaTrader connection options
-│   └── Connector.cs                 # Service orchestration and singleton access
+│   ├── Models/                      # Shared data models and state objects
+│   ├── Services/                    # Specialized business logic services
+│   │   ├── Analysis/                # MarketAnalyzerLogic, OptionGeneration, Subscriptions
+│   │   ├── Auth/                    # ZerodhaTokenGenerator (TOTP auto-login)
+│   │   ├── Configuration/           # ConfigurationManager (JSON/Excel settings)
+│   │   ├── Instruments/             # InstrumentManager, SQLite Instrument DB
+│   │   ├── MarketData/              # OptimizedTickProcessor, ShardProcessors, Health
+│   │   ├── WebSocket/               # SharedWebSocket, StateController, PacketParser
+│   │   └── Zerodha/                 # Low-level Zerodha API Client
+│   ├── SyntheticInstruments/        # Sharded Straddle Processor and StraddleState
+│   ├── ViewModels/                  # MVVM ViewModels for decoupled UI logic
+│   ├── ZerodhaAdapter.cs            # Main NinjaTrader adapter (Partial classes)
+│   ├── ZerodhaConnectorOptions.cs   # NinjaTrader connection options UI
+│   └── Connector.cs                 # Service orchestration and lifecycle hub
 │
 ├── ZerodhaAPI/                      # Zerodha API client library
 │   ├── Common/                      # Shared models, enums, interfaces

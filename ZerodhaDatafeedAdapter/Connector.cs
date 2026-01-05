@@ -1,6 +1,5 @@
 using ZerodhaAPI.Common.Enums;
 using ZerodhaAPI.Zerodha.Websockets;
-using ZerodhaDatafeedAdapter.Annotations;
 using ZerodhaDatafeedAdapter.Classes;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Configuration;
@@ -511,7 +510,6 @@ namespace ZerodhaDatafeedAdapter
         /// Raises the property changed event
         /// </summary>
         /// <param name="propertyName">The property name</param>
-        [NotifyPropertyChangedInvocator]
         protected virtual void OnPropertyChanged([CallerMemberName] string propertyName = null)
         {
             PropertyChangedEventHandler propertyChanged = this.PropertyChanged;

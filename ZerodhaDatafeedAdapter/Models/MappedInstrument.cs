@@ -22,5 +22,6 @@ namespace ZerodhaDatafeedAdapter.Models
         public string name { get; set; } // Descriptive name of the instrument
         public string exchange { get; set; } // The exchange the instrument trades on (e.g., "NSE", "NFO", "MCX")
         public string instrument_type { get; set; } // Type of instrument, e.g., "EQ", "FUTIDX", "OPTSTK"
+        public bool is_index { get; set; } // Flag to indicate if the instrument is an index (e.g., NIFTY 50)
     }
 }

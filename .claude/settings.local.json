@@ -86,7 +86,30 @@
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" checkout -b develop)",
       "Bash(nuget restore:*)",
       "Bash(powershell: nuget restore \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\packages.config\" -PackagesDirectory \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\packages\")",
-      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" log --oneline -5)"
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" log --oneline -5)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff ZerodhaDatafeedAdapter/AddOns/MarketAnalyzer/OptionChainWindow.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff ZerodhaDatafeedAdapter/AddOns/TBSManager/TBSManagerWindow.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff ZerodhaDatafeedAdapter/Services/Analysis/MarketAnalyzerLogic.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff ZerodhaDatafeedAdapter/Services/Instruments/InstrumentManager.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff ZerodhaDatafeedAdapter/Services/MarketData/OptimizedTickProcessor.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" diff ZerodhaDatafeedAdapter/Services/WebSocket/SharedWebSocketService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaAPI/Common/Enums/MarketType.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/Services/Instruments/InstrumentManager.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/Services/MarketData/HistoricalDataService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/Services/MarketData/MarketDataService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/Services/MarketData/OptimizedTickProcessor.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show d04d1f8:QANinjaAdapter/InstrumentManager.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show 024ea45:ZerodhaDatafeedAdapter/InstrumentManager.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show 9f6df93:ZerodhaDatafeedAdapter/InstrumentManager.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" ls-tree -r --name-only 9f6df93)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show 9f6df93:ZerodhaDatafeedAdapter/Services/Instruments/InstrumentManager.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show c058b656a9c80adb6894e9fce848f0faefa3c3d7:ZerodhaDatafeedAdapter/Services/WebSocket/SharedWebSocketService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show c058b656a9c80adb6894e9fce848f0faefa3c3d7:ZerodhaDatafeedAdapter/Services/MarketData/MarketDataService.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show c058b656a9c80adb6894e9fce848f0faefa3c3d7:ZerodhaDatafeedAdapter/Services/Analysis/MarketAnalyzerLogic.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/AddOns/MarketAnalyzer/MarketAnalyzerWindow.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/Services/Analysis/MarketAnalyzerLogic.cs)",
+      "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show c058b656a9c80adb6894e9fce848f0faefa3c3d7:ZerodhaDatafeedAdapter/AddOns/MarketAnalyzer/MarketAnalyzerWindow.cs)",
+      "Bash(git -C:*)"
     ]
   }
 }

@@ -80,7 +80,7 @@ The adapter uses modern event-driven patterns to eliminate "Sleep & Hope" anti-p
 │  │                    Services Layer                                      │  │
 │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐ │  │
 │  │  │ MarketDataService│  │HistoricalData   │  │ SubscriptionManager     │ │  │
-│  │  │                 │  │ Service          │  │ (Options/Straddles)     │ │  │
+│  │  │ (Tick/Depth)    │  │ Service         │  │ & OptionGeneration      │ │  │
 │  │  └────────┬────────┘  └────────┬────────┘  └───────────┬─────────────┘ │  │
 │  │           │                    │                       │               │  │
 │  │  ┌────────▼────────────────────▼───────────────────────▼─────────────┐ │  │
@@ -109,20 +109,23 @@ The adapter uses modern event-driven patterns to eliminate "Sleep & Hope" anti-p
 
 | Component | Description |
 |-----------|-------------|
-| **ZerodhaAdapter** | NinjaTrader adapter interface - handles Subscribe/Unsubscribe calls |
-| **Connector** | Service orchestration, token validation, singleton access hub with TaskCompletionSource pattern |
-| **L1Subscription** | Thread-safe multi-callback container - allows multiple consumers per symbol |
-| **OptimizedTickProcessor** | High-performance tick processing with sharded parallelism, Rx.NET streams, and tiered backpressure |
-| **SharedWebSocketService** | Single shared WebSocket with formal state machine (6 states) and exponential backoff |
-| **SubscriptionManager** | TPL Dataflow pipeline for option chain subscriptions with rate limiting |
-| **MarketAnalyzerLogic** | Calculates projected opens, generates option chains, hosts PriceHub and ATM tracking |
-| **OptionChainWindow** | WPF UI for displaying real-time option chain data |
-| **TBSManagerWindow** | TBS Manager addon for time-based straddle execution simulation |
-| **TBSConfigurationService** | Reads straddle configurations from Excel file |
-| **SubscriptionTrackingService** | Reference counting and sticky subscriptions |
-| **InstrumentManager** | Handles symbol mapping, token lookup, and NT instrument creation |
-| **StartupLogger** | Dedicated logger for critical startup events - token validation, WebSocket, first tick |
-| **TBSLogger** | Dedicated logger for TBS Manager events |
+| **ZerodhaAdapter** | Main NinjaTrader entry point - implemented as partial classes for modularity |
+| **Connector** | Service orchestration hub and singleton access manager with lifecycle tracking |
+| **L1Subscription** | Thread-safe multi-callback container supporting concurrent Chart/UI/Analyzer data |
+| **OptimizedTickProcessor** | High-performance sharded processor with Rx.NET streams and tiered backpressure |
+| **ShardProcessor** | Dedicated per-shard worker logic for isolated, high-speed tick processing |
+| **SharedWebSocketService** | Advanced WebSocket manager using a StateMachine-driven connection lifecycle |
+| **WebSocketStateController**| Formal FSM for connection states (Connecting, BackingOff, Reconnecting) |
+| **WebSocketPacketParser** | Specialized binary parser for optimized Big-Endian packet decoding |
+| **SubscriptionManager** | TPL Dataflow pipeline for throttled option chain and instrument subscriptions |
+| **MarketAnalyzerLogic** | Core logic for projected opens and ATM tracking; hosts the centralized PriceHub |
+| **OptionGenerationService**| Specialized service for dynamic option symbol and instrument generation |
+| **OptionChainWindow** | Modular WPF UI for real-time option chain and straddle visualization |
+| **TBSManagerWindow** | Modular dashboard for time-based straddle execution monitoring |
+| **TBSConfigurationService**| Excel-driven strategy configuration and tranche management |
+| **InstrumentManager** | Orchestrates symbol mapping and SQLite-based instrument caching |
+| **TickCacheManager** | Efficiently manages last-known-tick caching and replay for new subscribers |
+| **Health Monitors** | Specialized monitors for Memory, GC, and Processor performance |
 
 ### TPL Dataflow Pipeline (SubscriptionManager)
 

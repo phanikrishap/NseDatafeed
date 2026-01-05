@@ -113,7 +113,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
         /// <returns>A task representing the asynchronous operation</returns>
         public async Task CloseAsync(ClientWebSocket ws)
         {
-            if (ws != null && ws.State == WebSocketState.Open)
+            if (ws != null && ws.State == System.Net.WebSockets.WebSocketState.Open)
             {
                 try
                 {

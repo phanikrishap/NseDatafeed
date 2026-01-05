@@ -1,10 +1,8 @@
-// Decompiled with JetBrains decompiler
-// Type: ZerodhaDatafeedAdapter.Controls.LoadingPanel
-// Assembly: ZerodhaDatafeedAdapter, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: C3950ED3-7884-49E5-9F57-41CBA3235764
-// Assembly location: D:\NTConnector References\Binance Adapter\BinanceAdapterInstaller\ZerodhaDatafeedAdapter.dll
 
-using ZerodhaDatafeedAdapter.Annotations;
+// Type: ZerodhaDatafeedAdapter.Controls.LoadingPanel
+
+
+
 using System;
 using System.CodeDom.Compiler;
 using System.ComponentModel;
@@ -70,7 +68,6 @@ namespace ZerodhaDatafeedAdapter.Controls
 
         public event PropertyChangedEventHandler PropertyChanged;
 
-        [NotifyPropertyChangedInvocator]
         protected virtual void OnPropertyChanged([CallerMemberName] string propertyName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));

@@ -61,7 +61,7 @@ namespace ZerodhaDatafeedAdapter.Services
         private const int STATUS_TIMER_INTERVAL_MS = 1000;
         private const int STOXXO_POLLING_INTERVAL_MS = 5000;
         private const int FALLBACK_DELAY_SECONDS = 45; // Fallback if PriceSyncReady doesn't fire
-        private Action<string, int> _priceSyncReadyHandler;
+        private Action _priceSyncReadyHandler;
 
         #endregion
 
@@ -193,11 +193,11 @@ namespace ZerodhaDatafeedAdapter.Services
         /// <summary>
         /// Handler for PriceSyncReady event - marks Option Chain as ready immediately.
         /// </summary>
-        private void OnPriceSyncReady(string underlying, int priceCount)
+        private void OnPriceSyncReady()
         {
             if (_optionChainReady) return; // Already ready
 
-            TBSLogger.Info($"[TBSExecutionService] PriceSyncReady received: {underlying} with {priceCount} prices");
+            TBSLogger.Info("[TBSExecutionService] PriceSyncReady received");
 
             // Mark as ready immediately - no more waiting!
             DelayCountdown = 0;
@@ -702,7 +702,11 @@ namespace ZerodhaDatafeedAdapter.Services
 
         private void UpdateLegSymbols(TBSExecutionState state, string underlying, decimal strike)
         {
-            var expiry = MarketAnalyzerLogic.Instance.SelectedExpiry ?? _selectedExpiry ?? FindNearestExpiry(underlying, state.Config?.DTE ?? 0);
+            DateTime? expiry = null;
+            var selectedExpiryStr = MarketAnalyzerLogic.Instance.SelectedExpiry;
+            if (!string.IsNullOrEmpty(selectedExpiryStr) && DateTime.TryParse(selectedExpiryStr, out var parsed))
+                expiry = parsed;
+            expiry = expiry ?? _selectedExpiry ?? FindNearestExpiry(underlying, state.Config?.DTE ?? 0);
             if (!expiry.HasValue) return;
 
             bool isMonthlyExpiry = MarketAnalyzerLogic.Instance.SelectedIsMonthlyExpiry;
@@ -788,7 +792,7 @@ namespace ZerodhaDatafeedAdapter.Services
         private decimal GetCurrentPrice(string symbol)
         {
             if (string.IsNullOrEmpty(symbol)) return 0;
-            return MarketAnalyzerLogic.Instance.GetPrice(symbol);
+            return (decimal)MarketAnalyzerLogic.Instance.GetPrice(symbol);
         }
 
         #endregion

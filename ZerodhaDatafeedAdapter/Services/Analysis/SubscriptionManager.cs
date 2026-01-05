@@ -402,7 +402,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 var (token, tradingSymbol) = InstrumentManager.Instance.LookupOptionDetailsInSqlite(
                     instrument.segment,
                     instrument.underlying,
-                    instrument.expiry.Value,
+                    instrument.expiry.Value.ToString("yyyy-MM-dd"),
                     instrument.strike.Value,
                     instrument.option_type);
 
@@ -428,7 +428,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             // Step 1: Register in Instrument Manager (Memory + JSON)
             Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Step 1 - Adding to InstrumentManager");
-            InstrumentManager.Instance.AddMappedInstrument(instrument);
+            InstrumentManager.Instance.AddMappedInstrument(instrument.symbol, instrument);
             Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Registered in InstrumentManager");
 
             // Step 2: Create NT MasterInstrument
