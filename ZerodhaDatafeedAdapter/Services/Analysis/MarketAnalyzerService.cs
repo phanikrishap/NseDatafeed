@@ -105,8 +105,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             _isRunning = true;
             Logger.Info("[MarketAnalyzerService] Start(): Service started, subscribing to indicator symbols...");
 
-            // Subscribe to indicator symbols
-            SubscribeToIndicator("GIFT_NIFTY");
+            // Subscribe to GIFT_NIFTY via direct WebSocket (bypasses NT instrument requirement)
+            // GIFT_NIFTY is from NSE International Exchange, not a native NT instrument type
+            SubscribeToIndexViaWebSocket("GIFT_NIFTY");
+
+            // Subscribe to NIFTY and SENSEX via standard NT instrument approach (they exist as NT instruments)
             SubscribeToIndicator("NIFTY");
             SubscribeToIndicator("SENSEX");
 
@@ -211,6 +214,170 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     Logger.Error($"[MarketAnalyzerService] SubscribeToIndicator({symbol}): Exception occurred - {ex.Message}", ex);
                 }
             });
+        }
+
+        /// <summary>
+        /// Subscribes to an index symbol (like GIFT_NIFTY) via direct WebSocket.
+        /// This bypasses the NT Instrument requirement since index symbols like GIFT_NIFTY
+        /// are not tradeable instruments in NinjaTrader.
+        /// The token is resolved from index_mappings.json via SymbolMappingService.
+        /// </summary>
+        private void SubscribeToIndexViaWebSocket(string symbol)
+        {
+            Logger.Info($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket(): Subscribing to '{symbol}' via direct WebSocket");
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    // Wait for adapter to be available
+                    Logger.Debug($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): Waiting for adapter connection...");
+                    int maxWaitMs = 30000;
+                    int waitedMs = 0;
+                    while (waitedMs < maxWaitMs)
+                    {
+                        var adapter = Connector.Instance.GetAdapter() as ZerodhaAdapter;
+                        if (adapter != null)
+                        {
+                            Logger.Info($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): Adapter connected after {waitedMs}ms");
+                            break;
+                        }
+                        await Task.Delay(500);
+                        waitedMs += 500;
+                    }
+
+                    if (waitedMs >= maxWaitMs)
+                    {
+                        Logger.Error($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): Timeout waiting for adapter connection");
+                        return;
+                    }
+
+                    // Get the token from InstrumentManager (loaded from index_mappings.json)
+                    long token = InstrumentManager.Instance.GetInstrumentToken(symbol);
+                    if (token == 0)
+                    {
+                        Logger.Error($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): Token not found in index_mappings.json!");
+                        return;
+                    }
+
+                    Logger.Info($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): Token={token}, subscribing via SharedWebSocket");
+
+                    // Subscribe via MarketDataService (uses SharedWebSocketService)
+                    var marketDataService = MarketDataService.Instance;
+
+                    // Track prior close for change calculation
+                    double currentClose = 0;
+
+                    bool subscribed = await marketDataService.SubscribeToSymbolDirectAsync(
+                        symbol,
+                        (int)token,
+                        isIndex: true,  // GIFT_NIFTY is an index
+                        onTick: (price, volume, timestamp) =>
+                        {
+                            Logger.Debug($"[MarketAnalyzerService] {symbol} Tick: price={price}");
+
+                            // Publish to reactive hub (primary)
+                            _hub.PublishIndexPrice(symbol, price, currentClose);
+
+                            // Also update legacy logic for backward compatibility
+                            _logic.UpdatePrice(symbol, price);
+                        });
+
+                    if (subscribed)
+                    {
+                        Logger.Info($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): Successfully subscribed to WebSocket");
+
+                        // Request historical data to get prior close
+                        await RequestIndexHistoricalData(symbol);
+                    }
+                    else
+                    {
+                        Logger.Error($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): WebSocket subscription failed");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): Exception - {ex.Message}", ex);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Requests historical data for an index symbol (via direct API, no NT Instrument needed)
+        /// </summary>
+        private async Task RequestIndexHistoricalData(string symbol)
+        {
+            try
+            {
+                Logger.Info($"[MarketAnalyzerService] RequestIndexHistoricalData({symbol}): Requesting 1min data for 5 days");
+                _logic.NotifyHistoricalDataStatus(symbol, "Requesting...");
+
+                // Calculate date range: 5 days back from now
+                DateTime toDate = DateTime.Now;
+                DateTime fromDate = toDate.AddDays(-5);
+
+                // Use HistoricalDataService to fetch data from Zerodha API
+                var historicalDataService = HistoricalDataService.Instance;
+                var records = await historicalDataService.GetHistoricalTrades(
+                    BarsPeriodType.Minute,
+                    symbol,
+                    fromDate,
+                    toDate,
+                    MarketType.Spot,  // Index is treated as spot
+                    null);
+
+                if (records != null && records.Count > 0)
+                {
+                    Logger.Info($"[MarketAnalyzerService] RequestIndexHistoricalData({symbol}): Success - received {records.Count} bars");
+                    _logic.NotifyHistoricalDataStatus(symbol, $"Done ({records.Count})");
+
+                    // Extract last price and prior close
+                    var sortedRecords = records.OrderBy(r => r.TimeStamp).ToList();
+                    var lastRecord = sortedRecords.Last();
+                    double lastPrice = lastRecord.Close;
+
+                    // Find prior close - the close of the previous trading day
+                    double priorClose = 0;
+                    DateTime lastTradingDay = lastRecord.TimeStamp.Date;
+
+                    var priorDayRecord = sortedRecords
+                        .Where(r => r.TimeStamp.Date < lastTradingDay)
+                        .OrderByDescending(r => r.TimeStamp)
+                        .FirstOrDefault();
+
+                    if (priorDayRecord != null)
+                    {
+                        priorClose = priorDayRecord.Close;
+                        Logger.Info($"[MarketAnalyzerService] RequestIndexHistoricalData({symbol}): PriorClose={priorClose} from {priorDayRecord.TimeStamp:yyyy-MM-dd HH:mm}");
+                    }
+                    else
+                    {
+                        Logger.Warn($"[MarketAnalyzerService] RequestIndexHistoricalData({symbol}): Could not find prior day close");
+                    }
+
+                    Logger.Info($"[MarketAnalyzerService] RequestIndexHistoricalData({symbol}): LastPrice={lastPrice}, PriorClose={priorClose}");
+
+                    // Update both hub and legacy logic
+                    if (priorClose > 0)
+                    {
+                        _hub.PublishIndexClose(symbol, priorClose);
+                        _logic.UpdateClose(symbol, priorClose);
+                    }
+
+                    _hub.PublishIndexPrice(symbol, lastPrice, priorClose);
+                    _logic.UpdatePrice(symbol, lastPrice);
+                }
+                else
+                {
+                    Logger.Warn($"[MarketAnalyzerService] RequestIndexHistoricalData({symbol}): No data received");
+                    _logic.NotifyHistoricalDataStatus(symbol, "No Data");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerService] RequestIndexHistoricalData({symbol}): Exception - {ex.Message}", ex);
+                _logic.NotifyHistoricalDataStatus(symbol, "Error");
+            }
         }
 
         /// <summary>

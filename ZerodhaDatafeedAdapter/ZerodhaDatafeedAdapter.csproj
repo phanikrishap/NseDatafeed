@@ -233,6 +233,10 @@
     <Compile Include="Models\Reactive\IndexPriceUpdate.cs" />
     <Compile Include="Models\Reactive\ProjectedOpenState.cs" />
     <Compile Include="Models\Reactive\OptionsGeneratedEvent.cs" />
+    <Compile Include="Models\Reactive\OptionPriceUpdate.cs" />
+    <Compile Include="Models\Reactive\OptionStatusUpdate.cs" />
+    <Compile Include="Models\Reactive\VWAPUpdate.cs" />
+    <Compile Include="Models\Reactive\StraddlePriceUpdate.cs" />
     <Compile Include="Services\Analysis\MarketDataReactiveHub.cs" />
     <!-- Phase 7: Modular components for InstrumentManager -->
     <Compile Include="Services\Instruments\InstrumentDbService.cs" />

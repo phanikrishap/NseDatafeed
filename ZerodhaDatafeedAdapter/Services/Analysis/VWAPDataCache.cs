@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 
 namespace ZerodhaDatafeedAdapter.Services.Analysis
 {
@@ -62,6 +63,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         /// <summary>
         /// Updates VWAP data for a symbol. Called by the hidden VWAP indicator.
+        /// Publishes to reactive hub and fires legacy event for backward compatibility.
         /// </summary>
         public void UpdateVWAP(string symbol, double vwap, double sd1Upper, double sd1Lower, double sd2Upper, double sd2Lower)
         {
@@ -78,7 +80,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             _vwapData[symbol] = data;
 
-            // Fire event for UI updates
+            // Publish to reactive hub (primary - enables streaming and filtering)
+            MarketDataReactiveHub.Instance.PublishVWAP(data);
+
+            // Fire legacy event for backward compatibility
             VWAPUpdated?.Invoke(symbol, data);
 
             if (Logger.IsDebugEnabled)

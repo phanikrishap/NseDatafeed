@@ -14,12 +14,18 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
     ///
     /// Data Flow:
     /// GIFT_NIFTY (with retry) → Wait for SENSEX/NIFTY prior closes → Projected Opens → Generate Options
+    /// Option Prices → Batched Stream (backpressure) → UI Updates
+    /// VWAP Updates → Per-symbol streams → Option Chain display
     /// </summary>
     public class MarketDataReactiveHub : IDisposable
     {
         private static readonly Lazy<MarketDataReactiveHub> _instance =
             new Lazy<MarketDataReactiveHub>(() => new MarketDataReactiveHub());
         public static MarketDataReactiveHub Instance => _instance.Value;
+
+        // ═══════════════════════════════════════════════════════════════════
+        // INDEX STREAMS
+        // ═══════════════════════════════════════════════════════════════════
 
         // Core Subjects - ReplaySubject(1) ensures late subscribers get the latest value
         private readonly ReplaySubject<IndexPriceUpdate> _giftNiftySubject = new ReplaySubject<IndexPriceUpdate>(1);
@@ -33,6 +39,37 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         // Subject for options generated events
         private readonly Subject<OptionsGeneratedEvent> _optionsGeneratedSubject = new Subject<OptionsGeneratedEvent>();
+
+        // ═══════════════════════════════════════════════════════════════════
+        // OPTION PRICE STREAMS (with backpressure)
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Raw option price subject - all individual option price updates flow through here
+        private readonly Subject<OptionPriceUpdate> _optionPriceSubject = new Subject<OptionPriceUpdate>();
+
+        // Option status updates (Pending → Cached → Done)
+        private readonly Subject<OptionStatusUpdate> _optionStatusSubject = new Subject<OptionStatusUpdate>();
+
+        // Symbol resolution events (generatedSymbol → zerodhaSymbol)
+        private readonly Subject<(string generated, string zerodha)> _symbolResolvedSubject = new Subject<(string, string)>();
+
+        // ═══════════════════════════════════════════════════════════════════
+        // VWAP & STRADDLE STREAMS
+        // ═══════════════════════════════════════════════════════════════════
+
+        // VWAP updates for individual symbols
+        private readonly Subject<VWAPUpdate> _vwapSubject = new Subject<VWAPUpdate>();
+
+        // Synthetic straddle price updates
+        private readonly Subject<StraddlePriceUpdate> _straddlePriceSubject = new Subject<StraddlePriceUpdate>();
+
+        // ═══════════════════════════════════════════════════════════════════
+        // BACKPRESSURE CONFIGURATION
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Batch size and time window for option price updates
+        private const int OPTION_BATCH_SIZE = 50;
+        private const int OPTION_BATCH_INTERVAL_MS = 100;
 
         // Subscription management
         private readonly CompositeDisposable _subscriptions = new CompositeDisposable();
@@ -79,6 +116,61 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// </summary>
         public IObservable<IndexPriceUpdate> AllIndicesStream =>
             GiftNiftyStream.Merge(NiftyStream).Merge(SensexStream).Merge(NiftyFuturesStream);
+
+        #endregion
+
+        #region Option Price Streams (Read-Only)
+
+        /// <summary>
+        /// Raw stream of individual option price updates.
+        /// Use OptionPriceBatchStream for UI updates with backpressure.
+        /// </summary>
+        public IObservable<OptionPriceUpdate> OptionPriceStream => _optionPriceSubject.AsObservable();
+
+        /// <summary>
+        /// Batched option price updates with backpressure.
+        /// Batches by time (100ms) OR count (50), whichever comes first.
+        /// This prevents UI thread flooding when 122 options update rapidly.
+        /// </summary>
+        public IObservable<IList<OptionPriceUpdate>> OptionPriceBatchStream =>
+            _optionPriceSubject
+                .Buffer(TimeSpan.FromMilliseconds(OPTION_BATCH_INTERVAL_MS), OPTION_BATCH_SIZE)
+                .Where(batch => batch.Count > 0);
+
+        /// <summary>
+        /// Sampled option price stream - takes latest price per symbol every 100ms.
+        /// Use this for per-symbol throttling.
+        /// </summary>
+        public IObservable<OptionPriceUpdate> OptionPriceSampledStream =>
+            _optionPriceSubject
+                .GroupBy(o => o.Symbol)
+                .SelectMany(group => group.Sample(TimeSpan.FromMilliseconds(100)));
+
+        /// <summary>
+        /// Stream of option status updates (Pending → Cached → Done).
+        /// </summary>
+        public IObservable<OptionStatusUpdate> OptionStatusStream => _optionStatusSubject.AsObservable();
+
+        /// <summary>
+        /// Stream of symbol resolution events (generatedSymbol → zerodhaSymbol).
+        /// </summary>
+        public IObservable<(string generated, string zerodha)> SymbolResolvedStream => _symbolResolvedSubject.AsObservable();
+
+        /// <summary>
+        /// Stream of VWAP updates for all symbols.
+        /// </summary>
+        public IObservable<VWAPUpdate> VWAPStream => _vwapSubject.AsObservable();
+
+        /// <summary>
+        /// Gets a filtered VWAP stream for a specific symbol.
+        /// </summary>
+        public IObservable<VWAPUpdate> GetVWAPStreamForSymbol(string symbol) =>
+            VWAPStream.Where(v => v.Symbol == symbol);
+
+        /// <summary>
+        /// Stream of synthetic straddle price updates.
+        /// </summary>
+        public IObservable<StraddlePriceUpdate> StraddlePriceStream => _straddlePriceSubject.AsObservable();
 
         #endregion
 
@@ -272,6 +364,120 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         #endregion
 
+        #region Option Price & Status Publish Methods
+
+        /// <summary>
+        /// Publishes an option price update.
+        /// </summary>
+        /// <param name="symbol">Option symbol</param>
+        /// <param name="price">Current price</param>
+        /// <param name="volume">Trading volume (optional)</param>
+        /// <param name="source">Source of update (WebSocket, Historical, Simulated)</param>
+        public void PublishOptionPrice(string symbol, double price, double volume = 0, string source = "WebSocket")
+        {
+            if (string.IsNullOrEmpty(symbol) || price <= 0) return;
+
+            var update = new OptionPriceUpdate
+            {
+                Symbol = symbol,
+                Price = price,
+                Volume = volume,
+                Timestamp = DateTime.Now,
+                Source = source
+            };
+
+            _optionPriceSubject.OnNext(update);
+        }
+
+        /// <summary>
+        /// Publishes an option status update.
+        /// </summary>
+        /// <param name="symbol">Option symbol</param>
+        /// <param name="status">Status message</param>
+        public void PublishOptionStatus(string symbol, string status)
+        {
+            if (string.IsNullOrEmpty(symbol)) return;
+
+            var update = new OptionStatusUpdate
+            {
+                Symbol = symbol,
+                Status = status,
+                Timestamp = DateTime.Now
+            };
+
+            _optionStatusSubject.OnNext(update);
+        }
+
+        /// <summary>
+        /// Publishes a symbol resolution event.
+        /// </summary>
+        /// <param name="generatedSymbol">Generated symbol (e.g., NIFTY_25JAN_23500_CE)</param>
+        /// <param name="zerodhaSymbol">Zerodha trading symbol (e.g., NIFTY25JAN23500CE)</param>
+        public void PublishSymbolResolved(string generatedSymbol, string zerodhaSymbol)
+        {
+            if (string.IsNullOrEmpty(generatedSymbol) || string.IsNullOrEmpty(zerodhaSymbol)) return;
+
+            _symbolResolvedSubject.OnNext((generatedSymbol, zerodhaSymbol));
+            Logger.Debug($"[MarketDataReactiveHub] Symbol resolved: {generatedSymbol} → {zerodhaSymbol}");
+        }
+
+        #endregion
+
+        #region VWAP & Straddle Publish Methods
+
+        /// <summary>
+        /// Publishes a VWAP update for a symbol.
+        /// </summary>
+        public void PublishVWAP(string symbol, double vwap, double sd1Upper, double sd1Lower, double sd2Upper, double sd2Lower)
+        {
+            if (string.IsNullOrEmpty(symbol)) return;
+
+            var update = new VWAPUpdate
+            {
+                Symbol = symbol,
+                VWAP = vwap,
+                SD1Upper = sd1Upper,
+                SD1Lower = sd1Lower,
+                SD2Upper = sd2Upper,
+                SD2Lower = sd2Lower,
+                Timestamp = DateTime.Now
+            };
+
+            _vwapSubject.OnNext(update);
+        }
+
+        /// <summary>
+        /// Publishes a VWAP update from a VWAPData object.
+        /// </summary>
+        public void PublishVWAP(VWAPData data)
+        {
+            if (data == null || string.IsNullOrEmpty(data.Symbol)) return;
+
+            PublishVWAP(data.Symbol, data.VWAP, data.SD1Upper, data.SD1Lower, data.SD2Upper, data.SD2Lower);
+        }
+
+        /// <summary>
+        /// Publishes a synthetic straddle price update.
+        /// </summary>
+        public void PublishStraddlePrice(string symbol, double price, double cePrice, double pePrice, double strike = 0)
+        {
+            if (string.IsNullOrEmpty(symbol)) return;
+
+            var update = new StraddlePriceUpdate
+            {
+                Symbol = symbol,
+                Price = price,
+                CEPrice = cePrice,
+                PEPrice = pePrice,
+                Strike = strike,
+                Timestamp = DateTime.Now
+            };
+
+            _straddlePriceSubject.OnNext(update);
+        }
+
+        #endregion
+
         #region Symbol Routing
 
         // Symbol normalization sets (all aliases that map to each index)
@@ -436,12 +642,22 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             _subscriptions.Dispose();
 
+            // Index streams
             _giftNiftySubject.Dispose();
             _niftySubject.Dispose();
             _sensexSubject.Dispose();
             _niftyFuturesSubject.Dispose();
             _projectedOpenSubject.Dispose();
             _optionsGeneratedSubject.Dispose();
+
+            // Option price streams
+            _optionPriceSubject.Dispose();
+            _optionStatusSubject.Dispose();
+            _symbolResolvedSubject.Dispose();
+
+            // VWAP & Straddle streams
+            _vwapSubject.Dispose();
+            _straddlePriceSubject.Dispose();
 
             Logger.Info("[MarketDataReactiveHub] Disposed");
         }

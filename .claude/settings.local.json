@@ -109,7 +109,8 @@
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/AddOns/MarketAnalyzer/MarketAnalyzerWindow.cs)",
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/Services/Analysis/MarketAnalyzerLogic.cs)",
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show c058b656a9c80adb6894e9fce848f0faefa3c3d7:ZerodhaDatafeedAdapter/AddOns/MarketAnalyzer/MarketAnalyzerWindow.cs)",
-      "Bash(git -C:*)"
+      "Bash(git -C:*)",
+      "Bash(Select-String \"GetInstrument\")"
     ]
   }
 }

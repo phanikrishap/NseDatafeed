@@ -32,7 +32,7 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 - **Multi-Callback Support**: Multiple subscribers (Chart, Option Chain, Market Analyzer) can receive the same tick data
 - **Intelligent Throttling**: UI updates throttled to prevent overwhelming the display
 
-### Modern Async Architecture (v2.1)
+### Modern Async Architecture (v2.1+)
 
 The adapter uses modern event-driven patterns to eliminate "Sleep & Hope" anti-patterns:
 
@@ -54,6 +54,14 @@ The adapter uses modern event-driven patterns to eliminate "Sleep & Hope" anti-p
 - Exponential backoff: 1s → 2s → 4s → 8s → 16s (capped)
 - TCS-based waiting replaces polling loops
 - Centralized timeout constants (no magic numbers)
+
+**Phase 4: MarketDataReactiveHub - Single Source of Truth (v2.2)**
+- Centralized reactive hub for ALL market data streams
+- `ReplaySubject<1>` for indices (late subscribers get latest value)
+- `BehaviorSubject` for projected open state
+- Batched/Sampled streams with configurable backpressure
+- CombineLatest dependency chains for projected opens calculation
+- Dual publishing: Reactive streams (primary) + Legacy events (backward compatibility)
 
 ### Reliability & Diagnostics
 - **TaskCompletionSource Pattern**: Robust async signaling for token/connection ready states - late subscribers never miss events
@@ -118,6 +126,7 @@ The adapter uses modern event-driven patterns to eliminate "Sleep & Hope" anti-p
 | **WebSocketStateController**| Formal FSM for connection states (Connecting, BackingOff, Reconnecting) |
 | **WebSocketPacketParser** | Specialized binary parser for optimized Big-Endian packet decoding |
 | **SubscriptionManager** | TPL Dataflow pipeline for throttled option chain and instrument subscriptions |
+| **MarketDataReactiveHub** | Centralized reactive hub - single source of truth for all market data streams |
 | **MarketAnalyzerLogic** | Core logic for projected opens and ATM tracking; hosts the centralized PriceHub |
 | **OptionGenerationService**| Specialized service for dynamic option symbol and instrument generation |
 | **OptionChainWindow** | Modular WPF UI for real-time option chain and straddle visualization |
@@ -126,6 +135,129 @@ The adapter uses modern event-driven patterns to eliminate "Sleep & Hope" anti-p
 | **InstrumentManager** | Orchestrates symbol mapping and SQLite-based instrument caching |
 | **TickCacheManager** | Efficiently manages last-known-tick caching and replay for new subscribers |
 | **Health Monitors** | Specialized monitors for Memory, GC, and Processor performance |
+
+### MarketDataReactiveHub - Centralized Reactive Architecture (v2.2)
+
+The `MarketDataReactiveHub` serves as the **single source of truth** for all market data streams, replacing fragmented event-based communication with unified `IObservable` streams.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      MarketDataReactiveHub (Single Source of Truth)              │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  Publishers:                          Subscribers:                               │
+│  ┌─────────────────────┐              ┌─────────────────────┐                   │
+│  │ MarketAnalyzerService│──────┐      │ MarketAnalyzerWindow│◄─────┐            │
+│  │ (Index prices)       │      │      │ (Projected Opens)   │      │            │
+│  └─────────────────────┘      │      └─────────────────────┘      │            │
+│                                │                                   │            │
+│  ┌─────────────────────┐      │      ┌─────────────────────┐      │            │
+│  │ SubscriptionManager │──────┼─────►│    Hub Streams      │──────┤            │
+│  │ (Option prices)     │      │      │                     │      │            │
+│  └─────────────────────┘      │      │ GiftNiftyStream     │      │            │
+│                                │      │ NiftyStream         │      │            │
+│  ┌─────────────────────┐      │      │ SensexStream        │      │            │
+│  │ VWAPDataCache       │──────┘      │ ProjectedOpenStream │      │            │
+│  │ (VWAP updates)      │             │ OptionsGeneratedStr.│      │            │
+│  └─────────────────────┘             │ OptionPriceBatchStr.│      │            │
+│                                       │ OptionPriceSampled  │      │            │
+│  ┌─────────────────────┐             │ VWAPStream          │──────┘            │
+│  │ SyntheticStraddle   │─────────────│ StraddleStream      │                   │
+│  │ Service             │             └─────────────────────┘                   │
+│  └─────────────────────┘                                                        │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Reactive DTOs** (`Models/Reactive/`):
+
+| DTO | Purpose | Fields |
+|-----|---------|--------|
+| `IndexPriceUpdate` | Index tick data | Symbol, Price, Close, NetChangePercent, Timestamp |
+| `ProjectedOpenState` | Calculated opens | NiftyProjectedOpen, SensexProjectedOpen, GiftChangePercent, IsComplete |
+| `OptionsGeneratedEvent` | Option chain data | Options list, SelectedUnderlying, SelectedExpiry |
+| `OptionPriceUpdate` | Option tick | Symbol, Price, Volume, Timestamp, Source |
+| `OptionStatusUpdate` | Subscription status | Symbol, Status (Pending/Cached/Done), IsComplete |
+| `VWAPUpdate` | VWAP with bands | Symbol, VWAP, SD1Upper/Lower, SD2Upper/Lower |
+| `StraddlePriceUpdate` | Synthetic straddle | Symbol, Price, CEPrice, PEPrice, Timestamp |
+
+**Available Streams**:
+
+```csharp
+// Index streams (ReplaySubject<1> - late subscribers get latest)
+IObservable<IndexPriceUpdate> GiftNiftyStream { get; }
+IObservable<IndexPriceUpdate> NiftyStream { get; }
+IObservable<IndexPriceUpdate> SensexStream { get; }
+IObservable<IndexPriceUpdate> NiftyFutureStream { get; }
+
+// Projected opens (BehaviorSubject - always has value)
+IObservable<ProjectedOpenState> ProjectedOpenStream { get; }
+IObservable<OptionsGeneratedEvent> OptionsGeneratedStream { get; }
+
+// Option prices with backpressure
+IObservable<OptionPriceUpdate> OptionPriceStream { get; }           // Raw (every tick)
+IObservable<IList<OptionPriceUpdate>> OptionPriceBatchStream { get; } // Batched (100ms/50 items)
+IObservable<OptionPriceUpdate> OptionPriceSampledStream { get; }    // Sampled (100ms per symbol)
+
+// Status and VWAP
+IObservable<OptionStatusUpdate> OptionStatusStream { get; }
+IObservable<VWAPUpdate> VWAPStream { get; }
+IObservable<StraddlePriceUpdate> StraddlePriceStream { get; }
+```
+
+**Backpressure Configuration**:
+
+| Stream | Strategy | Configuration |
+|--------|----------|---------------|
+| `OptionPriceBatchStream` | Time OR Count window | 100ms interval, max 50 items per batch |
+| `OptionPriceSampledStream` | Per-symbol sampling | GroupBy(symbol) + Sample(100ms) |
+| Index streams | ReplaySubject(1) | Latest value cached for late subscribers |
+
+**Usage Examples**:
+
+```csharp
+// Subscribe to projected opens
+MarketDataReactiveHub.Instance.ProjectedOpenStream
+    .Where(state => state.IsComplete)
+    .ObserveOnDispatcher()
+    .Subscribe(state => {
+        NiftyOpenLabel.Text = state.NiftyProjectedOpen.ToString("F2");
+        SensexOpenLabel.Text = state.SensexProjectedOpen.ToString("F2");
+    });
+
+// Subscribe to batched option prices (UI-friendly)
+MarketDataReactiveHub.Instance.OptionPriceBatchStream
+    .ObserveOnDispatcher()
+    .Subscribe(batch => {
+        foreach (var update in batch)
+            UpdateOptionPrice(update.Symbol, update.Price);
+    });
+
+// Subscribe to per-symbol sampled prices (no flooding)
+MarketDataReactiveHub.Instance.OptionPriceSampledStream
+    .Where(o => o.Symbol.Contains("25000"))
+    .Subscribe(update => Console.WriteLine($"{update.Symbol}: {update.Price}"));
+```
+
+**Projected Opens Dependency Chain** (CombineLatest):
+
+```
+GIFT_NIFTY tick (with change %)
+         │
+         ▼
+   CombineLatest ◄─── NIFTY prior close (Take 1)
+         │        ◄─── SENSEX prior close (Take 1)
+         │
+         ▼
+  Calculate Projected Opens
+  - Nifty Open = Nifty Close × (1 + Gift Change%)
+  - Sensex Open = Sensex Close × (1 + Gift Change%)
+         │
+         ▼
+  ProjectedOpenStream.OnNext(state)
+         │
+         ▼
+  Trigger Options Generation (when IsComplete)
+```
 
 ### TPL Dataflow Pipeline (SubscriptionManager)
 
@@ -576,6 +708,27 @@ Enable DEBUG level to see:
 - `[SharedWS] Backoff state reset` - Successful reconnection
 
 ## Version History
+
+### v2.2 - Reactive Architecture (Current)
+- **MarketDataReactiveHub**: Single source of truth for all market data streams
+- **Reactive DTOs**: `IndexPriceUpdate`, `ProjectedOpenState`, `OptionPriceUpdate`, `OptionStatusUpdate`, `VWAPUpdate`, `StraddlePriceUpdate`
+- **Backpressure Streams**: `OptionPriceBatchStream` (100ms/50 items), `OptionPriceSampledStream` (per-symbol 100ms)
+- **Dependency Chains**: CombineLatest for projected opens calculation
+- **Dual Publishing**: Hub streams (primary) + Legacy events (backward compatibility)
+- **SubscriptionManager Integration**: Publishes to hub for option prices, status, symbol resolution
+- **VWAPDataCache Integration**: Publishes VWAP updates to hub
+
+### v2.1 - Modern Async Architecture
+- TPL Dataflow pipeline in SubscriptionManager
+- Rx.NET streams in OptimizedTickProcessor
+- WebSocket state machine in SharedWebSocketService
+- Event-driven patterns replacing "Sleep & Hope"
+
+### v2.0 - Core Features
+- Real-time market data via Zerodha Kite Connect
+- Option Chain with synthetic straddles
+- TBS Manager for time-based strategies
+- Multi-callback architecture
 
 See [CHANGES.MD](CHANGES.MD) for detailed changelog.
 

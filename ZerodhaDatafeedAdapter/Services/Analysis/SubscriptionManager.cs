@@ -11,6 +11,7 @@ using NinjaTrader.Data;
 using NinjaTrader.Gui;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.MarketData;
 using ZerodhaDatafeedAdapter.SyntheticInstruments;
@@ -103,7 +104,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private readonly SemaphoreSlim _historicalRateLimiter = new SemaphoreSlim(3, 3); // 3 concurrent API calls max
         private const int HISTORICAL_RATE_LIMIT_DELAY_MS = 350; // ~3 requests/second
 
-        // Event for UI updates
+        // ═══════════════════════════════════════════════════════════════════
+        // REACTIVE HUB INTEGRATION
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Reference to the reactive hub for publishing updates
+        private readonly MarketDataReactiveHub _hub = MarketDataReactiveHub.Instance;
+
+        // Event for UI updates (legacy - kept for backward compatibility)
         public event Action<string, double> OptionPriceUpdated;
 
         /// <summary>
@@ -111,6 +119,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// </summary>
         public void InjectSimulatedPrice(string symbol, double price)
         {
+            // Publish to reactive hub (primary)
+            _hub.PublishOptionPrice(symbol, price, 0, "Simulated");
+
+            // Legacy event for backward compatibility
             OptionPriceUpdated?.Invoke(symbol, price);
         }
 
@@ -285,13 +297,16 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         /// <summary>
         /// Event handler for option ticks from OptimizedTickProcessor.
-        /// Directly fires OptionPriceUpdated to update the UI.
+        /// Publishes to reactive hub and fires legacy event for backward compatibility.
         /// </summary>
         private void OnOptionTickReceived(string symbol, double price)
         {
             if (string.IsNullOrEmpty(symbol) || price <= 0) return;
 
-            // Forward to UI via OptionPriceUpdated event
+            // Publish to reactive hub (primary - enables batching and backpressure)
+            _hub.PublishOptionPrice(symbol, price, 0, "WebSocket");
+
+            // Legacy event for backward compatibility
             OptionPriceUpdated?.Invoke(symbol, price);
         }
 
@@ -415,7 +430,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         instrument.zerodhaSymbol = tradingSymbol;
                         Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Found token={token}, zerodhaSymbol={tradingSymbol}");
 
-                        // Notify UI of symbol resolution so it can update its internal mapping
+                        // Publish to reactive hub (primary)
+                        _hub.PublishSymbolResolved(generatedSymbol, tradingSymbol);
+
+                        // Legacy event for backward compatibility
                         SymbolResolved?.Invoke(generatedSymbol, tradingSymbol);
                     }
                 }
@@ -579,7 +597,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 {
                     Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Received {records.Count} bars");
 
-                    // Notify UI of status - "Cached" means data is in SQLite cache, ready for BarsRequest
+                    // Publish status to reactive hub and legacy event
+                    _hub.PublishOptionStatus(ntSymbol, $"Cached ({records.Count})");
                     OptionStatusUpdated?.Invoke(ntSymbol, $"Cached ({records.Count})");
 
                     // Track this instrument for straddle processing
@@ -617,6 +636,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         // Otherwise, live WebSocket price is more accurate
                         if (dataAge.TotalMinutes <= 5)
                         {
+                            _hub.PublishOptionPrice(ntSymbol, lastRecord.Close, 0, "Historical");
                             OptionPriceUpdated?.Invoke(ntSymbol, lastRecord.Close);
                         }
                         else
@@ -628,6 +648,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 else
                 {
                     Logger.Warn($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): No historical data received for {apiSymbol}");
+                    _hub.PublishOptionStatus(ntSymbol, "No Data");
                     OptionStatusUpdated?.Invoke(ntSymbol, "No Data");
                 }
             }
@@ -680,6 +701,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             if (errorCode == ErrorCode.NoError)
                             {
                                 Logger.Info($"[SubscriptionManager] Streaming BarsRequest completed for {symbolForClosure}: {barCount} bars");
+                                _hub.PublishOptionStatus(symbolForClosure, $"Done ({barCount})");
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
 
                                 // Start VWAP calculation immediately
@@ -688,6 +710,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             else
                             {
                                 Logger.Warn($"[SubscriptionManager] Streaming BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
+                                _hub.PublishOptionStatus(symbolForClosure, $"Error: {errorCode}");
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
                             }
                         });
@@ -820,6 +843,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                                 Logger.Debug($"[SubscriptionManager] PRE-DONE STATUS: {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
 
                                 // Update UI status to "Done" now that data is in NinjaTrader database
+                                _hub.PublishOptionStatus(symbolForClosure, $"Done ({barCount})");
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
 
                                 // LOG SUBSCRIPTION STATE AGAIN
@@ -832,6 +856,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             else
                             {
                                 Logger.Warn($"[SubscriptionManager] BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
+                                _hub.PublishOptionStatus(symbolForClosure, $"Error: {errorCode}");
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
                             }
 
@@ -918,6 +943,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                                 Logger.Debug($"[SubscriptionManager] PRE-DONE STATUS (STRDL): {symbolForClosure} - RefCount={refDetails.Count}, Sticky={refDetails.IsSticky}, Consumers={string.Join(",", refDetails.Consumers)}");
 
                                 // Update UI status to "Done" now that data is in NinjaTrader database
+                                _hub.PublishOptionStatus(symbolForClosure, $"Done ({barCount})");
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Done ({barCount})");
 
                                 // LOG SUBSCRIPTION STATE AGAIN
@@ -930,6 +956,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             else
                             {
                                 Logger.Warn($"[SubscriptionManager] STRDL BarsRequest failed for {symbolForClosure}: {errorCode} - {errorMessage}");
+                                _hub.PublishOptionStatus(symbolForClosure, $"Error: {errorCode}");
                                 OptionStatusUpdated?.Invoke(symbolForClosure, $"Error: {errorCode}");
                             }
 
