@@ -112,14 +112,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
 
         private void OnPriceSyncReady()
         {
-            _viewModel.OnOptionChainReady();
+            Dispatcher.InvokeAsync(() => _viewModel.OnOptionChainReady());
         }
 
         private void OnOptionsGenerated(List<MappedInstrument> options)
         {
             if (options == null || options.Count == 0) return;
             var first = options.First();
-            _viewModel.OnOptionsGenerated(first.underlying, first.expiry);
+            Dispatcher.InvokeAsync(() => _viewModel.OnOptionsGenerated(first.underlying, first.expiry));
         }
 
         private void OnPriceHubUpdated(string symbol, double price)

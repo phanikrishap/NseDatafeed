@@ -133,18 +133,19 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         private void RegisterStraddle(StraddleDefinition def)
         {
             _definitions.Add(def);
-            
+
             // Map CE leg to this synthetic symbol
-            _legToSyntheticMapping.AddOrUpdate(def.CESymbol, 
-                new List<string> { def.SyntheticSymbolNinjaTrader }, 
+            _legToSyntheticMapping.AddOrUpdate(def.CESymbol,
+                new List<string> { def.SyntheticSymbolNinjaTrader },
                 (key, list) => { list.Add(def.SyntheticSymbolNinjaTrader); return list; });
 
             // Map PE leg to this synthetic symbol
-            _legToSyntheticMapping.AddOrUpdate(def.PESymbol, 
-                new List<string> { def.SyntheticSymbolNinjaTrader }, 
+            _legToSyntheticMapping.AddOrUpdate(def.PESymbol,
+                new List<string> { def.SyntheticSymbolNinjaTrader },
                 (key, list) => { list.Add(def.SyntheticSymbolNinjaTrader); return list; });
-                
-            Logger.Info($"[SyntheticStraddleService] Registered straddle: {def.SyntheticSymbolNinjaTrader} (Legs: {def.CESymbol}, {def.PESymbol})");
+
+            // Use DEBUG level to avoid log flooding when registering many straddles
+            Logger.Debug($"[SyntheticStraddleService] Registered straddle: {def.SyntheticSymbolNinjaTrader} (Legs: {def.CESymbol}, {def.PESymbol})");
         }
 
         /// <summary>

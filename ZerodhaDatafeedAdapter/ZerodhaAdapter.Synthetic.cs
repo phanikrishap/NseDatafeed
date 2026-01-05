@@ -160,10 +160,8 @@ namespace ZerodhaDatafeedAdapter
                             }
                         }
                     }
-                    else
-                    {
-                        Logger.Debug($"ZerodhaAdapter: No subscriptions found for synthetic symbol {syntheticSymbol}");
-                    }
+                    // Note: No else clause needed - synthetic symbols without _l1Subscriptions
+                    // receive data via SyntheticStraddleService.StraddlePriceCalculated event
                 }
             }
             catch (Exception ex)

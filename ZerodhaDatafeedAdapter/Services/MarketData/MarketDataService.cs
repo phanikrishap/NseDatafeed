@@ -624,6 +624,9 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     return;
                 }
 
+                // Process direct tick callbacks (for symbols without NT Instrument, e.g., NIFTY_I)
+                ProcessDirectTickCallback(symbol, tickData);
+
                 // Route to OptimizedTickProcessor (single processing path - no legacy fallback)
                 // CRITICAL DEBUG: Log to diagnose tick flow to QueueTick
                 var processor = TickProcessor;
@@ -698,6 +701,82 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 return "Not initialized";
 
             return $"Connected={_sharedWebSocketService.IsConnected}, Subscriptions={_sharedWebSocketService.SubscriptionCount}";
+        }
+
+        #endregion
+
+        #region Direct Symbol Subscription (without NT Instrument)
+
+        // Direct tick callbacks for symbols without NT Instrument objects (e.g., NIFTY_I/NIFTY Futures)
+        private readonly ConcurrentDictionary<string, Action<double, long, DateTime>> _directTickCallbacks =
+            new ConcurrentDictionary<string, Action<double, long, DateTime>>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Subscribes to a symbol directly via WebSocket without requiring an NT Instrument object.
+        /// This is useful for symbols like NIFTY Futures that are dynamically resolved.
+        /// Ticks are delivered via the onTick callback.
+        /// </summary>
+        /// <param name="symbol">Symbol to subscribe to (e.g., NIFTY26JANFUT)</param>
+        /// <param name="instrumentToken">Zerodha instrument token</param>
+        /// <param name="isIndex">Whether this is an index symbol</param>
+        /// <param name="onTick">Callback for tick data (price, volume, timestamp)</param>
+        /// <returns>True if subscription succeeded</returns>
+        public async Task<bool> SubscribeToSymbolDirectAsync(
+            string symbol,
+            int instrumentToken,
+            bool isIndex,
+            Action<double, long, DateTime> onTick)
+        {
+            try
+            {
+                Logger.Info($"[MDS-DIRECT] SubscribeToSymbolDirectAsync: symbol={symbol}, token={instrumentToken}, isIndex={isIndex}");
+
+                // Register the callback
+                _directTickCallbacks[symbol] = onTick;
+
+                // Ensure WebSocket is initialized
+                await EnsureSharedWebSocketInitializedAsync(new ConcurrentDictionary<string, L1Subscription>());
+
+                // Subscribe via SharedWebSocketService
+                bool subscribed = await _sharedWebSocketService.SubscribeAsync(symbol, instrumentToken, isIndex);
+
+                if (subscribed)
+                {
+                    Logger.Info($"[MDS-DIRECT] Successfully subscribed to {symbol} (token={instrumentToken})");
+                }
+                else
+                {
+                    Logger.Error($"[MDS-DIRECT] Failed to subscribe to {symbol}");
+                    _directTickCallbacks.TryRemove(symbol, out _);
+                }
+
+                return subscribed;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MDS-DIRECT] Exception subscribing to {symbol}: {ex.Message}", ex);
+                _directTickCallbacks.TryRemove(symbol, out _);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Processes direct tick callbacks for symbols registered via SubscribeToSymbolDirectAsync.
+        /// Called from OnSharedWebSocketTickReceived.
+        /// </summary>
+        private void ProcessDirectTickCallback(string symbol, ZerodhaTickData tickData)
+        {
+            if (_directTickCallbacks.TryGetValue(symbol, out var callback))
+            {
+                try
+                {
+                    callback(tickData.LastTradePrice, tickData.TotalQtyTraded, tickData.ExchangeTimestamp);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MDS-DIRECT] Callback exception for {symbol}: {ex.Message}");
+                }
+            }
         }
 
         #endregion

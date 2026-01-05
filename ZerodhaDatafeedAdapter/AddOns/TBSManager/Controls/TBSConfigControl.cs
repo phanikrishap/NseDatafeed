@@ -31,10 +31,26 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
             {
                 _viewModel.PropertyChanged += (s, e) =>
                 {
-                    if (e.PropertyName == nameof(TBSViewModel.StatusMessage))
+                    Dispatcher.InvokeAsync(() =>
                     {
-                        Dispatcher.InvokeAsync(() => _lblConfigStatus.Text = _viewModel.StatusMessage);
-                    }
+                        if (e.PropertyName == nameof(TBSViewModel.StatusMessage))
+                        {
+                            _lblConfigStatus.Text = _viewModel.StatusMessage;
+                        }
+                        else if (e.PropertyName == nameof(TBSViewModel.SelectedDTE))
+                        {
+                            // Update DTE textbox when ViewModel changes (e.g., from Option Chain)
+                            _txtDTE.Text = _viewModel.SelectedDTE?.ToString() ?? "";
+                        }
+                        else if (e.PropertyName == nameof(TBSViewModel.SelectedUnderlying))
+                        {
+                            // Update underlying combo when ViewModel changes
+                            if (_cboUnderlying.Items.Contains(_viewModel.SelectedUnderlying))
+                            {
+                                _cboUnderlying.SelectedItem = _viewModel.SelectedUnderlying;
+                            }
+                        }
+                    });
                 };
             }
         }
@@ -85,7 +101,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
                 Width = 60,
                 Margin = new Thickness(5)
             };
-            _txtDTE.SetBinding(TextBox.TextProperty, new Binding("SelectedDTE") { Source = _viewModel, Mode = BindingMode.TwoWay, UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged });
+            // Use TextChanged event instead of binding (int? doesn't bind well to TextBox)
+            _txtDTE.TextChanged += (s, e) =>
+            {
+                if (int.TryParse(_txtDTE.Text, out int dte))
+                    _viewModel.SelectedDTE = dte;
+                else
+                    _viewModel.SelectedDTE = null;
+            };
             filterPanel.Children.Add(_txtDTE);
 
             _btnRefresh = new Button

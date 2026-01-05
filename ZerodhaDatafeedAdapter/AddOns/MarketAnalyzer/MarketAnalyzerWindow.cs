@@ -823,6 +823,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                     {
                         row = _rows.FirstOrDefault(r => r.Symbol == "SENSEX");
                     }
+                    else if (symbol.Equals("NIFTY_I", StringComparison.OrdinalIgnoreCase))
+                    {
+                        row = _rows.FirstOrDefault(r => r.Symbol == "NIFTY_I");
+                    }
 
                     if (row != null)
                     {

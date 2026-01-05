@@ -89,7 +89,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public event Action<string, double> PriceUpdated;
 
         private bool _priceSyncFired = false;
-        private bool _optionsAlreadyGenerated = false;
+        private int _optionsAlreadyGenerated = 0; // 0=false, 1=true - use Interlocked for thread-safe check-and-set
         private readonly object _syncLock = new object();
 
         // Cached expiries and lot sizes
@@ -144,11 +144,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 using (var conn = new SQLiteConnection($"Data Source={dbPath};Version=3;Read Only=True;"))
                 {
                     conn.Open();
-                    // Query: NFO-FUT segment, name='NIFTY', expiry >= today, earliest expiry first
+                    // Query: NFO-FUT segment, underlying='NIFTY', expiry >= today, earliest expiry first
+                    // Note: 'name' column has quoted values like "NIFTY", so we use 'underlying' which has clean values
                     string sql = @"SELECT instrument_token, tradingsymbol, expiry
                                    FROM instruments
                                    WHERE segment = 'NFO-FUT'
-                                   AND name = 'NIFTY'
+                                   AND underlying = 'NIFTY'
                                    AND expiry >= @today
                                    ORDER BY expiry ASC
                                    LIMIT 1";
@@ -415,7 +416,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         {
             MarketDataHub.Instance.Clear();
             _priceSyncFired = false;
-            _optionsAlreadyGenerated = false;
+            System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
 
             // Reset prices
             GiftNiftyPrice = 0;
@@ -510,12 +511,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             // NOTE: Removed StatusUpdated call here - it was causing flashing text in the status bar every tick
 
             // Trigger option generation if we have projected prices and haven't generated yet
-            if ((niftyProjected > 0 || sensexProjected > 0) && !_optionsAlreadyGenerated)
+            // Use Interlocked.CompareExchange to atomically check-and-set to prevent race condition
+            // where multiple threads see _optionsAlreadyGenerated=0 and all call GenerateOptions()
+            if ((niftyProjected > 0 || sensexProjected > 0) &&
+                System.Threading.Interlocked.CompareExchange(ref _optionsAlreadyGenerated, 1, 0) == 0)
             {
                 Logger.Info("[MarketAnalyzerLogic] CheckAndCalculate(): Triggering option generation...");
                 GenerateOptions(niftyProjected, sensexProjected);
             }
-            else if (_optionsAlreadyGenerated)
+            else if (_optionsAlreadyGenerated == 1)
             {
                 Logger.Debug("[MarketAnalyzerLogic] CheckAndCalculate(): Options already generated, skipping");
             }
@@ -531,8 +535,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             try
             {
-                // Mark as generated to prevent duplicate runs
-                _optionsAlreadyGenerated = true;
+                // Flag already set by Interlocked.CompareExchange in CheckAndCalculate()
+                // No need to set again here
 
                 // Fetch expiries from database
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Fetching NIFTY expiries from database...");
@@ -651,7 +655,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     if (projectedPrice < minValidPrice)
                     {
                         Logger.Error($"[MarketAnalyzerLogic] GenerateOptions(): Timeout waiting for {selectedUnderlying} price - aborting");
-                        _optionsAlreadyGenerated = false;
+                        System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
                         StatusUpdated?.Invoke($"Timeout: No {selectedUnderlying} price received");
                         return;
                     }
@@ -708,7 +712,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             {
                 Logger.Error($"[MarketAnalyzerLogic] GenerateOptions(): Exception - {ex.Message}", ex);
                 StatusUpdated?.Invoke("Error generating options: " + ex.Message);
-                _optionsAlreadyGenerated = false;
+                System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
             }
         }
 
@@ -754,7 +758,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// </summary>
         public void ResetOptionsGeneration()
         {
-            _optionsAlreadyGenerated = false;
+            System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
             Logger.Info("[MarketAnalyzerLogic] ResetOptionsGeneration(): Options can now be regenerated");
         }
     }

@@ -1,9 +1,11 @@
 using System;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 using ZerodhaDatafeedAdapter.ViewModels;
 using ZerodhaDatafeedAdapter.Models;
 
@@ -18,19 +20,54 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
         private TextBlock _lblMonitoringCount;
         private TextBlock _lblExecutionStatus;
         private TBSViewModel _viewModel;
+        private DispatcherTimer _rebuildDebounceTimer;
+        private bool _rebuildPending;
+        private bool _isRebuilding;
 
         public TBSExecutionControl(TBSViewModel viewModel)
         {
             _viewModel = viewModel;
             DataContext = _viewModel;
             Content = BuildUI();
-            
+
+            // Setup debounce timer for rebuild operations
+            _rebuildDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _rebuildDebounceTimer.Tick += (s, e) =>
+            {
+                _rebuildDebounceTimer.Stop();
+                if (_rebuildPending)
+                {
+                    _rebuildPending = false;
+                    RebuildExecutionUI();
+                }
+            };
+
             // Subscribe to VM events for tranche updates
             if (_viewModel != null)
             {
                 _viewModel.TrancheStateChanged += OnTrancheStateChanged;
                 _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+
+                // Subscribe to collection changes - debounce to avoid multiple rapid rebuilds
+                _viewModel.ExecutionStates.CollectionChanged += OnExecutionStatesCollectionChanged;
             }
+
+            // Initial UI build after all subscriptions are set up
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+            {
+                if (_viewModel.ExecutionStates.Count > 0)
+                {
+                    RebuildExecutionUI();
+                }
+            }));
+        }
+
+        private void OnExecutionStatesCollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+        {
+            // Debounce rebuild - multiple events fire during InitializeExecutionStates (Clear + multiple Adds)
+            _rebuildPending = true;
+            _rebuildDebounceTimer.Stop();
+            _rebuildDebounceTimer.Start();
         }
 
         private Grid BuildUI()
@@ -168,17 +205,31 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
 
         public void RebuildExecutionUI()
         {
-            _executionPanel.Children.Clear();
+            // Guard against concurrent rebuilds
+            if (_isRebuilding) return;
+            _isRebuilding = true;
 
-            bool isAlt = false;
-            foreach (var state in _viewModel.ExecutionStates.OrderBy(s => s.Config?.EntryTime ?? TimeSpan.Zero))
+            try
             {
-                var trancheUI = new TBSTrancheRowControl(state, isAlt);
-                _executionPanel.Children.Add(trancheUI);
-                isAlt = !isAlt;
+                _executionPanel.Children.Clear();
+
+                bool isAlt = false;
+                // Take a snapshot to avoid collection modification during iteration
+                var states = _viewModel.ExecutionStates.ToList();
+                foreach (var state in states.OrderBy(s => s.Config?.EntryTime ?? TimeSpan.Zero))
+                {
+                    var trancheUI = new TBSTrancheRowControl(state, isAlt);
+                    trancheUI.Tag = state; // Set Tag on UserControl for UpdateTrancheUIForState
+                    _executionPanel.Children.Add(trancheUI);
+                    isAlt = !isAlt;
+                }
+
+                _lblExecutionStatus.Text = $"Loaded {states.Count} tranches";
             }
-            
-            _lblExecutionStatus.Text = $"Loaded {_viewModel.ExecutionStates.Count} tranches";
+            finally
+            {
+                _isRebuilding = false;
+            }
         }
 
         private void UpdateTrancheUIForState(TBSExecutionState state)

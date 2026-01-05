@@ -114,19 +114,30 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
 
         private void OnTabPageLoaded(object sender, RoutedEventArgs e)
         {
+            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribing to events");
             SubscriptionManager.Instance.OptionPriceUpdated += OnOptionPriceUpdated;
             SubscriptionManager.Instance.OptionStatusUpdated += OnOptionStatusUpdated;
             SubscriptionManager.Instance.SymbolResolved += OnSymbolResolved;
             MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
             VWAPDataCache.Instance.VWAPUpdated += OnVWAPUpdated;
+            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribed to VWAPDataCache.VWAPUpdated");
 
             var adapter = Connector.Instance.GetAdapter() as ZerodhaAdapter;
             if (adapter?.SyntheticStraddleService != null)
                 adapter.SyntheticStraddleService.StraddlePriceCalculated += OnStraddlePriceCalculated;
+            Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Subscribed to SyntheticStraddleService.StraddlePriceCalculated");
+
+            // CRITICAL: Restart the UI update timer if it was stopped during unload
+            if (_uiUpdateTimer != null && !_uiUpdateTimer.IsEnabled)
+            {
+                _uiUpdateTimer.Start();
+                Logger.Info("[OptionChainTabPage] OnTabPageLoaded: Restarted _uiUpdateTimer");
+            }
         }
 
         private void OnTabPageUnloaded(object sender, RoutedEventArgs e)
         {
+            Logger.Info("[OptionChainTabPage] OnTabPageUnloaded: Unsubscribing from events");
             _uiUpdateTimer?.Stop();
             SubscriptionManager.Instance.OptionPriceUpdated -= OnOptionPriceUpdated;
             SubscriptionManager.Instance.OptionStatusUpdated -= OnOptionStatusUpdated;

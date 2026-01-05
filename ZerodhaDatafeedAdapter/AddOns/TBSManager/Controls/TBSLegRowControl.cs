@@ -62,8 +62,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
             legGrid.Children.Add(symbolText);
 
             // Entry Price
-            Grid.SetColumn(CreateBoundTextBlock("EntryPriceDisplay", 10), col++);
-            legGrid.Children.Add(legGrid.Children.Cast<UIElement>().Last());
+            var entryPriceText = CreateBoundTextBlock("EntryPriceDisplay", 10);
+            Grid.SetColumn(entryPriceText, col++);
+            legGrid.Children.Add(entryPriceText);
 
             // LTP
             var ltpText = CreateTextBlock(10, FontWeights.SemiBold);
@@ -72,16 +73,19 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
             legGrid.Children.Add(ltpText);
 
             // SL Price
-            Grid.SetColumn(CreateBoundTextBlock("SLPriceDisplay", 10), col++);
-            legGrid.Children.Add(legGrid.Children.Cast<UIElement>().Last());
+            var slPriceText = CreateBoundTextBlock("SLPriceDisplay", 10);
+            Grid.SetColumn(slPriceText, col++);
+            legGrid.Children.Add(slPriceText);
 
             // Exit Price
-            Grid.SetColumn(CreateBoundTextBlock("ExitPriceDisplay", 10), col++);
-            legGrid.Children.Add(legGrid.Children.Cast<UIElement>().Last());
+            var exitPriceText = CreateBoundTextBlock("ExitPriceDisplay", 10);
+            Grid.SetColumn(exitPriceText, col++);
+            legGrid.Children.Add(exitPriceText);
 
             // Exit Time
-            Grid.SetColumn(CreateBoundTextBlock("ExitTimeDisplay", 10), col++);
-            legGrid.Children.Add(legGrid.Children.Cast<UIElement>().Last());
+            var exitTimeText = CreateBoundTextBlock("ExitTimeDisplay", 10);
+            Grid.SetColumn(exitTimeText, col++);
+            legGrid.Children.Add(exitTimeText);
 
             // P&L
             var pnlText = CreateTextBlock(11, FontWeights.Bold);
@@ -104,12 +108,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
             legGrid.Children.Add(slStatusText);
 
             // Stoxxo Entry
-            Grid.SetColumn(CreateBoundTextBlock("StoxxoEntryPriceDisplay", 10), col++);
-            legGrid.Children.Add(legGrid.Children.Cast<UIElement>().Last());
+            var stoxxoEntryText = CreateBoundTextBlock("StoxxoEntryPriceDisplay", 10);
+            Grid.SetColumn(stoxxoEntryText, col++);
+            legGrid.Children.Add(stoxxoEntryText);
 
             // Stoxxo Exit
-            Grid.SetColumn(CreateBoundTextBlock("StoxxoExitPriceDisplay", 10), col++);
-            legGrid.Children.Add(legGrid.Children.Cast<UIElement>().Last());
+            var stoxxoExitText = CreateBoundTextBlock("StoxxoExitPriceDisplay", 10);
+            Grid.SetColumn(stoxxoExitText, col++);
+            legGrid.Children.Add(stoxxoExitText);
 
             // Stoxxo Status
             var stoxxoStatusText = CreateTextBlock(9);

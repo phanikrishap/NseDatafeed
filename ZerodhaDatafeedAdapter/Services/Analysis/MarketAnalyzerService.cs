@@ -249,7 +249,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         /// <summary>
         /// Subscribes to NIFTY Futures (NIFTY_I) using the dynamically resolved symbol.
-        /// Routes updates to NiftyFuturesTicker via MarketAnalyzerLogic.
+        /// Unlike indices which have pre-existing NT instruments, NIFTY Futures requires:
+        /// 1. Adding the mapping to SymbolMappingService (with token from database)
+        /// 2. Subscribing directly via MarketDataService using the token
         /// </summary>
         private void SubscribeToNiftyFutures(string niftyFutSymbol)
         {
@@ -280,39 +282,21 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         return;
                     }
 
-                    // Give instruments time to be created by the adapter
-                    await Task.Delay(2000);
-
-                    Logger.Debug($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Getting NT instrument on UI thread");
-
-                    Instrument ntInstrument = null;
-
-                    // Try to get or create instrument on UI thread
-                    await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() => {
-                        Logger.Debug($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Inside dispatcher, calling Instrument.GetInstrument()");
-                        ntInstrument = Instrument.GetInstrument(niftyFutSymbol);
-
-                        // If instrument doesn't exist, try to create it
-                        if (ntInstrument == null)
-                        {
-                            Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Instrument not found, attempting to create...");
-                            ntInstrument = CreateNiftyFuturesInstrument(niftyFutSymbol);
-                        }
-                    });
-
-                    if (ntInstrument != null)
+                    // Step 1: Add mapping to SymbolMappingService (like index_mappings.json does for GIFT_NIFTY)
+                    // This ensures InstrumentManager.GetInstrumentToken() will find the token
+                    bool mappingAdded = AddNiftyFuturesMappingToCache(niftyFutSymbol);
+                    if (!mappingAdded)
                     {
-                        string instrumentName = ntInstrument.MasterInstrument.Name;
-                        Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Instrument ready - MasterInstrument.Name='{instrumentName}'");
+                        Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Failed to add mapping to cache");
+                        return;
+                    }
 
-                        // Subscribe with NIFTY_I as the logical name for routing to NiftyFuturesTicker
-                        SubscribeToNiftyFuturesWithClosure(ntInstrument, instrumentName, niftyFutSymbol);
-                        Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Successfully subscribed to market data");
-                    }
-                    else
-                    {
-                        Logger.Warn($"[MarketAnalyzerService] SubscribeToNiftyFutures({niftyFutSymbol}): Failed to get or create instrument");
-                    }
+                    // Step 2: Subscribe to WebSocket using MarketDataService directly (no NT Instrument needed)
+                    // This is similar to how indices work - we just need the token in the mapping cache
+                    await SubscribeToNiftyFuturesViaWebSocket(niftyFutSymbol);
+
+                    // Step 3: Request historical data for prior close
+                    RequestNiftyFuturesHistoricalData(niftyFutSymbol);
                 }
                 catch (Exception ex)
                 {
@@ -322,98 +306,106 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Creates an NT instrument for NIFTY Futures using data from InstrumentDbService
+        /// Adds NIFTY Futures mapping to SymbolMappingService in-memory cache and persists to fo_mappings.json.
+        /// This is similar to how index_mappings.json provides mappings for GIFT_NIFTY, NIFTY, SENSEX.
         /// </summary>
-        private Instrument CreateNiftyFuturesInstrument(string niftyFutSymbol)
+        private bool AddNiftyFuturesMappingToCache(string niftyFutSymbol)
         {
             try
             {
-                // Get the token from MarketAnalyzerLogic
+                // Get the token from MarketAnalyzerLogic (resolved from database)
                 long token = _logic.NiftyFuturesToken;
                 DateTime expiry = _logic.NiftyFuturesExpiry;
 
                 if (token == 0)
                 {
-                    Logger.Warn($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): Token not resolved");
-                    return null;
+                    Logger.Warn($"[MarketAnalyzerService] AddNiftyFuturesMappingToCache({niftyFutSymbol}): Token not resolved");
+                    return false;
                 }
 
-                Logger.Info($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): token={token}, expiry={expiry:yyyy-MM-dd}");
+                Logger.Info($"[MarketAnalyzerService] AddNiftyFuturesMappingToCache({niftyFutSymbol}): token={token}, expiry={expiry:yyyy-MM-dd}");
 
-                // Create an InstrumentDefinition for InstrumentManager
-                var instrumentDef = new InstrumentDefinition
+                // Create mapping object (similar to MappedInstrument in index_mappings.json)
+                var mapping = new MappedInstrument
                 {
-                    Symbol = niftyFutSymbol,
-                    Segment = "NFO-FUT",
-                    TickSize = 0.05,
-                    Expiry = expiry
+                    symbol = niftyFutSymbol,
+                    zerodhaSymbol = niftyFutSymbol,
+                    underlying = "NIFTY",
+                    segment = "NFO-FUT",
+                    instrument_token = token,
+                    expiry = expiry,
+                    tick_size = 0.05,
+                    lot_size = 75, // NIFTY lot size
+                    is_index = false
                 };
 
-                string ntName;
-                bool created = InstrumentManager.Instance.CreateInstrument(instrumentDef, out ntName);
+                // Add to InstrumentManager (which adds to SymbolMappingService in-memory cache)
+                InstrumentManager.Instance.AddMappedInstrument(niftyFutSymbol, mapping);
 
-                if (created)
-                {
-                    Logger.Info($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): Successfully created NT instrument '{ntName}'");
-                    return Instrument.GetInstrument(ntName);
-                }
-                else
-                {
-                    // Instrument might already exist
-                    Logger.Debug($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): CreateInstrument returned false, trying to get existing");
-                    return Instrument.GetInstrument(niftyFutSymbol);
-                }
+                // Also add with NIFTY_I alias for easy lookup
+                InstrumentManager.Instance.AddMappedInstrument("NIFTY_I", mapping);
+
+                Logger.Info($"[MarketAnalyzerService] AddNiftyFuturesMappingToCache({niftyFutSymbol}): Mapping added to cache (token={token})");
+                return true;
             }
             catch (Exception ex)
             {
-                Logger.Error($"[MarketAnalyzerService] CreateNiftyFuturesInstrument({niftyFutSymbol}): Exception - {ex.Message}", ex);
-                return null;
+                Logger.Error($"[MarketAnalyzerService] AddNiftyFuturesMappingToCache({niftyFutSymbol}): Exception - {ex.Message}", ex);
+                return false;
             }
         }
 
         /// <summary>
-        /// Subscribes to NIFTY Futures market data with proper closure.
-        /// Routes updates to NiftyFuturesTicker via the NIFTY_I alias.
+        /// Subscribes to NIFTY Futures via WebSocket using MarketDataService.
+        /// Uses SharedWebSocketService for efficient single-connection model.
         /// </summary>
-        private void SubscribeToNiftyFuturesWithClosure(Instrument instrument, string instrumentName, string niftyFutSymbol)
+        private async Task SubscribeToNiftyFuturesViaWebSocket(string niftyFutSymbol)
         {
-            Logger.Debug($"[MarketAnalyzerService] SubscribeToNiftyFuturesWithClosure({instrumentName}): Getting adapter");
-
-            var adapter = Connector.Instance.GetAdapter() as ZerodhaAdapter;
-            if (adapter != null)
+            try
             {
-                Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesWithClosure({instrumentName}): Adapter found, calling SubscribeMarketData()");
+                Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesViaWebSocket({niftyFutSymbol}): Starting WebSocket subscription");
 
-                // Use the actual symbol name for updates - MarketAnalyzerLogic.UpdatePrice handles NIFTY_I aliases
-                adapter.SubscribeMarketData(instrument, (type, price, vol, time, unk) => {
-                    if (type == MarketDataType.Last)
+                // Get the token from InstrumentManager (should now be in cache)
+                long token = InstrumentManager.Instance.GetInstrumentToken(niftyFutSymbol);
+                if (token == 0)
+                {
+                    Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFuturesViaWebSocket({niftyFutSymbol}): Token not found in cache!");
+                    return;
+                }
+
+                Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesViaWebSocket({niftyFutSymbol}): Token={token}, subscribing via SharedWebSocket");
+
+                // Subscribe via MarketDataService (uses SharedWebSocketService)
+                var marketDataService = MarketDataService.Instance;
+                bool subscribed = await marketDataService.SubscribeToSymbolDirectAsync(
+                    niftyFutSymbol,
+                    (int)token,
+                    isIndex: false,
+                    onTick: (price, volume, timestamp) =>
                     {
-                        Logger.Debug($"[MarketAnalyzerService] MarketData(NIFTY_I/{instrumentName}): Last={price}");
-                        // Use niftyFutSymbol (e.g., NIFTY26JANFUT) - MarketAnalyzerLogic.UpdatePrice will route to NiftyFuturesTicker
+                        Logger.Debug($"[MarketAnalyzerService] NIFTY_I Tick: price={price}");
                         _logic.UpdatePrice(niftyFutSymbol, price);
-                    }
-                    else if (type == MarketDataType.LastClose)
-                    {
-                        Logger.Debug($"[MarketAnalyzerService] MarketData(NIFTY_I/{instrumentName}): LastClose={price}");
-                        _logic.UpdateClose(niftyFutSymbol, price);
-                    }
-                });
+                    });
 
-                Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesWithClosure({instrumentName}): Market data callback registered");
-
-                // Request historical data for prior close - use NFO-FUT market type
-                RequestNiftyFuturesHistoricalData(instrument, instrumentName, niftyFutSymbol);
+                if (subscribed)
+                {
+                    Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesViaWebSocket({niftyFutSymbol}): Successfully subscribed");
+                }
+                else
+                {
+                    Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFuturesViaWebSocket({niftyFutSymbol}): Subscription failed");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFuturesWithClosure({instrumentName}): Adapter is NULL - cannot subscribe to market data");
+                Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFuturesViaWebSocket({niftyFutSymbol}): Exception - {ex.Message}", ex);
             }
         }
 
         /// <summary>
         /// Requests historical data for NIFTY Futures to get prior close
         /// </summary>
-        private void RequestNiftyFuturesHistoricalData(Instrument instrument, string instrumentName, string niftyFutSymbol)
+        private void RequestNiftyFuturesHistoricalData(string niftyFutSymbol)
         {
             Task.Run(async () =>
             {

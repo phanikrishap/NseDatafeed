@@ -54,6 +54,7 @@ namespace ZerodhaDatafeedAdapter.ViewModels
                 {
                     _selectedUnderlying = value;
                     OnPropertyChanged();
+                    ApplyFilter();
                     RefreshExecutionStates();
                 }
             }
@@ -71,6 +72,7 @@ namespace ZerodhaDatafeedAdapter.ViewModels
                 {
                     _selectedDTE = value;
                     OnPropertyChanged();
+                    ApplyFilter();
                     RefreshExecutionStates();
                 }
             }
@@ -230,6 +232,17 @@ namespace ZerodhaDatafeedAdapter.ViewModels
                 // Update available filters
                 UpdateAvailableFilters(configs);
 
+                // Ensure "All" is selected by default after populating
+                if (string.IsNullOrEmpty(_selectedUnderlying) || !AvailableUnderlyings.Contains(_selectedUnderlying))
+                {
+                    _selectedUnderlying = "All";
+                    OnPropertyChanged(nameof(SelectedUnderlying));
+                }
+
+                // Apply filter to show configs based on current selection and initialize execution states
+                ApplyFilter();
+                RefreshExecutionStates();
+
                 StatusMessage = $"Loaded {configs.Count} configurations";
                 TBSLogger.Info($"[TBSViewModel] Loaded {configs.Count} configurations");
             }
@@ -356,11 +369,33 @@ namespace ZerodhaDatafeedAdapter.ViewModels
         }
 
         /// <summary>
-        /// Called when Option Chain generates options for an underlying/expiry
+        /// Called when Option Chain generates options for an underlying/expiry.
+        /// Auto-sets the DTE filter based on the selected expiry.
         /// </summary>
         public void OnOptionsGenerated(string underlying, DateTime? expiry)
         {
             _executionService.OnOptionsGenerated(underlying, expiry);
+
+            // Auto-set filter based on Option Chain selection
+            if (!string.IsNullOrEmpty(underlying))
+            {
+                // Set underlying filter (or "All" to show all underlyings)
+                _selectedUnderlying = underlying;
+                OnPropertyChanged(nameof(SelectedUnderlying));
+            }
+
+            if (expiry.HasValue)
+            {
+                // Compute DTE from expiry
+                int dte = (int)(expiry.Value.Date - DateTime.Today).TotalDays;
+                _selectedDTE = dte;
+                OnPropertyChanged(nameof(SelectedDTE));
+                TBSLogger.Info($"[TBSViewModel] OnOptionsGenerated: Auto-set DTE={dte} from expiry={expiry.Value:dd-MMM-yyyy}");
+            }
+
+            // Apply filter and refresh execution states with new DTE
+            ApplyFilter();
+            RefreshExecutionStates();
         }
 
         #endregion
