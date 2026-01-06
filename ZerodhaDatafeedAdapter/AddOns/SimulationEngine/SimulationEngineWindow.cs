@@ -144,13 +144,21 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
 
         public SimulationEngineTabPage()
         {
-            Background = _bgColor;
-            _config = new SimulationConfig();
+            try
+            {
+                Background = _bgColor;
+                _config = new SimulationConfig();
 
-            BuildUI();
-            BindToService();
+                BuildUI();
+                BindToService();
 
-            Logger.Info("[SimulationEngineTabPage] Initialized");
+                Logger.Info("[SimulationEngineTabPage] Initialized");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SimulationEngineTabPage] Constructor error: {ex.Message}\n{ex.StackTrace}", ex);
+                throw;
+            }
         }
 
         private void BuildUI()
@@ -792,6 +800,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
                 if (success)
                 {
                     Logger.Info("[SimulationEngineTabPage] Data loaded successfully");
+
+                    // Publish the simulated option chain to MarketDataReactiveHub
+                    // This regenerates the Option Chain window with simulation config (underlying, expiry, strikes)
+                    SimulationService.Instance.PublishSimulatedOptionChain();
+                    Logger.Info("[SimulationEngineTabPage] Simulated option chain published to Option Chain window");
                 }
                 else
                 {

@@ -11,6 +11,7 @@ using NinjaTrader.Data;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 
@@ -144,6 +145,21 @@ namespace ZerodhaDatafeedAdapter.Services
         /// Returns true if simulation is actively running (Playing state)
         /// </summary>
         public bool IsSimulationActive => State == SimulationState.Playing;
+
+        /// <summary>
+        /// Returns true if we are in simulation mode (data loaded and ready, playing, or paused).
+        /// Use this to check if Option Chain should use simulation data vs live data.
+        /// </summary>
+        public bool IsSimulationMode => State == SimulationState.Ready ||
+                                         State == SimulationState.Playing ||
+                                         State == SimulationState.Paused ||
+                                         State == SimulationState.Completed;
+
+        /// <summary>
+        /// Gets the current simulation configuration (underlying, expiry, etc.)
+        /// Returns null if not in simulation mode.
+        /// </summary>
+        public SimulationConfig CurrentConfig => IsSimulationMode ? _config : null;
 
         /// <summary>
         /// Gets the current time to use for TBS logic.
@@ -313,6 +329,106 @@ namespace ZerodhaDatafeedAdapter.Services
 
             // Use centralized SymbolHelper for consistent symbol generation
             return SymbolHelper.BuildOptionSymbol(underlying, expiry, strike, optionType, isMonthlyExpiry);
+        }
+
+        /// <summary>
+        /// Generates MappedInstrument list for simulation, enabling Option Chain to display
+        /// the simulated option chain structure (underlying, expiry, strikes).
+        /// </summary>
+        private List<MappedInstrument> GenerateOptionsForSimulation(SimulationConfig config)
+        {
+            var instruments = new List<MappedInstrument>();
+            decimal atmStrike = config.ATMStrike;
+            int stepSize = config.StepSize;
+            int strikeCount = config.StrikeCount;
+            string prefix = config.SymbolPrefix?.Trim() ?? "";
+
+            // Determine segment based on underlying
+            string segment = config.Underlying.Contains("SENSEX") ? "BFO-OPT" : "NFO-OPT";
+            int lotSize = config.Underlying == "SENSEX" ? 10 : 50;
+
+            // Check if this is a monthly expiry
+            var expiries = MarketAnalyzerLogic.Instance?.GetCachedExpiries(config.Underlying);
+            bool isMonthlyExpiry = expiries != null && expiries.Count > 0
+                ? SymbolHelper.IsMonthlyExpiry(config.ExpiryDate, expiries)
+                : true;
+
+            for (int i = -strikeCount; i <= strikeCount; i++)
+            {
+                decimal strike = atmStrike + (i * stepSize);
+
+                // Generate CE
+                string ceSymbol = FormatOptionSymbolForSimulation(config.Underlying, config.ExpiryDate, strike, "CE", prefix, isMonthlyExpiry);
+                instruments.Add(new MappedInstrument
+                {
+                    symbol = ceSymbol,
+                    zerodhaSymbol = ceSymbol,
+                    underlying = config.Underlying,
+                    expiry = config.ExpiryDate,
+                    strike = (double)strike,
+                    option_type = "CE",
+                    segment = segment,
+                    tick_size = 0.05,
+                    lot_size = lotSize,
+                    instrument_token = 0 // Simulation doesn't need real token
+                });
+
+                // Generate PE
+                string peSymbol = FormatOptionSymbolForSimulation(config.Underlying, config.ExpiryDate, strike, "PE", prefix, isMonthlyExpiry);
+                instruments.Add(new MappedInstrument
+                {
+                    symbol = peSymbol,
+                    zerodhaSymbol = peSymbol,
+                    underlying = config.Underlying,
+                    expiry = config.ExpiryDate,
+                    strike = (double)strike,
+                    option_type = "PE",
+                    segment = segment,
+                    tick_size = 0.05,
+                    lot_size = lotSize,
+                    instrument_token = 0
+                });
+            }
+
+            Logger.Info($"[SimulationService] GenerateOptionsForSimulation: Generated {instruments.Count} MappedInstruments for {config.Underlying}");
+            return instruments;
+        }
+
+        /// <summary>
+        /// Publishes simulated option chain to MarketDataReactiveHub.
+        /// This triggers OptionChainWindow to regenerate its rows with simulation data.
+        /// Call this after LoadHistoricalBars() succeeds.
+        /// </summary>
+        public void PublishSimulatedOptionChain()
+        {
+            if (_config == null)
+            {
+                Logger.Warn("[SimulationService] PublishSimulatedOptionChain: No config available");
+                return;
+            }
+
+            Logger.Info($"[SimulationService] PublishSimulatedOptionChain: Publishing option chain for {_config.Underlying} {_config.ExpiryDate:dd-MMM-yyyy}");
+
+            // Generate MappedInstrument list
+            var options = GenerateOptionsForSimulation(_config);
+
+            // Use calculated DTE from config (SimulationDate to ExpiryDate)
+            int dte = _config.CalculatedDTE;
+
+            // Publish to MarketDataReactiveHub - this will trigger OptionChainWindow.OnOptionsGenerated
+            MarketDataReactiveHub.Instance.PublishOptionsGenerated(
+                options,
+                _config.Underlying,
+                _config.ExpiryDate,
+                dte,
+                (double)_config.ATMStrike,
+                (double)_config.ProjectedOpen
+            );
+
+            // Also set ATM strike in MarketAnalyzerLogic for consistency
+            MarketAnalyzerLogic.Instance.SetATMStrike(_config.Underlying, _config.ATMStrike);
+
+            Logger.Info($"[SimulationService] PublishSimulatedOptionChain: Published {options.Count} options, ATM={_config.ATMStrike}, DTE={dte}");
         }
 
         /// <summary>
@@ -616,7 +732,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 {
                     // Inject this tick
                     MarketAnalyzerLogic.Instance.UpdateOptionPrice(tick.Symbol, (decimal)tick.Price, tick.Time);
-                    SubscriptionManager.Instance.InjectSimulatedPrice(tick.Symbol, tick.Price);
+                    SubscriptionManager.Instance.InjectSimulatedPrice(tick.Symbol, tick.Price, tick.Time);
 
                     _currentTickIndex++;
                     ticksInjected++;

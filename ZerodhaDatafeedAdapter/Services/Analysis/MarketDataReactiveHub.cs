@@ -388,7 +388,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <param name="price">Current price</param>
         /// <param name="volume">Trading volume (optional)</param>
         /// <param name="source">Source of update (WebSocket, Historical, Simulated)</param>
-        public void PublishOptionPrice(string symbol, double price, double volume = 0, string source = "WebSocket")
+        /// <param name="timestamp">Optional timestamp - uses DateTime.Now if not provided (for simulation replay)</param>
+        public void PublishOptionPrice(string symbol, double price, double volume = 0, string source = "WebSocket", DateTime? timestamp = null)
         {
             if (string.IsNullOrEmpty(symbol) || price <= 0) return;
 
@@ -397,7 +398,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 Symbol = symbol,
                 Price = price,
                 Volume = volume,
-                Timestamp = DateTime.Now,
+                Timestamp = timestamp ?? DateTime.Now,
                 Source = source
             };
 

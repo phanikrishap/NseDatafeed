@@ -114,10 +114,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <summary>
         /// Inject a simulated price update (for SimulationService to feed Option Chain)
         /// </summary>
-        public void InjectSimulatedPrice(string symbol, double price)
+        public void InjectSimulatedPrice(string symbol, double price, DateTime? timestamp = null)
         {
             // Publish to reactive hub only (single source of truth)
-            _hub.PublishOptionPrice(symbol, price, 0, "Simulated");
+            // Pass timestamp for simulation replay (shows historical tick time instead of current time)
+            _hub.PublishOptionPrice(symbol, price, 0, "Simulated", timestamp);
         }
 
         // Flag to track if we've subscribed to the event-driven tick feed (0=false, 1=true)

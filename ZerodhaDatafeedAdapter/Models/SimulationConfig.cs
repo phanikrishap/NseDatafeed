@@ -113,6 +113,19 @@ namespace ZerodhaDatafeedAdapter.Models
         }
 
         /// <summary>
+        /// Calculated DTE (Days to Expiry) from SimulationDate to ExpiryDate.
+        /// This represents what DTE would actually be on the simulated day.
+        /// </summary>
+        public int CalculatedDTE
+        {
+            get
+            {
+                int dte = (ExpiryDate.Date - SimulationDate.Date).Days;
+                return dte < 0 ? 0 : dte;
+            }
+        }
+
+        /// <summary>
         /// Total number of option symbols to load (CE + PE for each strike)
         /// </summary>
         public int TotalSymbolCount => (2 * StrikeCount + 1) * 2;
