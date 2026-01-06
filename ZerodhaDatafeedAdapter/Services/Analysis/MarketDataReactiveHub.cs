@@ -64,6 +64,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private readonly Subject<StraddlePriceUpdate> _straddlePriceSubject = new Subject<StraddlePriceUpdate>();
 
         // ═══════════════════════════════════════════════════════════════════
+        // TBS PRICE SYNC STREAM (ReplaySubject for late subscribers)
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Price sync ready signal - ReplaySubject(1) ensures late subscribers get the value
+        private readonly ReplaySubject<bool> _priceSyncReadySubject = new ReplaySubject<bool>(1);
+        private bool _priceSyncPublished = false;
+
+        // ═══════════════════════════════════════════════════════════════════
         // BACKPRESSURE CONFIGURATION
         // ═══════════════════════════════════════════════════════════════════
 
@@ -171,6 +179,13 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// Stream of synthetic straddle price updates.
         /// </summary>
         public IObservable<StraddlePriceUpdate> StraddlePriceStream => _straddlePriceSubject.AsObservable();
+
+        /// <summary>
+        /// Stream that emits true when price sync is ready (NIFTY and SENSEX prices received).
+        /// Uses ReplaySubject(1) so late subscribers (like TBS Manager opened after startup)
+        /// immediately receive the value if it was already published.
+        /// </summary>
+        public IObservable<bool> PriceSyncReadyStream => _priceSyncReadySubject.AsObservable();
 
         #endregion
 
@@ -476,6 +491,23 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             _straddlePriceSubject.OnNext(update);
         }
 
+        /// <summary>
+        /// Publishes price sync ready signal. Uses ReplaySubject(1) so late subscribers
+        /// (like TBS Manager opened after Option Chain is ready) will immediately receive the value.
+        /// This method is idempotent - subsequent calls are ignored.
+        /// </summary>
+        public void PublishPriceSyncReady()
+        {
+            lock (_syncLock)
+            {
+                if (_priceSyncPublished) return;
+                _priceSyncPublished = true;
+            }
+
+            Logger.Info("[MarketDataReactiveHub] Publishing PriceSyncReady to Rx stream");
+            _priceSyncReadySubject.OnNext(true);
+        }
+
         #endregion
 
         #region Symbol Routing
@@ -658,6 +690,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             // VWAP & Straddle streams
             _vwapSubject.Dispose();
             _straddlePriceSubject.Dispose();
+
+            // TBS price sync stream
+            _priceSyncReadySubject.Dispose();
 
             Logger.Info("[MarketDataReactiveHub] Disposed");
         }

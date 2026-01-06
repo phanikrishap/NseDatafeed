@@ -228,12 +228,62 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
                 Margin = new Thickness(0, 5, 0, 0)
             };
 
+            // Add column header row first
+            panel.Children.Add(CreateLegsHeaderRow());
+
             foreach (var leg in _state.Legs)
             {
                 panel.Children.Add(new TBSLegRowControl(leg));
             }
 
             return panel;
+        }
+
+        private Border CreateLegsHeaderRow()
+        {
+            var headerBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromRgb(45, 45, 50)),
+                BorderBrush = TBSStyles.BorderColor,
+                BorderThickness = new Thickness(0, 0, 0, 1),
+                Padding = new Thickness(10, 5, 10, 5)
+            };
+
+            var headerGrid = new Grid();
+
+            // Column widths must match TBSLegRowControl exactly
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(40) });   // Leg
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(130) });  // Symbol
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });   // Entry
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });   // LTP
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });   // SL
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });   // Exit
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });   // Time
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });   // P&L
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(55) });   // Status
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(55) });   // SL Sts
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });   // Stx Entry
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });   // Stx Exit
+            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });   // Stx Sts
+
+            string[] headers = { "Leg", "Symbol", "Entry", "LTP", "SL", "Exit", "Time", "P&L", "Status", "SL\nSts", "Stx\nEntry", "Stx\nExit", "Stx\nSts" };
+
+            for (int i = 0; i < headers.Length; i++)
+            {
+                var headerText = new TextBlock
+                {
+                    Text = headers[i],
+                    FontSize = 9,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 160)),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                Grid.SetColumn(headerText, i);
+                headerGrid.Children.Add(headerText);
+            }
+
+            headerBorder.Child = headerGrid;
+            return headerBorder;
         }
 
         public void Refresh()

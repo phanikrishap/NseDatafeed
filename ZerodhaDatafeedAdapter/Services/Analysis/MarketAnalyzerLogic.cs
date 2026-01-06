@@ -90,6 +90,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public event Action<string, double> PriceUpdated;
 
         private bool _priceSyncFired = false;
+        /// <summary>
+        /// Returns true if price sync is ready (NIFTY and SENSEX prices received).
+        /// Used by late subscribers to check if they missed the PriceSyncReady event.
+        /// </summary>
+        public bool IsPriceSyncReady => _priceSyncFired;
         private int _optionsAlreadyGenerated = 0; // 0=false, 1=true - use Interlocked for thread-safe check-and-set
         private readonly object _syncLock = new object();
 
@@ -451,14 +456,29 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         private void CheckAndFirePriceSyncReady()
         {
+            // DEPRECATED: This method checked for NIFTY/SENSEX spot prices, but that's unreliable
+            // because prices can be stored with different keys. The definitive signal is OptionsGenerated.
+            // Keeping for backward compatibility but it won't fire anymore - use FirePriceSyncReadyAfterOptionsGenerated instead.
+        }
+
+        /// <summary>
+        /// Fires PriceSyncReady after options are generated. This is the definitive signal that
+        /// Option Chain has all the data TBS needs: underlying, expiry, DTE, ATM strikes, and prices.
+        /// </summary>
+        private void FirePriceSyncReadyAfterOptionsGenerated(string underlying, DateTime expiry, int dte, double atmStrike)
+        {
             lock (_syncLock)
             {
                 if (_priceSyncFired) return;
-                if (MarketDataHub.Instance.GetPrice("NIFTY 50") > 0 && MarketDataHub.Instance.GetPrice("SENSEX") > 0)
-                {
-                    _priceSyncFired = true;
-                    PriceSyncReady?.Invoke();
-                }
+                _priceSyncFired = true;
+
+                Logger.Info($"[MarketAnalyzerLogic] PriceSyncReady fired after OptionsGenerated: Underlying={underlying}, Expiry={expiry:dd-MMM-yyyy}, DTE={dte}, ATM={atmStrike}");
+
+                // Publish to reactive hub (primary - uses ReplaySubject for late subscribers)
+                MarketDataReactiveHub.Instance.PublishPriceSyncReady();
+
+                // Fire legacy event for backward compatibility
+                PriceSyncReady?.Invoke();
             }
         }
 
@@ -704,9 +724,25 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Generated {generated.Count} option symbols");
                 Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Strike range = {atmStrike - (30 * stepSize)} to {atmStrike + (30 * stepSize)}");
 
-                // Fire event to notify subscribers (Option Chain Window)
+                // Publish to reactive hub (primary - OptionChainWindow uses this)
+                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Publishing to MarketDataReactiveHub...");
+                int dte = selectedUnderlying == "NIFTY" ? (int)niftyDTE : (int)sensexDTE;
+                MarketDataReactiveHub.Instance.PublishOptionsGenerated(
+                    generated,
+                    selectedUnderlying,
+                    selectedExpiry,
+                    dte,
+                    atmStrike,
+                    projectedPrice);
+
+                // Fire legacy event for backward compatibility
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Invoking OptionsGenerated event...");
                 OptionsGenerated?.Invoke(generated);
+
+                // Fire PriceSyncReady AFTER options are generated - this is the definitive signal
+                // that Option Chain has underlying, expiry, DTE, ATM strikes, and is ready for TBS
+                FirePriceSyncReadyAfterOptionsGenerated(selectedUnderlying, selectedExpiry, dte, atmStrike);
+
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Completed successfully");
             }
             catch (Exception ex)
@@ -901,6 +937,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 // Also fire legacy event for backward compatibility
                 OptionsGenerated?.Invoke(generated);
+
+                // Fire PriceSyncReady AFTER options are generated - this is the definitive signal
+                // that Option Chain has underlying, expiry, DTE, ATM strikes, and is ready for TBS
+                FirePriceSyncReadyAfterOptionsGenerated(selectedUnderlying, selectedExpiry, dte, atmStrike);
 
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Completed successfully");
             }

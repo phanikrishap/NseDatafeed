@@ -64,11 +64,20 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
             _viewModel = new TBSViewModel();
             BuildUI();
             SubscribeToEvents();
-            
-            // Initial load
-            _viewModel.LoadConfigurations();
-            
-            TBSLogger.Info("[TBSManagerTabPage] Initialized (Modular)");
+
+            // Defer heavy initialization to avoid UI freeze on startup
+            // Use BeginInvoke with Background priority so UI renders first
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            {
+                // Initial load
+                _viewModel.LoadConfigurations();
+
+                // Start monitoring timers (same as original monolithic implementation)
+                // This ensures the status timer runs and processes tranche state transitions
+                _viewModel.StartExecution();
+
+                TBSLogger.Info("[TBSManagerTabPage] Initialized (Modular)");
+            }));
         }
 
         private void BuildUI()

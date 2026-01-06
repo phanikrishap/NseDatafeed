@@ -167,12 +167,18 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
 
         private void OnOptionsGenerated(OptionsGeneratedEvent evt)
         {
+            Logger.Info($"[OptionChainTabPage] OnOptionsGenerated: Received event with {evt?.Options?.Count ?? 0} options");
+
             _rows.Clear();
             _symbolToRowMap.Clear();
             _generatedToZerodhaMap.Clear();
             _straddleSymbolToRowMap.Clear();
 
-            if (evt.Options == null || evt.Options.Count == 0) return;
+            if (evt.Options == null || evt.Options.Count == 0)
+            {
+                Logger.Warn("[OptionChainTabPage] OnOptionsGenerated: No options in event, returning");
+                return;
+            }
 
             var first = evt.Options.First();
             _underlying = first.underlying;
@@ -216,6 +222,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 _rows.Add(row);
             }
 
+            Logger.Info($"[OptionChainTabPage] OnOptionsGenerated: Populated {_rows.Count} rows for {_underlying}");
             _statusBarControl.StatusText = $"Loaded {_rows.Count} strikes for {_underlying}";
             _listViewControl.Refresh();
         }

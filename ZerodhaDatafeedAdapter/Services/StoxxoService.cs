@@ -258,47 +258,42 @@ namespace ZerodhaDatafeedAdapter.Services
                     queryParams["OnlyActiveLegs"] = "true";
 
                 string url = BuildUrl("GetUserLegs", queryParams);
-                Logger.Debug($"[StoxxoService] GetUserLegs: {url}");
+
+                // Log to both Logger and TBSLogger for diagnostic purposes
+                Logger.Info($"[StoxxoService] GetUserLegs REQUEST: {url}");
+                Logging.TBSLogger.Info($"[StoxxoService] GetUserLegs REQUEST: {url}");
 
                 var response = await _httpClient.GetStringAsync(url);
+
+                // Log raw response for debugging
+                Logger.Info($"[StoxxoService] GetUserLegs RAW RESPONSE: {response}");
+                Logging.TBSLogger.Info($"[StoxxoService] GetUserLegs RAW RESPONSE: {response}");
+
                 var result = JsonConvert.DeserializeObject<StoxxoResponse>(response);
 
                 if (result != null && result.IsSuccess && !string.IsNullOrEmpty(result.response))
                 {
-                    // Legs are separated by tilde (~), each leg's fields separated by pipe (|)
-                    // Per Stoxxo API docs: "Pipeline separated values with each leg details separated by a tilde (~)"
-                    var legs = new List<StoxxoUserLeg>();
+                    // Log the parsed response field specifically
+                    Logger.Info($"[StoxxoService] GetUserLegs PARSED response field: {result.response}");
+                    Logging.TBSLogger.Info($"[StoxxoService] GetUserLegs PARSED response field: {result.response}");
 
-                    var legStrings = result.response.Split(new[] { '~' }, StringSplitOptions.RemoveEmptyEntries);
-                    Logger.Info($"[StoxxoService] GetUserLegs parsing {legStrings.Length} leg strings from response");
+                    // Parse legs - try tilde-separated first, then fall back to field-count parsing
+                    var legs = ParseUserLegsResponse(result.response);
 
-                    foreach (var legStr in legStrings)
-                    {
-                        if (string.IsNullOrWhiteSpace(legStr))
-                            continue;
-
-                        var leg = StoxxoUserLeg.Parse(legStr.Trim());
-                        if (leg != null)
-                        {
-                            legs.Add(leg);
-                            Logger.Debug($"[StoxxoService] Parsed leg: LegID={leg.LegID}, Ins={leg.Instrument}, Txn={leg.Txn}, EntryQty={leg.EntryFilledQty}, AvgEntry={leg.AvgEntryPrice}, Status={leg.Status}");
-                        }
-                        else
-                        {
-                            Logger.Warn($"[StoxxoService] Failed to parse leg string: {legStr.Substring(0, Math.Min(100, legStr.Length))}...");
-                        }
-                    }
-
-                    Logger.Debug($"[StoxxoService] GetUserLegs returned {legs.Count} legs");
+                    Logger.Info($"[StoxxoService] GetUserLegs returned {legs.Count} legs total");
+                    Logging.TBSLogger.Info($"[StoxxoService] GetUserLegs SUMMARY: {legs.Count} legs parsed successfully");
                     return legs;
                 }
 
-                Logger.Warn($"[StoxxoService] GetUserLegs failed: {result?.error ?? "No data"}");
+                string errorMsg = result?.error ?? "No data";
+                Logger.Warn($"[StoxxoService] GetUserLegs failed: {errorMsg}");
+                Logging.TBSLogger.Warn($"[StoxxoService] GetUserLegs FAILED: IsSuccess={result?.IsSuccess}, Error={errorMsg}");
                 return new List<StoxxoUserLeg>();
             }
             catch (Exception ex)
             {
                 Logger.Error($"[StoxxoService] GetUserLegs error: {ex.Message}", ex);
+                Logging.TBSLogger.Error($"[StoxxoService] GetUserLegs EXCEPTION: {ex.Message}");
                 return new List<StoxxoUserLeg>();
             }
         }
@@ -538,6 +533,207 @@ namespace ZerodhaDatafeedAdapter.Services
                 $"{HttpUtility.UrlEncode(kvp.Key)}={HttpUtility.UrlEncode(kvp.Value)}"));
 
             return $"{baseUrl}/{endpoint}?{query}";
+        }
+
+        /// <summary>
+        /// Parse GetUserLegs response - handles both tilde-separated and concatenated formats.
+        /// Per Stoxxo API docs, legs should be separated by tilde (~), but some versions omit it
+        /// AND concatenate the last field of one leg with the SNO of the next leg (no separator).
+        /// Example: "...0|0|01|1038|NIFTY|..." where "01" is actually "0" (TrailSL) + "1" (SNO of next leg)
+        /// </summary>
+        private List<StoxxoUserLeg> ParseUserLegsResponse(string response)
+        {
+            var legs = new List<StoxxoUserLeg>();
+
+            // First try: Split by tilde (~) as per documentation
+            var legStrings = response.Split(new[] { '~' }, StringSplitOptions.RemoveEmptyEntries);
+
+            if (legStrings.Length > 1)
+            {
+                // Tilde-separated format - standard parsing
+                Logging.TBSLogger.Info($"[StoxxoService] ParseUserLegsResponse: Using TILDE separator, found {legStrings.Length} leg strings");
+
+                int legIndex = 0;
+                foreach (var legStr in legStrings)
+                {
+                    if (string.IsNullOrWhiteSpace(legStr))
+                        continue;
+
+                    Logging.TBSLogger.Info($"[StoxxoService] ParseUserLegsResponse LEG[{legIndex}] RAW: {legStr}");
+
+                    var leg = StoxxoUserLeg.Parse(legStr.Trim());
+                    if (leg != null)
+                    {
+                        legs.Add(leg);
+                        LogParsedLeg(legIndex, leg);
+                    }
+                    else
+                    {
+                        Logging.TBSLogger.Warn($"[StoxxoService] ParseUserLegsResponse: Failed to parse LEG[{legIndex}]");
+                    }
+                    legIndex++;
+                }
+            }
+            else
+            {
+                // No tilde found - use regex-based parsing to find leg boundaries
+                // Each leg starts with SNO (single digit 1-9) followed by |LegID| where LegID is a number
+                // Pattern: Start of string or after a digit, find digit|4-5 digit number|NIFTY or BANKNIFTY
+                legs = ParseConcatenatedUserLegs(response);
+            }
+
+            return legs;
+        }
+
+        /// <summary>
+        /// Parse concatenated legs where there's no tilde separator.
+        /// Uses the robust pattern: LegID|Symbol where LegID is 4+ digits and Symbol is NIFTY/SENSEX/BANKNIFTY/FINNIFTY.
+        /// The SNO before LegID may be concatenated with the previous leg's last field (e.g., "35.752|1059|NIFTY").
+        /// </summary>
+        private List<StoxxoUserLeg> ParseConcatenatedUserLegs(string response)
+        {
+            var legs = new List<StoxxoUserLeg>();
+
+            // Split into all parts first
+            var allParts = response.Split('|');
+            Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs: Total fields={allParts.Length}");
+
+            // Find leg boundaries by looking for pattern: LegID|Symbol
+            // LegID is a 4+ digit Stoxxo internal ID (e.g., 1059, 1060)
+            // Symbol is NIFTY/BANKNIFTY/SENSEX/FINNIFTY
+            // The index we find is the LegID position, so leg starts 1 position before (at SNO)
+            var legIdIndices = new List<int>();
+
+            for (int i = 0; i < allParts.Length - 1; i++)
+            {
+                string part = allParts[i];
+                string nextPart = allParts[i + 1];
+
+                // Check for LegID|Symbol pattern
+                // LegID: 4+ digit number (Stoxxo IDs are typically 1000+)
+                // Symbol: NIFTY, BANKNIFTY, SENSEX, FINNIFTY
+                if (int.TryParse(part, out int legId) && legId >= 1000 && legId <= 99999 &&
+                    IsValidSymbol(nextPart))
+                {
+                    legIdIndices.Add(i);
+                    Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs: Found LegID|Symbol at index {i}: LegID={part}, Symbol={nextPart}");
+                }
+            }
+
+            Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs: Found {legIdIndices.Count} legs by LegID|Symbol pattern");
+
+            if (legIdIndices.Count == 0)
+            {
+                Logging.TBSLogger.Warn($"[StoxxoService] ParseConcatenatedUserLegs: No legs found!");
+                return legs;
+            }
+
+            // Each leg in GetUserLegs has 26 fields:
+            // SNO|LegID|Symbol|Expiry|Strike|Instrument|Txn|Lot|Target|SL|IV|Delta|Theta|Vega|LTP|PNL|PNLPerLot|EntryQty|AvgEntry|ExitQty|AvgExit|Status|Target|SL|LockedTgt|TrailSL
+            // LegID is at position 1 (0-indexed), so SNO is at position 0
+            // This means leg starts 1 position before the LegID index we found
+
+            for (int legIdx = 0; legIdx < legIdIndices.Count; legIdx++)
+            {
+                int legIdPos = legIdIndices[legIdx];
+
+                // The SNO field is 1 position before LegID
+                // But it might be concatenated with the previous leg's TrailSL field
+                int snoPos = legIdPos - 1;
+
+                // Determine the end of this leg (start of next leg's SNO, or end of array)
+                int nextLegSnoPos = legIdx < legIdIndices.Count - 1 ? legIdIndices[legIdx + 1] - 1 : allParts.Length;
+
+                // Build leg parts
+                var legParts = new List<string>();
+
+                // Handle SNO - it might be concatenated with previous field
+                string snoPart = allParts[snoPos];
+                if (legIdx == 0)
+                {
+                    // First leg - SNO is clean (just the first field)
+                    legParts.Add(snoPart);
+                }
+                else
+                {
+                    // Subsequent legs - SNO is the last digit of the previous leg's TrailSL
+                    // The field looks like "35.752" where "2" is the SNO
+                    // Or "0|04" where the SNO is at a separate position but may have leading content
+                    // Extract just the last character as SNO if the field has multiple chars ending with digit
+                    if (snoPart.Length >= 1)
+                    {
+                        char lastChar = snoPart[snoPart.Length - 1];
+                        if (char.IsDigit(lastChar))
+                        {
+                            legParts.Add(lastChar.ToString());
+                            Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}]: Extracted SNO='{lastChar}' from concatenated field '{snoPart}'");
+                        }
+                        else
+                        {
+                            legParts.Add(snoPart);
+                        }
+                    }
+                }
+
+                // Add LegID and remaining fields
+                for (int j = legIdPos; j < nextLegSnoPos; j++)
+                {
+                    string partToAdd = allParts[j];
+
+                    // For the last field of this leg (TrailSL), we need to strip the next leg's SNO if concatenated
+                    if (j == nextLegSnoPos - 1 && legIdx < legIdIndices.Count - 1)
+                    {
+                        // Check if there's a trailing digit that's the next leg's SNO
+                        // TrailSL is typically "0" or a decimal like "35.75", next SNO is a single digit 1-9
+                        // Combined it might be "01" or "35.752"
+                        if (partToAdd.Length >= 2)
+                        {
+                            char lastChar = partToAdd[partToAdd.Length - 1];
+                            if (lastChar >= '1' && lastChar <= '9')
+                            {
+                                // Strip the last digit (next leg's SNO)
+                                string stripped = partToAdd.Substring(0, partToAdd.Length - 1);
+                                Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}]: Stripped SNO from TrailSL: '{partToAdd}' -> '{stripped}'");
+                                partToAdd = stripped;
+                            }
+                        }
+                    }
+
+                    legParts.Add(partToAdd);
+                }
+
+                string legStr = string.Join("|", legParts);
+                Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}] parts={legParts.Count}: {(legStr.Length > 150 ? legStr.Substring(0, 150) + "..." : legStr)}");
+
+                var leg = StoxxoUserLeg.Parse(legStr);
+                if (leg != null)
+                {
+                    legs.Add(leg);
+                    LogParsedLeg(legIdx, leg);
+                }
+                else
+                {
+                    Logging.TBSLogger.Warn($"[StoxxoService] ParseConcatenatedUserLegs: Failed to parse LEG[{legIdx}], legStr={legStr}");
+                }
+            }
+
+            return legs;
+        }
+
+        private bool IsValidSymbol(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol)) return false;
+            var upper = symbol.ToUpperInvariant();
+            return upper == "NIFTY" || upper == "BANKNIFTY" || upper == "SENSEX" || upper == "FINNIFTY";
+        }
+
+        private void LogParsedLeg(int index, StoxxoUserLeg leg)
+        {
+            string legDetails = $"LegID={leg.LegID}, Ins={leg.Instrument}, Txn={leg.Txn}, Strike={leg.Strike}, " +
+                              $"EntryQty={leg.EntryFilledQty}, AvgEntry={leg.AvgEntryPrice}, " +
+                              $"ExitQty={leg.ExitFilledQty}, AvgExit={leg.AvgExitPrice}, Status={leg.Status}";
+            Logger.Info($"[StoxxoService] Parsed LEG[{index}]: {legDetails}");
+            Logging.TBSLogger.Info($"[StoxxoService] Parsed LEG[{index}]: {legDetails}");
         }
 
         #endregion

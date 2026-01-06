@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Reactive.Disposables;
+using System.Reactive.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using System.Windows.Threading;
@@ -62,6 +64,7 @@ namespace ZerodhaDatafeedAdapter.Services
         private const int STOXXO_POLLING_INTERVAL_MS = 5000;
         private const int FALLBACK_DELAY_SECONDS = 45; // Fallback if PriceSyncReady doesn't fire
         private Action _priceSyncReadyHandler;
+        private CompositeDisposable _rxSubscriptions = new CompositeDisposable();
 
         #endregion
 
@@ -180,24 +183,54 @@ namespace ZerodhaDatafeedAdapter.Services
         }
 
         /// <summary>
-        /// Subscribe to MarketAnalyzerLogic's PriceSyncReady event.
-        /// This replaces the hardcoded 45-second delay with event-driven initialization.
+        /// Subscribe to PriceSyncReady via Rx stream (primary) and legacy event (fallback).
+        /// The Rx stream uses ReplaySubject(1), so late subscribers (like TBS Manager opened
+        /// after Option Chain is ready) will immediately receive the value.
         /// </summary>
         private void SubscribeToPriceSyncReady()
         {
+            // Primary: Subscribe to Rx stream (ReplaySubject ensures late subscribers get the value)
+            var hub = MarketDataReactiveHub.Instance;
+            _rxSubscriptions.Add(
+                hub.PriceSyncReadyStream
+                    .Take(1)  // Only need the first signal
+                    .Subscribe(
+                        ready =>
+                        {
+                            if (ready && !_optionChainReady)
+                            {
+                                TBSLogger.Info("[TBSExecutionService] PriceSyncReady received via Rx stream");
+                                DelayCountdown = 0;
+                                IsOptionChainReady = true;
+                                TBSLogger.Info("[TBSExecutionService] Option Chain marked ready via Rx PriceSyncReadyStream");
+                            }
+                        },
+                        ex => TBSLogger.Error($"[TBSExecutionService] PriceSyncReadyStream error: {ex.Message}")));
+
+            TBSLogger.Info("[TBSExecutionService] Subscribed to PriceSyncReadyStream (Rx)");
+
+            // Legacy fallback: Also subscribe to event (for backward compatibility)
             _priceSyncReadyHandler = OnPriceSyncReady;
             MarketAnalyzerLogic.Instance.PriceSyncReady += _priceSyncReadyHandler;
-            TBSLogger.Info("[TBSExecutionService] Subscribed to PriceSyncReady event");
+            TBSLogger.Info("[TBSExecutionService] Subscribed to PriceSyncReady event (legacy)");
+
+            // Check if price sync is already ready (in case we missed the event)
+            if (MarketAnalyzerLogic.Instance.IsPriceSyncReady && !_optionChainReady)
+            {
+                TBSLogger.Info("[TBSExecutionService] Price sync already ready on startup - marking ready immediately");
+                DelayCountdown = 0;
+                IsOptionChainReady = true;
+            }
         }
 
         /// <summary>
-        /// Handler for PriceSyncReady event - marks Option Chain as ready immediately.
+        /// Handler for PriceSyncReady legacy event - marks Option Chain as ready immediately.
         /// </summary>
         private void OnPriceSyncReady()
         {
             if (_optionChainReady) return; // Already ready
 
-            TBSLogger.Info("[TBSExecutionService] PriceSyncReady received");
+            TBSLogger.Info("[TBSExecutionService] PriceSyncReady received via legacy event");
 
             // Mark as ready immediately - no more waiting!
             DelayCountdown = 0;
@@ -444,14 +477,14 @@ namespace ZerodhaDatafeedAdapter.Services
                 }
             }
 
-            // When going Live, lock strike and enter positions
-            if (oldStatus != TBSExecutionStatus.Monitoring && state.Status == TBSExecutionStatus.Live)
+            // When going Live, lock strike and enter positions (only on transition from Monitoring)
+            if (oldStatus == TBSExecutionStatus.Monitoring && state.Status == TBSExecutionStatus.Live)
             {
                 if (state.SkippedDueToProfitCondition)
                 {
                     state.Status = TBSExecutionStatus.Skipped;
                 }
-                else
+                else if (!state.StrikeLocked) // Extra guard to prevent double execution
                 {
                     TBSLogger.Info($"Tranche #{state.TrancheId} Going Live - locking strike");
                     LockStrikeAndEnter(state);
@@ -975,7 +1008,11 @@ namespace ZerodhaDatafeedAdapter.Services
             if (_isDisposed) return;
             _isDisposed = true;
 
-            // Unsubscribe from PriceSyncReady event
+            // Dispose Rx subscriptions (primary method for PriceSyncReady)
+            _rxSubscriptions?.Dispose();
+            _rxSubscriptions = null;
+
+            // Unsubscribe from PriceSyncReady legacy event (fallback)
             if (_priceSyncReadyHandler != null)
             {
                 MarketAnalyzerLogic.Instance.PriceSyncReady -= _priceSyncReadyHandler;

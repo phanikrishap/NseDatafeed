@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reactive.Linq;
 using System.Threading.Tasks;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
@@ -95,8 +96,13 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
 
         #region Reconciliation
 
+        private const int RECONCILE_RETRY_INTERVAL_MS = 2000;  // Retry every 2 seconds
+        private const int RECONCILE_MAX_RETRIES = 15;          // Max 15 retries = 30 seconds total
+
         /// <summary>
-        /// Reconcile Stoxxo legs with internal TBS state
+        /// Reconcile Stoxxo legs with internal TBS state using Rx retry pattern.
+        /// Stoxxo executes BUY legs first, then SELL legs ~1 second later.
+        /// This method retries until both CE and PE SELL legs are mapped (up to 30 seconds).
         /// </summary>
         /// <param name="state">The execution state to reconcile</param>
         /// <returns>Number of legs reconciled</returns>
@@ -105,18 +111,36 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
             if (state == null) throw new ArgumentNullException(nameof(state));
             if (string.IsNullOrEmpty(state.StoxxoPortfolioName)) return 0;
 
+            TBSLogger.Info($"[StoxxoBridge] ReconcileLegsAsync START for Tranche #{state.TrancheId}, Portfolio={state.StoxxoPortfolioName}");
+
             try
             {
-                var legs = await _stoxxoService.GetUserLegs(state.StoxxoPortfolioName, onlyActiveLegs: true);
-                if (legs == null || legs.Count == 0)
+                // Use Rx to retry reconciliation until we get both SELL legs mapped
+                var result = await Observable
+                    .Interval(TimeSpan.FromMilliseconds(RECONCILE_RETRY_INTERVAL_MS))
+                    .StartWith(0) // Start immediately
+                    .Take(RECONCILE_MAX_RETRIES)
+                    .Select(async attempt =>
+                    {
+                        TBSLogger.Info($"[StoxxoBridge] ReconcileLegsAsync attempt {attempt + 1}/{RECONCILE_MAX_RETRIES} for Tranche #{state.TrancheId}");
+                        return await TryReconcileOnceAsync(state);
+                    })
+                    .SelectMany(task => task)
+                    .TakeWhile(mappedCount => mappedCount < 2) // Stop when both legs mapped
+                    .LastOrDefaultAsync();
+
+                // Check if we got both legs mapped
+                int finalMapped = CountMappedLegs(state);
+                if (finalMapped >= 2)
                 {
-                    TBSLogger.Debug($"[StoxxoBridge] No legs found for reconciliation: {state.StoxxoPortfolioName}");
-                    return 0;
+                    TBSLogger.Info($"[StoxxoBridge] ReconcileLegsAsync SUCCESS: Both CE and PE legs mapped for Tranche #{state.TrancheId}");
+                }
+                else
+                {
+                    TBSLogger.Warn($"[StoxxoBridge] ReconcileLegsAsync TIMEOUT: Only {finalMapped}/2 legs mapped after {RECONCILE_MAX_RETRIES} attempts for Tranche #{state.TrancheId}");
                 }
 
-                MapStoxxoLegsToInternal(state, legs);
-                TBSLogger.Info($"[StoxxoBridge] Reconciled {legs.Count} legs for Tranche #{state.TrancheId}");
-                return legs.Count;
+                return finalMapped;
             }
             catch (Exception ex)
             {
@@ -126,17 +150,85 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
         }
 
         /// <summary>
+        /// Single reconciliation attempt - fetches legs and tries to map them
+        /// </summary>
+        private async Task<int> TryReconcileOnceAsync(TBSExecutionState state)
+        {
+            try
+            {
+                var legs = await _stoxxoService.GetUserLegs(state.StoxxoPortfolioName, onlyActiveLegs: true);
+
+                TBSLogger.Info($"[StoxxoBridge] TryReconcileOnceAsync: GetUserLegs returned {legs?.Count ?? 0} legs for Portfolio={state.StoxxoPortfolioName}");
+
+                if (legs == null || legs.Count == 0)
+                {
+                    TBSLogger.Warn($"[StoxxoBridge] TryReconcileOnceAsync: No legs found for reconciliation: {state.StoxxoPortfolioName}");
+                    return 0;
+                }
+
+                // Log each leg received before mapping
+                for (int i = 0; i < legs.Count; i++)
+                {
+                    var leg = legs[i];
+                    TBSLogger.Info($"[StoxxoBridge] TryReconcileOnceAsync: Received Leg[{i}]: LegID={leg.LegID}, Ins={leg.Instrument}, Txn={leg.Txn}, Strike={leg.Strike}, EntryQty={leg.EntryFilledQty}, AvgEntry={leg.AvgEntryPrice}, Status={leg.Status}");
+                }
+
+                int mappedCount = MapStoxxoLegsToInternal(state, legs);
+                TBSLogger.Info($"[StoxxoBridge] TryReconcileOnceAsync: {legs.Count} API legs received, {mappedCount} legs mapped to TBS state for Tranche #{state.TrancheId}");
+                return mappedCount;
+            }
+            catch (Exception ex)
+            {
+                TBSLogger.Error($"[StoxxoBridge] TryReconcileOnceAsync error for Tranche #{state.TrancheId}: {ex.Message}", ex);
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// Count how many legs have been successfully mapped (have StoxxoLegID set)
+        /// </summary>
+        private int CountMappedLegs(TBSExecutionState state)
+        {
+            return state.Legs.Count(l => l.StoxxoLegID > 0);
+        }
+
+        /// <summary>
         /// Map Stoxxo leg data to internal TBS leg state
         /// </summary>
-        private void MapStoxxoLegsToInternal(TBSExecutionState state, List<StoxxoUserLeg> stoxxoLegs)
+        /// <returns>Number of legs successfully mapped</returns>
+        private int MapStoxxoLegsToInternal(TBSExecutionState state, List<StoxxoUserLeg> stoxxoLegs)
         {
+            TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: Processing {stoxxoLegs.Count} Stoxxo legs for Tranche #{state.TrancheId}");
+
+            // Log all legs before filtering
+            foreach (var leg in stoxxoLegs)
+            {
+                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: ALL LEG - LegID={leg.LegID}, Txn={leg.Txn}, Ins={leg.Instrument}, Strike={leg.Strike}");
+            }
+
             var sellLegs = stoxxoLegs
                 .Where(l => l.Txn?.Equals("Sell", StringComparison.OrdinalIgnoreCase) == true)
                 .ToList();
 
+            TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: Found {sellLegs.Count} SELL legs (filtering by Txn=Sell)");
+
+            // Log filtered sell legs
+            foreach (var leg in sellLegs)
+            {
+                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: SELL LEG - LegID={leg.LegID}, Ins={leg.Instrument}, Strike={leg.Strike}, EntryQty={leg.EntryFilledQty}");
+            }
+
             var ceLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("CE", StringComparison.OrdinalIgnoreCase) == true);
             var peLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("PE", StringComparison.OrdinalIgnoreCase) == true);
 
+            TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: CE Leg Found={ceLeg != null}, PE Leg Found={peLeg != null}");
+
+            if (ceLeg != null)
+                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: CE LEG MATCH - LegID={ceLeg.LegID}, Strike={ceLeg.Strike}, EntryQty={ceLeg.EntryFilledQty}, AvgEntry={ceLeg.AvgEntryPrice}");
+            if (peLeg != null)
+                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: PE LEG MATCH - LegID={peLeg.LegID}, Strike={peLeg.Strike}, EntryQty={peLeg.EntryFilledQty}, AvgEntry={peLeg.AvgEntryPrice}");
+
+            int mappedCount = 0;
             foreach (var leg in state.Legs)
             {
                 var stoxxoLeg = leg.OptionType == "CE" ? ceLeg : peLeg;
@@ -147,8 +239,17 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
                     leg.StoxxoEntryPrice = stoxxoLeg.AvgEntryPrice;
                     leg.StoxxoExitPrice = stoxxoLeg.AvgExitPrice;
                     leg.StoxxoStatus = stoxxoLeg.Status;
+                    mappedCount++;
+                    TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: MAPPED {leg.OptionType} -> StoxxoLegID={leg.StoxxoLegID}, Qty={leg.StoxxoQty}, EntryPrice={leg.StoxxoEntryPrice}");
+                }
+                else
+                {
+                    TBSLogger.Warn($"[StoxxoBridge] MapStoxxoLegsToInternal: NO MATCH for {leg.OptionType} leg in Stoxxo response");
                 }
             }
+
+            TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal COMPLETE: {mappedCount}/{state.Legs.Count} TBS legs mapped");
+            return mappedCount;
         }
 
         #endregion
