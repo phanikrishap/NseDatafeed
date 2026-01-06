@@ -323,15 +323,17 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             OptionChainRow atmRow = null;
             double minStraddle = double.MaxValue;
             double maxPrice = 0;
+            int atmIndex = -1;
 
-            foreach (var row in _rows)
+            for (int i = 0; i < _rows.Count; i++)
             {
+                var row = _rows[i];
                 row.IsATM = false;
                 maxPrice = Math.Max(maxPrice, Math.Max(row.CEPrice, row.PEPrice));
                 if (row.CEPrice > 0 && row.PEPrice > 0)
                 {
                     double s = row.CEPrice + row.PEPrice;
-                    if (s < minStraddle) { minStraddle = s; atmRow = row; }
+                    if (s < minStraddle) { minStraddle = s; atmRow = row; atmIndex = i; }
                 }
             }
 
@@ -350,6 +352,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 atmRow.IsATM = true;
                 _headerControl.ATMStrike = $"{atmRow.Strike:F0} ({minStraddle:F2})";
                 MarketAnalyzerLogic.Instance.SetATMStrike(_underlying, (decimal)atmRow.Strike);
+
+                // Calculate strikes above/below ATM
+                int strikesAbove = atmIndex;
+                int strikesBelow = _rows.Count - atmIndex - 1;
+                _headerControl.SetStrikePosition(strikesAbove, strikesBelow, _rows.Count);
             }
         }
 

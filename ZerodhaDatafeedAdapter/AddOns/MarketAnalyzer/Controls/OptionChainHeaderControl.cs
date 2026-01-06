@@ -10,6 +10,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
         private TextBlock _lblUnderlying;
         private TextBlock _lblExpiry;
         private TextBlock _lblATMStrike;
+        private TextBlock _lblStrikePosition;
         private TextBlock _lblSelectedInstrument;
 
         private static readonly SolidColorBrush _fgColor = new SolidColorBrush(Color.FromRgb(212, 212, 212));
@@ -20,6 +21,15 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
         public string Underlying { set => _lblUnderlying.Text = value; }
         public string Expiry { set => _lblExpiry.Text = value; }
         public string ATMStrike { set => _lblATMStrike.Text = value; }
+
+        /// <summary>
+        /// Sets the strike position indicator (e.g., "5 above | 5 below ATM")
+        /// </summary>
+        public void SetStrikePosition(int strikesAbove, int strikesBelow, int totalStrikes)
+        {
+            _lblStrikePosition.Text = $"{strikesAbove} above | {strikesBelow} below ATM ({totalStrikes} total)";
+        }
+
         public string SelectedInstrument
         {
             set
@@ -124,8 +134,29 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
 
             mainStack.Children.Add(grid);
 
-            // Row 2: Selected instrument display
-            var linkPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+            // Row 2: Strike position indicator
+            var strikePositionPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+            strikePositionPanel.Children.Add(new TextBlock
+            {
+                Text = "Strikes: ",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                Foreground = _fgColor,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            _lblStrikePosition = new TextBlock
+            {
+                Text = "-- above | -- below ATM",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(180, 180, 180)),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            strikePositionPanel.Children.Add(_lblStrikePosition);
+            mainStack.Children.Add(strikePositionPanel);
+
+            // Row 3: Selected instrument display
+            var linkPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
             linkPanel.Children.Add(new TextBlock
             {
                 Text = "Selected: ",

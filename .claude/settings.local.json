@@ -110,7 +110,9 @@
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show HEAD:ZerodhaDatafeedAdapter/Services/Analysis/MarketAnalyzerLogic.cs)",
       "Bash(git -C \"d:\\\\CascadeProjects\\\\NseDatafeed_new\" show c058b656a9c80adb6894e9fce848f0faefa3c3d7:ZerodhaDatafeedAdapter/AddOns/MarketAnalyzer/MarketAnalyzerWindow.cs)",
       "Bash(git -C:*)",
-      "Bash(Select-String \"GetInstrument\")"
+      "Bash(Select-String \"GetInstrument\")",
+      "Bash(del \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\AddOns\\\\TBSManager\\\\Models\\\\TBSTrancheRow.cs\")",
+      "Bash(copy /Y \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\References\\\\FilterDataGrid.dll\" \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\bin\\\\Custom\\\\FilterDataGrid.dll\")"
     ]
   }
 }

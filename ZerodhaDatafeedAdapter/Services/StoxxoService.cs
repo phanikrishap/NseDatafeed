@@ -259,29 +259,29 @@ namespace ZerodhaDatafeedAdapter.Services
 
                 string url = BuildUrl("GetUserLegs", queryParams);
 
-                // Log to both Logger and TBSLogger for diagnostic purposes
-                Logger.Info($"[StoxxoService] GetUserLegs REQUEST: {url}");
-                Logging.TBSLogger.Info($"[StoxxoService] GetUserLegs REQUEST: {url}");
+                // Log to both Logger and TBSLogger for diagnostic purposes (Debug level for verbose polling)
+                Logger.Debug($"[StoxxoService] GetUserLegs REQUEST: {url}");
+                Logging.TBSLogger.Debug($"[StoxxoService] GetUserLegs REQUEST: {url}");
 
                 var response = await _httpClient.GetStringAsync(url);
 
-                // Log raw response for debugging
-                Logger.Info($"[StoxxoService] GetUserLegs RAW RESPONSE: {response}");
-                Logging.TBSLogger.Info($"[StoxxoService] GetUserLegs RAW RESPONSE: {response}");
+                // Log raw response for debugging (Debug level)
+                Logger.Debug($"[StoxxoService] GetUserLegs RAW RESPONSE: {response}");
+                Logging.TBSLogger.Debug($"[StoxxoService] GetUserLegs RAW RESPONSE: {response}");
 
                 var result = JsonConvert.DeserializeObject<StoxxoResponse>(response);
 
                 if (result != null && result.IsSuccess && !string.IsNullOrEmpty(result.response))
                 {
-                    // Log the parsed response field specifically
-                    Logger.Info($"[StoxxoService] GetUserLegs PARSED response field: {result.response}");
-                    Logging.TBSLogger.Info($"[StoxxoService] GetUserLegs PARSED response field: {result.response}");
+                    // Log the parsed response field specifically (Debug level)
+                    Logger.Debug($"[StoxxoService] GetUserLegs PARSED response field: {result.response}");
+                    Logging.TBSLogger.Debug($"[StoxxoService] GetUserLegs PARSED response field: {result.response}");
 
                     // Parse legs - try tilde-separated first, then fall back to field-count parsing
                     var legs = ParseUserLegsResponse(result.response);
 
-                    Logger.Info($"[StoxxoService] GetUserLegs returned {legs.Count} legs total");
-                    Logging.TBSLogger.Info($"[StoxxoService] GetUserLegs SUMMARY: {legs.Count} legs parsed successfully");
+                    Logger.Debug($"[StoxxoService] GetUserLegs returned {legs.Count} legs total");
+                    Logging.TBSLogger.Debug($"[StoxxoService] GetUserLegs SUMMARY: {legs.Count} legs parsed successfully");
                     return legs;
                 }
 
@@ -551,7 +551,7 @@ namespace ZerodhaDatafeedAdapter.Services
             if (legStrings.Length > 1)
             {
                 // Tilde-separated format - standard parsing
-                Logging.TBSLogger.Info($"[StoxxoService] ParseUserLegsResponse: Using TILDE separator, found {legStrings.Length} leg strings");
+                Logging.TBSLogger.Debug($"[StoxxoService] ParseUserLegsResponse: Using TILDE separator, found {legStrings.Length} leg strings");
 
                 int legIndex = 0;
                 foreach (var legStr in legStrings)
@@ -559,7 +559,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     if (string.IsNullOrWhiteSpace(legStr))
                         continue;
 
-                    Logging.TBSLogger.Info($"[StoxxoService] ParseUserLegsResponse LEG[{legIndex}] RAW: {legStr}");
+                    Logging.TBSLogger.Debug($"[StoxxoService] ParseUserLegsResponse LEG[{legIndex}] RAW: {legStr}");
 
                     var leg = StoxxoUserLeg.Parse(legStr.Trim());
                     if (leg != null)
@@ -596,7 +596,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
             // Split into all parts first
             var allParts = response.Split('|');
-            Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs: Total fields={allParts.Length}");
+            Logging.TBSLogger.Debug($"[StoxxoService] ParseConcatenatedUserLegs: Total fields={allParts.Length}");
 
             // Find leg boundaries by looking for pattern: LegID|Symbol
             // LegID is a 4+ digit Stoxxo internal ID (e.g., 1059, 1060)
@@ -616,11 +616,11 @@ namespace ZerodhaDatafeedAdapter.Services
                     IsValidSymbol(nextPart))
                 {
                     legIdIndices.Add(i);
-                    Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs: Found LegID|Symbol at index {i}: LegID={part}, Symbol={nextPart}");
+                    Logging.TBSLogger.Debug($"[StoxxoService] ParseConcatenatedUserLegs: Found LegID|Symbol at index {i}: LegID={part}, Symbol={nextPart}");
                 }
             }
 
-            Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs: Found {legIdIndices.Count} legs by LegID|Symbol pattern");
+            Logging.TBSLogger.Debug($"[StoxxoService] ParseConcatenatedUserLegs: Found {legIdIndices.Count} legs by LegID|Symbol pattern");
 
             if (legIdIndices.Count == 0)
             {
@@ -666,7 +666,7 @@ namespace ZerodhaDatafeedAdapter.Services
                         if (char.IsDigit(lastChar))
                         {
                             legParts.Add(lastChar.ToString());
-                            Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}]: Extracted SNO='{lastChar}' from concatenated field '{snoPart}'");
+                            Logging.TBSLogger.Debug($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}]: Extracted SNO='{lastChar}' from concatenated field '{snoPart}'");
                         }
                         else
                         {
@@ -693,7 +693,7 @@ namespace ZerodhaDatafeedAdapter.Services
                             {
                                 // Strip the last digit (next leg's SNO)
                                 string stripped = partToAdd.Substring(0, partToAdd.Length - 1);
-                                Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}]: Stripped SNO from TrailSL: '{partToAdd}' -> '{stripped}'");
+                                Logging.TBSLogger.Debug($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}]: Stripped SNO from TrailSL: '{partToAdd}' -> '{stripped}'");
                                 partToAdd = stripped;
                             }
                         }
@@ -703,7 +703,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 }
 
                 string legStr = string.Join("|", legParts);
-                Logging.TBSLogger.Info($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}] parts={legParts.Count}: {(legStr.Length > 150 ? legStr.Substring(0, 150) + "..." : legStr)}");
+                Logging.TBSLogger.Debug($"[StoxxoService] ParseConcatenatedUserLegs LEG[{legIdx}] parts={legParts.Count}: {(legStr.Length > 150 ? legStr.Substring(0, 150) + "..." : legStr)}");
 
                 var leg = StoxxoUserLeg.Parse(legStr);
                 if (leg != null)
@@ -732,8 +732,8 @@ namespace ZerodhaDatafeedAdapter.Services
             string legDetails = $"LegID={leg.LegID}, Ins={leg.Instrument}, Txn={leg.Txn}, Strike={leg.Strike}, " +
                               $"EntryQty={leg.EntryFilledQty}, AvgEntry={leg.AvgEntryPrice}, " +
                               $"ExitQty={leg.ExitFilledQty}, AvgExit={leg.AvgExitPrice}, Status={leg.Status}";
-            Logger.Info($"[StoxxoService] Parsed LEG[{index}]: {legDetails}");
-            Logging.TBSLogger.Info($"[StoxxoService] Parsed LEG[{index}]: {legDetails}");
+            Logger.Debug($"[StoxxoService] Parsed LEG[{index}]: {legDetails}");
+            Logging.TBSLogger.Debug($"[StoxxoService] Parsed LEG[{index}]: {legDetails}");
         }
 
         #endregion

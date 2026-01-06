@@ -2,17 +2,20 @@ using System;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Media;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Converters;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Models;
 
+// Alias to avoid ambiguity with System.Windows.Controls.DataGridTemplateColumn
+using WpfDataGridTemplateColumn = System.Windows.Controls.DataGridTemplateColumn;
+
 namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
 {
     public class OptionChainListView : UserControl
     {
-        private ListView _listView;
-        private GridView _gridView;
+        private FilterDataGrid.FilterDataGrid _dataGrid;
 
         private static readonly SolidColorBrush _bgColor = new SolidColorBrush(Color.FromRgb(27, 27, 28));
         private static readonly SolidColorBrush _fgColor = new SolidColorBrush(Color.FromRgb(212, 212, 212));
@@ -27,217 +30,218 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
 
         public ObservableCollection<OptionChainRow> ItemsSource
         {
-            get => _listView.ItemsSource as ObservableCollection<OptionChainRow>;
-            set => _listView.ItemsSource = value;
+            get => _dataGrid.ItemsSource as ObservableCollection<OptionChainRow>;
+            set => _dataGrid.ItemsSource = value;
         }
 
-        public OptionChainRow SelectedItem => _listView.SelectedItem as OptionChainRow;
+        public OptionChainRow SelectedItem => _dataGrid.SelectedItem as OptionChainRow;
 
-        public event System.Windows.Input.MouseButtonEventHandler MouseLeftButtonUpEvent;
+        public new event System.Windows.Input.MouseButtonEventHandler MouseLeftButtonUpEvent;
 
         public OptionChainListView()
         {
             Content = BuildUI();
-            
-            _listView.MouseLeftButtonUp += (s, e) => MouseLeftButtonUpEvent?.Invoke(s, e);
+
+            _dataGrid.MouseLeftButtonUp += (s, e) => MouseLeftButtonUpEvent?.Invoke(s, e);
         }
 
-        private ListView BuildUI()
+        private FilterDataGrid.FilterDataGrid BuildUI()
         {
-            _listView = new ListView
+            _dataGrid = new FilterDataGrid.FilterDataGrid
             {
                 Background = _bgColor,
                 Foreground = _fgColor,
                 BorderThickness = new Thickness(0),
                 BorderBrush = null,
                 FontFamily = _ntFont,
-                FontSize = 12
+                FontSize = 12,
+                AutoGenerateColumns = false,
+                CanUserAddRows = false,
+                CanUserDeleteRows = false,
+                IsReadOnly = true,
+                SelectionMode = DataGridSelectionMode.Single,
+                SelectionUnit = DataGridSelectionUnit.FullRow,
+                HeadersVisibility = DataGridHeadersVisibility.Column,
+                GridLinesVisibility = DataGridGridLinesVisibility.None,
+                RowBackground = _bgColor,
+                AlternatingRowBackground = new SolidColorBrush(Color.FromRgb(32, 32, 33)),
+                HorizontalGridLinesBrush = _borderColor,
+                VerticalGridLinesBrush = _borderColor,
+                // FilterDataGrid specific - enable filtering
+                ShowStatusBar = false,
+                ShowElapsedTime = false,
+                FilterLanguage = FilterDataGrid.Local.English,
+                DateFormatString = "dd-MMM-yyyy"
             };
 
-            // Style and columns logic same as in original CreateOptionChainListView
-            _listView.Resources.Add(SystemColors.HighlightBrushKey, new SolidColorBrush(Color.FromRgb(60, 60, 65)));
-            _listView.Resources.Add(SystemColors.HighlightTextBrushKey, new SolidColorBrush(Color.FromRgb(255, 255, 255)));
-            _listView.Resources.Add(SystemColors.InactiveSelectionHighlightBrushKey, new SolidColorBrush(Color.FromRgb(50, 50, 55)));
-            _listView.Resources.Add(SystemColors.InactiveSelectionHighlightTextBrushKey, new SolidColorBrush(Color.FromRgb(220, 220, 220)));
+            // Style the resources for selection colors
+            _dataGrid.Resources.Add(SystemColors.HighlightBrushKey, new SolidColorBrush(Color.FromRgb(60, 60, 65)));
+            _dataGrid.Resources.Add(SystemColors.HighlightTextBrushKey, new SolidColorBrush(Color.FromRgb(255, 255, 255)));
+            _dataGrid.Resources.Add(SystemColors.InactiveSelectionHighlightBrushKey, new SolidColorBrush(Color.FromRgb(50, 50, 55)));
+            _dataGrid.Resources.Add(SystemColors.InactiveSelectionHighlightTextBrushKey, new SolidColorBrush(Color.FromRgb(220, 220, 220)));
 
+            // Create header style
             var headerStyle = CreateHeaderStyle();
-            _listView.Resources.Add(typeof(GridViewColumnHeader), CreateFillerHeaderStyle());
 
-            _gridView = new GridView { AllowsColumnReorder = false };
-
+            // Create columns - FilterDataGrid enables filtering automatically on columns
             // CE Side columns (Left)
-            _gridView.Columns.Add(CreateColumn("Time", "CEUpdateTime", 60, HorizontalAlignment.Center, headerStyle));
-            _gridView.Columns.Add(CreateColumn("Status", "CEStatus", 90, HorizontalAlignment.Center, headerStyle));
-            _gridView.Columns.Add(CreateVWAPColumn("VWAP", "CEVWAPDisplay", "CEVWAPComparison", 55, true, headerStyle));
-            _gridView.Columns.Add(CreateHistogramColumn("LTP", "CELast", "CEHistogramWidth", 90, true, headerStyle));
+            _dataGrid.Columns.Add(CreateTextColumn("Time", "CEUpdateTime", 60, headerStyle));
+            _dataGrid.Columns.Add(CreateTextColumn("CE Status", "CEStatus", 90, headerStyle));
+            _dataGrid.Columns.Add(CreateVWAPColumn("CE VWAP", "CEVWAPDisplay", "CEVWAPComparison", 55, true, headerStyle));
+            _dataGrid.Columns.Add(CreateHistogramColumn("CE LTP", "CELast", "CEHistogramWidth", 90, true, headerStyle));
 
-            // Strike column
-            _gridView.Columns.Add(CreateStrikeColumn(headerStyle));
+            // Strike column (center)
+            _dataGrid.Columns.Add(CreateStrikeColumn(headerStyle));
 
             // PE Side columns (Right)
-            _gridView.Columns.Add(CreateHistogramColumn("LTP", "PELast", "PEHistogramWidth", 90, false, headerStyle));
-            _gridView.Columns.Add(CreateVWAPColumn("VWAP", "PEVWAPDisplay", "PEVWAPComparison", 55, false, headerStyle));
-            _gridView.Columns.Add(CreateColumn("Status", "PEStatus", 90, HorizontalAlignment.Center, headerStyle));
-            _gridView.Columns.Add(CreateColumn("Time", "PEUpdateTime", 60, HorizontalAlignment.Center, headerStyle));
+            _dataGrid.Columns.Add(CreateHistogramColumn("PE LTP", "PELast", "PEHistogramWidth", 90, false, headerStyle));
+            _dataGrid.Columns.Add(CreateVWAPColumn("PE VWAP", "PEVWAPDisplay", "PEVWAPComparison", 55, false, headerStyle));
+            _dataGrid.Columns.Add(CreateTextColumn("PE Status", "PEStatus", 90, headerStyle));
+            _dataGrid.Columns.Add(CreateTextColumn("Time", "PEUpdateTime", 60, headerStyle));
 
             // Straddle columns
-            _gridView.Columns.Add(CreateStraddleColumn(headerStyle));
-            _gridView.Columns.Add(CreateVWAPColumn("VWAP", "StraddleVWAPDisplay", "StraddleVWAPComparison", 60, false, headerStyle));
+            _dataGrid.Columns.Add(CreateStraddleColumn(headerStyle));
+            _dataGrid.Columns.Add(CreateVWAPColumn("Str VWAP", "StraddleVWAPDisplay", "StraddleVWAPComparison", 60, false, headerStyle));
 
-            _listView.View = _gridView;
-            _listView.ItemContainerStyle = CreateItemContainerStyle();
+            // Row style with ATM highlighting
+            _dataGrid.RowStyle = CreateRowStyle();
 
-            return _listView;
+            return _dataGrid;
         }
 
         private Style CreateHeaderStyle()
         {
-            var headerStyle = new Style(typeof(GridViewColumnHeader));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BackgroundProperty, _headerBg));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.ForegroundProperty, _fgColor));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.FontWeightProperty, FontWeights.Bold));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.FontFamilyProperty, _ntFont));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.FontSizeProperty, 12.0));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.PaddingProperty, new Thickness(5, 4, 5, 4)));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderThicknessProperty, new Thickness(0)));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderBrushProperty, null));
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.HorizontalContentAlignmentProperty, HorizontalAlignment.Center));
-
-            var headerTemplate = new ControlTemplate(typeof(GridViewColumnHeader));
-            var headerBorder = new FrameworkElementFactory(typeof(Border));
-            headerBorder.SetValue(Border.BackgroundProperty, _headerBg);
-            headerBorder.SetValue(Border.BorderThicknessProperty, new Thickness(0, 0, 1, 1));
-            headerBorder.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(50, 50, 52)));
-            headerBorder.SetValue(Border.PaddingProperty, new Thickness(5, 4, 5, 4));
-            var headerContent = new FrameworkElementFactory(typeof(ContentPresenter));
-            headerContent.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            headerContent.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            headerBorder.AppendChild(headerContent);
-            headerTemplate.VisualTree = headerBorder;
-            headerStyle.Setters.Add(new Setter(GridViewColumnHeader.TemplateProperty, headerTemplate));
-
+            var headerStyle = new Style(typeof(DataGridColumnHeader));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.BackgroundProperty, _headerBg));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.ForegroundProperty, _fgColor));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.FontWeightProperty, FontWeights.Bold));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.FontFamilyProperty, _ntFont));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.FontSizeProperty, 12.0));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.PaddingProperty, new Thickness(5, 4, 5, 4)));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.BorderThicknessProperty, new Thickness(0, 0, 1, 1)));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(50, 50, 52))));
+            headerStyle.Setters.Add(new Setter(DataGridColumnHeader.HorizontalContentAlignmentProperty, HorizontalAlignment.Center));
             return headerStyle;
         }
 
-        private Style CreateFillerHeaderStyle()
+        private Style CreateRowStyle()
         {
-            var fillerHeaderStyle = new Style(typeof(GridViewColumnHeader));
-            fillerHeaderStyle.Setters.Add(new Setter(GridViewColumnHeader.BackgroundProperty, _headerBg));
-            fillerHeaderStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderBrushProperty, null));
-            fillerHeaderStyle.Setters.Add(new Setter(GridViewColumnHeader.BorderThicknessProperty, new Thickness(0)));
-            var fillerTemplate = new ControlTemplate(typeof(GridViewColumnHeader));
-            var fillerBorder = new FrameworkElementFactory(typeof(Border));
-            fillerBorder.SetValue(Border.BackgroundProperty, _headerBg);
-            fillerBorder.SetValue(Border.BorderThicknessProperty, new Thickness(0));
-            fillerTemplate.VisualTree = fillerBorder;
-            fillerHeaderStyle.Setters.Add(new Setter(GridViewColumnHeader.TemplateProperty, fillerTemplate));
-            return fillerHeaderStyle;
-        }
+            var style = new Style(typeof(DataGridRow));
+            style.Setters.Add(new Setter(DataGridRow.ForegroundProperty, _fgColor));
+            style.Setters.Add(new Setter(DataGridRow.FontFamilyProperty, _ntFont));
+            style.Setters.Add(new Setter(DataGridRow.BackgroundProperty, _bgColor));
+            style.Setters.Add(new Setter(DataGridRow.BorderThicknessProperty, new Thickness(0)));
 
-        private Style CreateItemContainerStyle()
-        {
-            var style = new Style(typeof(ListViewItem));
-            style.Setters.Add(new Setter(ListViewItem.ForegroundProperty, _fgColor));
-            style.Setters.Add(new Setter(ListViewItem.FontFamilyProperty, _ntFont));
-            style.Setters.Add(new Setter(ListViewItem.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch));
-            style.Setters.Add(new Setter(ListViewItem.FocusVisualStyleProperty, null));
-            style.Setters.Add(new Setter(ListViewItem.BackgroundProperty, _bgColor));
-            style.Setters.Add(new Setter(ListViewItem.BorderThicknessProperty, new Thickness(0)));
-            style.Setters.Add(new Setter(ListViewItem.BorderBrushProperty, null));
-            style.Setters.Add(new Setter(ListViewItem.PaddingProperty, new Thickness(2)));
-
-            var itemTemplate = new ControlTemplate(typeof(ListViewItem));
-            var itemBorder = new FrameworkElementFactory(typeof(Border));
-            itemBorder.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(ListViewItem.BackgroundProperty));
-            itemBorder.SetValue(Border.BorderThicknessProperty, new Thickness(0));
-            itemBorder.SetValue(Border.PaddingProperty, new Thickness(2));
-            itemBorder.SetValue(Border.SnapsToDevicePixelsProperty, true);
-            var contentPresenter = new FrameworkElementFactory(typeof(GridViewRowPresenter));
-            contentPresenter.SetValue(GridViewRowPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
-            contentPresenter.SetValue(GridViewRowPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            contentPresenter.SetValue(GridViewRowPresenter.SnapsToDevicePixelsProperty, true);
-            itemBorder.AppendChild(contentPresenter);
-            itemTemplate.VisualTree = itemBorder;
-            style.Setters.Add(new Setter(ListViewItem.TemplateProperty, itemTemplate));
-
+            // ATM trigger - highlight the ATM strike row
             var atmTrigger = new DataTrigger { Binding = new Binding("IsATM"), Value = true };
-            atmTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, _atmBg));
-            atmTrigger.Setters.Add(new Setter(ListViewItem.FontWeightProperty, FontWeights.Bold));
+            atmTrigger.Setters.Add(new Setter(DataGridRow.BackgroundProperty, _atmBg));
+            atmTrigger.Setters.Add(new Setter(DataGridRow.FontWeightProperty, FontWeights.Bold));
             style.Triggers.Add(atmTrigger);
 
-            var selectedTrigger = new Trigger { Property = ListViewItem.IsSelectedProperty, Value = true };
-            selectedTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(60, 60, 65))));
+            // Selected trigger
+            var selectedTrigger = new Trigger { Property = DataGridRow.IsSelectedProperty, Value = true };
+            selectedTrigger.Setters.Add(new Setter(DataGridRow.BackgroundProperty, new SolidColorBrush(Color.FromRgb(60, 60, 65))));
             style.Triggers.Add(selectedTrigger);
 
-            var mouseOverTrigger = new Trigger { Property = ListViewItem.IsMouseOverProperty, Value = true };
-            mouseOverTrigger.Setters.Add(new Setter(ListViewItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(50, 50, 55))));
+            // Mouse over trigger
+            var mouseOverTrigger = new Trigger { Property = DataGridRow.IsMouseOverProperty, Value = true };
+            mouseOverTrigger.Setters.Add(new Setter(DataGridRow.BackgroundProperty, new SolidColorBrush(Color.FromRgb(50, 50, 55))));
             style.Triggers.Add(mouseOverTrigger);
 
             return style;
         }
 
-        private GridViewColumn CreateColumn(string header, string binding, double width, HorizontalAlignment align, Style headerStyle)
+        private WpfDataGridTemplateColumn CreateTextColumn(string header, string binding, double width, Style headerStyle)
         {
-            var column = new GridViewColumn { Header = header, Width = width, HeaderContainerStyle = headerStyle };
-            var template = new DataTemplate();
-            var gridFactory = new FrameworkElementFactory(typeof(Grid));
-            gridFactory.SetValue(Grid.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
+            var column = new WpfDataGridTemplateColumn
+            {
+                Header = header,
+                Width = new DataGridLength(width),
+                HeaderStyle = headerStyle,
+                IsReadOnly = true
+            };
 
+            var template = new DataTemplate();
             var factory = new FrameworkElementFactory(typeof(TextBlock));
             factory.SetBinding(TextBlock.TextProperty, new Binding(binding));
-            factory.SetValue(TextBlock.HorizontalAlignmentProperty, align);
+            factory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
             factory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
-            factory.SetValue(TextBlock.TextAlignmentProperty, align == HorizontalAlignment.Center ? TextAlignment.Center : TextAlignment.Left);
             factory.SetValue(TextBlock.PaddingProperty, new Thickness(3, 2, 3, 2));
-
-            gridFactory.AppendChild(factory);
-            template.VisualTree = gridFactory;
+            template.VisualTree = factory;
             column.CellTemplate = template;
+
             return column;
         }
 
-        private GridViewColumn CreateStrikeColumn(Style headerStyle)
+        private WpfDataGridTemplateColumn CreateStrikeColumn(Style headerStyle)
         {
-            var strikeColumn = new GridViewColumn { Header = "Strike", Width = 80, HeaderContainerStyle = headerStyle };
-            var strikeTemplate = new DataTemplate();
-            var strikeFactory = new FrameworkElementFactory(typeof(Border));
-            strikeFactory.SetValue(Border.BackgroundProperty, _strikeBg);
-            strikeFactory.SetValue(Border.PaddingProperty, new Thickness(5, 2, 5, 2));
-            var strikeText = new FrameworkElementFactory(typeof(TextBlock));
-            strikeText.SetBinding(TextBlock.TextProperty, new Binding("StrikeDisplay"));
-            strikeText.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold);
-            strikeText.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            strikeText.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromRgb(255, 255, 255)));
-            strikeFactory.AppendChild(strikeText);
-            strikeTemplate.VisualTree = strikeFactory;
-            strikeColumn.CellTemplate = strikeTemplate;
-            return strikeColumn;
+            var column = new WpfDataGridTemplateColumn
+            {
+                Header = "Strike",
+                Width = new DataGridLength(80),
+                HeaderStyle = headerStyle,
+                IsReadOnly = true
+            };
+
+            var template = new DataTemplate();
+            var borderFactory = new FrameworkElementFactory(typeof(Border));
+            borderFactory.SetValue(Border.BackgroundProperty, _strikeBg);
+            borderFactory.SetValue(Border.PaddingProperty, new Thickness(5, 2, 5, 2));
+
+            var textFactory = new FrameworkElementFactory(typeof(TextBlock));
+            textFactory.SetBinding(TextBlock.TextProperty, new Binding("StrikeDisplay"));
+            textFactory.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold);
+            textFactory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            textFactory.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromRgb(255, 255, 255)));
+
+            borderFactory.AppendChild(textFactory);
+            template.VisualTree = borderFactory;
+            column.CellTemplate = template;
+
+            return column;
         }
 
-        private GridViewColumn CreateStraddleColumn(Style headerStyle)
+        private WpfDataGridTemplateColumn CreateStraddleColumn(Style headerStyle)
         {
-            var straddleColumn = new GridViewColumn { Header = "Straddle", Width = 75, HeaderContainerStyle = headerStyle };
-            var straddleTemplate = new DataTemplate();
-            var straddleFactory = new FrameworkElementFactory(typeof(TextBlock));
-            straddleFactory.SetBinding(TextBlock.TextProperty, new Binding("StraddlePrice"));
-            straddleFactory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            straddleFactory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
-            straddleFactory.SetValue(TextBlock.PaddingProperty, new Thickness(2, 2, 2, 2));
-            straddleFactory.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold);
-            straddleFactory.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromRgb(255, 255, 255)));
-            straddleTemplate.VisualTree = straddleFactory;
-            straddleColumn.CellTemplate = straddleTemplate;
-            return straddleColumn;
+            var column = new WpfDataGridTemplateColumn
+            {
+                Header = "Straddle",
+                Width = new DataGridLength(75),
+                HeaderStyle = headerStyle,
+                IsReadOnly = true
+            };
+
+            var template = new DataTemplate();
+            var factory = new FrameworkElementFactory(typeof(TextBlock));
+            factory.SetBinding(TextBlock.TextProperty, new Binding("StraddlePrice"));
+            factory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            factory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            factory.SetValue(TextBlock.PaddingProperty, new Thickness(2));
+            factory.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold);
+            factory.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromRgb(255, 255, 255)));
+
+            template.VisualTree = factory;
+            column.CellTemplate = template;
+
+            return column;
         }
 
-        private GridViewColumn CreateHistogramColumn(string header, string priceBinding, string widthBinding, double columnWidth, bool isCall, Style headerStyle)
+        private WpfDataGridTemplateColumn CreateHistogramColumn(string header, string priceBinding, string widthBinding, double columnWidth, bool isCall, Style headerStyle)
         {
-            var column = new GridViewColumn { Header = header, Width = columnWidth, HeaderContainerStyle = headerStyle };
+            var column = new WpfDataGridTemplateColumn
+            {
+                Header = header,
+                Width = new DataGridLength(columnWidth),
+                HeaderStyle = headerStyle,
+                IsReadOnly = true
+            };
+
             var template = new DataTemplate();
             var gridFactory = new FrameworkElementFactory(typeof(Grid));
             gridFactory.SetValue(Grid.HeightProperty, 22.0);
             gridFactory.SetValue(Grid.VerticalAlignmentProperty, VerticalAlignment.Center);
 
+            // Histogram bar
             var barFactory = new FrameworkElementFactory(typeof(Border));
             barFactory.SetValue(Border.BackgroundProperty, isCall ? _ceHistogramBrush : _peHistogramBrush);
             barFactory.SetValue(Border.HorizontalAlignmentProperty, isCall ? HorizontalAlignment.Right : HorizontalAlignment.Left);
@@ -253,6 +257,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
 
             gridFactory.AppendChild(barFactory);
 
+            // Price text overlay
             var textFactory = new FrameworkElementFactory(typeof(TextBlock));
             textFactory.SetBinding(TextBlock.TextProperty, new Binding(priceBinding));
             textFactory.SetValue(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Center);
@@ -264,12 +269,20 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
             gridFactory.AppendChild(textFactory);
             template.VisualTree = gridFactory;
             column.CellTemplate = template;
+
             return column;
         }
 
-        private GridViewColumn CreateVWAPColumn(string header, string vwapBinding, string comparisonBinding, double columnWidth, bool isCall, Style headerStyle)
+        private WpfDataGridTemplateColumn CreateVWAPColumn(string header, string vwapBinding, string comparisonBinding, double columnWidth, bool isCall, Style headerStyle)
         {
-            var column = new GridViewColumn { Header = header, Width = columnWidth, HeaderContainerStyle = headerStyle };
+            var column = new WpfDataGridTemplateColumn
+            {
+                Header = header,
+                Width = new DataGridLength(columnWidth),
+                HeaderStyle = headerStyle,
+                IsReadOnly = true
+            };
+
             var template = new DataTemplate();
             var gridFactory = new FrameworkElementFactory(typeof(Grid));
             gridFactory.SetValue(Grid.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
@@ -293,12 +306,13 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
             gridFactory.AppendChild(vwapText);
             template.VisualTree = gridFactory;
             column.CellTemplate = template;
+
             return column;
         }
 
         public void Refresh()
         {
-            _listView.Items.Refresh();
+            _dataGrid.Items.Refresh();
         }
     }
 }

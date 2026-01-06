@@ -208,7 +208,11 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                 }.DbAdd();
                 Logger.Debug($"[NTHelper] CreateNTInstrument: Instrument '{validName}' added to DB");
 
-                // Step 4: Update SymbolNames mapping
+                // Step 4: Update cache so Instrument.GetInstrument() can find the newly created instrument
+                MasterInstrument.DbUpdateCache();
+                Logger.Debug($"[NTHelper] CreateNTInstrument: MasterInstrument cache updated");
+
+                // Step 5: Update SymbolNames mapping
                 if (!DataContext.Instance.SymbolNames.ContainsKey(validName))
                 {
                     DataContext.Instance.SymbolNames.Add(validName, instrument.Symbol);
