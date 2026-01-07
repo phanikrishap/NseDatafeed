@@ -72,6 +72,23 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private bool _priceSyncPublished = false;
 
         // ═══════════════════════════════════════════════════════════════════
+        // TOKEN & INITIALIZATION STREAMS
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Token validation ready signal - ReplaySubject(1) ensures late subscribers get the value
+        // This is the Rx-based equivalent of Connector.WhenTokenReady
+        private readonly ReplaySubject<bool> _tokenReadySubject = new ReplaySubject<bool>(1);
+        private bool _tokenReadyPublished = false;
+
+        // Instrument database ready signal - fires after token is valid AND db is refreshed
+        private readonly ReplaySubject<bool> _instrumentDbReadySubject = new ReplaySubject<bool>(1);
+        private bool _instrumentDbReadyPublished = false;
+
+        // Detailed initialization state stream - BehaviorSubject so late subscribers get current state
+        private readonly BehaviorSubject<InitializationState> _initializationStateSubject =
+            new BehaviorSubject<InitializationState>(InitializationState.NotStarted);
+
+        // ═══════════════════════════════════════════════════════════════════
         // BACKPRESSURE CONFIGURATION
         // ═══════════════════════════════════════════════════════════════════
 
@@ -186,6 +203,40 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// immediately receive the value if it was already published.
         /// </summary>
         public IObservable<bool> PriceSyncReadyStream => _priceSyncReadySubject.AsObservable();
+
+        /// <summary>
+        /// Stream that emits true when Zerodha token validation is complete.
+        /// Uses ReplaySubject(1) so late subscribers immediately receive the value.
+        /// Subscribe to this before making any API calls that require authentication.
+        /// </summary>
+        public IObservable<bool> TokenReadyStream => _tokenReadySubject.AsObservable();
+
+        /// <summary>
+        /// Stream that emits true when instrument database is ready (token valid + db refreshed).
+        /// Uses ReplaySubject(1) so late subscribers immediately receive the value.
+        /// Subscribe to this before performing instrument lookups.
+        /// </summary>
+        public IObservable<bool> InstrumentDbReadyStream => _instrumentDbReadySubject.AsObservable();
+
+        /// <summary>
+        /// Detailed initialization state stream. Uses BehaviorSubject so late subscribers
+        /// immediately receive the current state. Subscribe to track initialization progress
+        /// with retry counts, phase changes, and error messages.
+        /// </summary>
+        public IObservable<InitializationState> InitializationStateStream => _initializationStateSubject.AsObservable();
+
+        /// <summary>
+        /// Convenience stream that emits once when initialization reaches Ready state.
+        /// Use this to await full initialization before starting subscriptions.
+        /// </summary>
+        public IObservable<InitializationState> WhenReady => _initializationStateSubject
+            .Where(s => s.IsReady)
+            .Take(1);
+
+        /// <summary>
+        /// Gets the current initialization state synchronously.
+        /// </summary>
+        public InitializationState CurrentInitializationState => _initializationStateSubject.Value;
 
         #endregion
 
@@ -509,6 +560,87 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             _priceSyncReadySubject.OnNext(true);
         }
 
+        /// <summary>
+        /// Publishes token ready signal. Called by Connector after token validation completes.
+        /// Uses ReplaySubject(1) so late subscribers immediately receive the value.
+        /// This method is idempotent - subsequent calls are ignored.
+        /// </summary>
+        /// <param name="isValid">True if token is valid, false otherwise</param>
+        public void PublishTokenReady(bool isValid)
+        {
+            lock (_syncLock)
+            {
+                if (_tokenReadyPublished) return;
+                _tokenReadyPublished = true;
+            }
+
+            Logger.Info($"[MarketDataReactiveHub] Publishing TokenReady to Rx stream: isValid={isValid}");
+            _tokenReadySubject.OnNext(isValid);
+        }
+
+        /// <summary>
+        /// Publishes instrument database ready signal. Called after db refresh completes.
+        /// Uses ReplaySubject(1) so late subscribers immediately receive the value.
+        /// This method is idempotent - subsequent calls are ignored.
+        /// </summary>
+        /// <param name="isReady">True if database is ready, false otherwise</param>
+        public void PublishInstrumentDbReady(bool isReady)
+        {
+            lock (_syncLock)
+            {
+                if (_instrumentDbReadyPublished) return;
+                _instrumentDbReadyPublished = true;
+            }
+
+            Logger.Info($"[MarketDataReactiveHub] Publishing InstrumentDbReady to Rx stream: isReady={isReady}");
+            _instrumentDbReadySubject.OnNext(isReady);
+        }
+
+        /// <summary>
+        /// Publishes a detailed initialization state update.
+        /// Called at various stages during initialization to provide progress tracking.
+        /// </summary>
+        /// <param name="state">The current initialization state</param>
+        public void PublishInitializationState(InitializationState state)
+        {
+            if (state == null) return;
+
+            Logger.Info($"[MarketDataReactiveHub] InitializationState: {state}");
+            _initializationStateSubject.OnNext(state);
+
+            // Also publish to simple streams for backward compatibility
+            if (state.Phase == InitializationPhase.TokenValidated)
+            {
+                PublishTokenReady(state.IsTokenValid);
+            }
+            else if (state.Phase == InitializationPhase.Ready || state.Phase == InitializationPhase.Failed)
+            {
+                PublishInstrumentDbReady(state.IsInstrumentDbReady);
+            }
+        }
+
+        /// <summary>
+        /// Helper to publish initialization state for a specific phase.
+        /// </summary>
+        public void PublishInitializationPhase(InitializationPhase phase, string message, int progressPercent = 0)
+        {
+            PublishInitializationState(InitializationState.ForPhase(phase, message, progressPercent));
+        }
+
+        /// <summary>
+        /// Helper to publish initialization state with retry information.
+        /// </summary>
+        public void PublishInitializationRetry(int attempt, int maxRetries, string message)
+        {
+            var state = InitializationState.ForPhase(
+                InitializationPhase.DownloadingInstruments,
+                message,
+                (attempt * 100) / maxRetries);
+            state.RetryAttempt = attempt;
+            state.MaxRetries = maxRetries;
+            PublishInitializationState(state);
+        }
+
         #endregion
 
         #region Symbol Routing
@@ -694,6 +826,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             // TBS price sync stream
             _priceSyncReadySubject.Dispose();
+
+            // Token & initialization streams
+            _tokenReadySubject.Dispose();
+            _instrumentDbReadySubject.Dispose();
+            _initializationStateSubject.Dispose();
 
             Logger.Info("[MarketDataReactiveHub] Disposed");
         }

@@ -5,8 +5,10 @@ using System.Data.SQLite;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
 using ZerodhaDatafeedAdapter.Helpers;
+using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Zerodha;
 
@@ -71,139 +73,203 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
             }
         }
 
-        public async Task<bool> DownloadAndCreateInstrumentDatabaseAsync()
+        /// <summary>
+        /// Downloads instrument data from Zerodha with retry logic.
+        /// </summary>
+        /// <param name="maxRetries">Maximum number of retry attempts (default 3)</param>
+        /// <param name="initialDelayMs">Initial delay between retries in milliseconds (default 2000)</param>
+        /// <param name="cancellationToken">Optional cancellation token</param>
+        /// <returns>True if download succeeded, false otherwise</returns>
+        public async Task<bool> DownloadAndCreateInstrumentDatabaseAsync(
+            int maxRetries = 3,
+            int initialDelayMs = 2000,
+            CancellationToken cancellationToken = default)
         {
-            Logger.Info("[IDB] Downloading instruments from Zerodha...");
-            try
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
-                using (var client = new HttpClient())
+                if (cancellationToken.IsCancellationRequested)
                 {
-                    var csv = await client.GetStringAsync("https://api.kite.trade/instruments");
-                    if (string.IsNullOrEmpty(csv)) return false;
+                    Logger.Warn("[IDB] Download cancelled.");
+                    return false;
+                }
 
-                    // Ensure directory exists
-                    string dir = Path.GetDirectoryName(_dbPath);
-                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                Logger.Info($"[IDB] Downloading instruments from Zerodha (attempt {attempt}/{maxRetries})...");
+                StartupLogger.LogInstrumentDbDownloadAttempt(attempt, maxRetries);
 
-                    using (var conn = new SQLiteConnection($"Data Source={_dbPath};Version=3;"))
+                try
+                {
+                    bool success = await DownloadInstrumentsInternalAsync(cancellationToken);
+                    if (success)
                     {
-                        await conn.OpenAsync();
-                        using (var transaction = conn.BeginTransaction())
-                        {
-                            // Drop existing table and recreate with correct schema including underlying column
-                            string dropTable = "DROP TABLE IF EXISTS instruments";
-                            using (var cmd = new SQLiteCommand(dropTable, conn)) await cmd.ExecuteNonQueryAsync();
-
-                            // Create table with underlying column (matches actual database schema)
-                            string createTable = @"CREATE TABLE instruments (
-                                instrument_token INTEGER PRIMARY KEY,
-                                exchange_token INTEGER,
-                                tradingsymbol TEXT,
-                                name TEXT,
-                                expiry TEXT,
-                                strike REAL,
-                                tick_size REAL,
-                                lot_size INTEGER,
-                                instrument_type TEXT,
-                                segment TEXT,
-                                exchange TEXT,
-                                underlying TEXT
-                            )";
-                            using (var cmd = new SQLiteCommand(createTable, conn)) await cmd.ExecuteNonQueryAsync();
-
-                            // Create indexes for fast lookups
-                            string[] indexes = {
-                                "CREATE INDEX idx_tradingsymbol ON instruments(tradingsymbol)",
-                                "CREATE INDEX idx_underlying ON instruments(underlying)",
-                                "CREATE INDEX idx_expiry ON instruments(expiry)",
-                                "CREATE INDEX idx_segment ON instruments(segment)"
-                            };
-                            foreach (var idx in indexes)
-                            {
-                                using (var cmd = new SQLiteCommand(idx, conn)) await cmd.ExecuteNonQueryAsync();
-                            }
-
-                            // Insert new data (Bulk insert)
-                            // CSV columns: instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange
-                            // Note: underlying is derived from name for F&O instruments
-                            string insertSql = @"INSERT INTO instruments (instrument_token, exchange_token, tradingsymbol, name, expiry, strike, tick_size, lot_size, instrument_type, segment, exchange, underlying)
-                                               VALUES (@token, @etoken, @symbol, @name, @expiry, @strike, @tick, @lot, @type, @segment, @exchange, @underlying)";
-
-                            using (var cmd = new SQLiteCommand(insertSql, conn))
-                            {
-                                cmd.Parameters.Add("@token", System.Data.DbType.Int64);
-                                cmd.Parameters.Add("@etoken", System.Data.DbType.Int64);
-                                cmd.Parameters.Add("@symbol", System.Data.DbType.String);
-                                cmd.Parameters.Add("@name", System.Data.DbType.String);
-                                cmd.Parameters.Add("@expiry", System.Data.DbType.String);
-                                cmd.Parameters.Add("@strike", System.Data.DbType.Double);
-                                cmd.Parameters.Add("@tick", System.Data.DbType.Double);
-                                cmd.Parameters.Add("@lot", System.Data.DbType.Int32);
-                                cmd.Parameters.Add("@type", System.Data.DbType.String);
-                                cmd.Parameters.Add("@segment", System.Data.DbType.String);
-                                cmd.Parameters.Add("@exchange", System.Data.DbType.String);
-                                cmd.Parameters.Add("@underlying", System.Data.DbType.String);
-
-                                var lines = csv.Split('\n');
-                                int count = 0;
-                                foreach (var line in lines.Skip(1)) // Skip header
-                                {
-                                    if (string.IsNullOrWhiteSpace(line)) continue;
-                                    var fields = line.Split(',');
-                                    if (fields.Length < 12) continue;
-
-                                    try
-                                    {
-                                        cmd.Parameters["@token"].Value = long.Parse(fields[0]);
-                                        cmd.Parameters["@etoken"].Value = long.Parse(fields[1]);
-                                        cmd.Parameters["@symbol"].Value = fields[2];
-                                        cmd.Parameters["@name"].Value = fields[3];
-                                        // Skip last_price (fields[4]) - not stored
-                                        cmd.Parameters["@expiry"].Value = fields[5];
-                                        cmd.Parameters["@strike"].Value = string.IsNullOrEmpty(fields[6]) ? 0 : double.Parse(fields[6]);
-                                        cmd.Parameters["@tick"].Value = double.Parse(fields[7]);
-                                        cmd.Parameters["@lot"].Value = int.Parse(fields[8]);
-                                        cmd.Parameters["@type"].Value = fields[9];
-                                        cmd.Parameters["@segment"].Value = fields[10];
-                                        cmd.Parameters["@exchange"].Value = fields[11].TrimEnd('\r');
-
-                                        // Derive underlying: for F&O, name column contains underlying
-                                        // For equities, it's the tradingsymbol itself
-                                        string underlying = fields[3]; // name column
-                                        if (string.IsNullOrEmpty(underlying))
-                                        {
-                                            underlying = fields[2]; // use tradingsymbol as fallback
-                                        }
-                                        cmd.Parameters["@underlying"].Value = underlying;
-
-                                        await cmd.ExecuteNonQueryAsync();
-                                        count++;
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        // Skip malformed rows
-                                        Logger.Debug($"[IDB] Skipping malformed row: {line.Substring(0, Math.Min(100, line.Length))}... Error: {ex.Message}");
-                                    }
-                                }
-                                Logger.Info($"[IDB] Inserted {count} instruments into database.");
-                            }
-                            transaction.Commit();
-                        }
+                        Logger.Info($"[IDB] Download succeeded on attempt {attempt}.");
+                        return true;
                     }
 
-                    // Reload cache after download
-                    _cacheLoaded = false;
-                    _symbolToTokenCache.Clear();
-                    LoadAllTokensToCache();
+                    Logger.Warn($"[IDB] Download returned false on attempt {attempt}.");
+                }
+                catch (OperationCanceledException)
+                {
+                    Logger.Warn("[IDB] Download cancelled.");
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+                    Logger.Error($"[IDB] Download failed on attempt {attempt}: {ex.Message}");
+                }
 
-                    Logger.Info("[IDB] Instrument database updated successfully.");
-                    return true;
+                // Calculate exponential backoff delay
+                if (attempt < maxRetries)
+                {
+                    int delayMs = initialDelayMs * (int)Math.Pow(2, attempt - 1);
+                    Logger.Info($"[IDB] Retrying in {delayMs}ms...");
+                    StartupLogger.LogInstrumentDbRetry(attempt, maxRetries, delayMs, lastException?.Message ?? "Unknown error");
+                    try
+                    {
+                        await Task.Delay(delayMs, cancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Logger.Warn("[IDB] Retry delay cancelled.");
+                        return false;
+                    }
                 }
             }
-            catch (Exception ex)
+
+            Logger.Error($"[IDB] All {maxRetries} download attempts failed. Last error: {lastException?.Message}");
+            StartupLogger.LogInstrumentDbDownloadResult(false, null, $"All {maxRetries} attempts failed. Last error: {lastException?.Message}");
+            return false;
+        }
+
+        /// <summary>
+        /// Internal download implementation (single attempt).
+        /// </summary>
+        private async Task<bool> DownloadInstrumentsInternalAsync(CancellationToken cancellationToken)
+        {
+            using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) })
             {
-                Logger.Error("[IDB] Failed to download/update instruments:", ex);
-                return false;
+                var csv = await client.GetStringAsync("https://api.kite.trade/instruments");
+                if (string.IsNullOrEmpty(csv)) return false;
+
+                // Ensure directory exists
+                string dir = Path.GetDirectoryName(_dbPath);
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+                using (var conn = new SQLiteConnection($"Data Source={_dbPath};Version=3;"))
+                {
+                    await conn.OpenAsync();
+                    using (var transaction = conn.BeginTransaction())
+                    {
+                        // Drop existing table and recreate with correct schema including underlying column
+                        string dropTable = "DROP TABLE IF EXISTS instruments";
+                        using (var cmd = new SQLiteCommand(dropTable, conn)) await cmd.ExecuteNonQueryAsync();
+
+                        // Create table with underlying column (matches actual database schema)
+                        string createTable = @"CREATE TABLE instruments (
+                            instrument_token INTEGER PRIMARY KEY,
+                            exchange_token INTEGER,
+                            tradingsymbol TEXT,
+                            name TEXT,
+                            expiry TEXT,
+                            strike REAL,
+                            tick_size REAL,
+                            lot_size INTEGER,
+                            instrument_type TEXT,
+                            segment TEXT,
+                            exchange TEXT,
+                            underlying TEXT
+                        )";
+                        using (var cmd = new SQLiteCommand(createTable, conn)) await cmd.ExecuteNonQueryAsync();
+
+                        // Create indexes for fast lookups
+                        string[] indexes = {
+                            "CREATE INDEX idx_tradingsymbol ON instruments(tradingsymbol)",
+                            "CREATE INDEX idx_underlying ON instruments(underlying)",
+                            "CREATE INDEX idx_expiry ON instruments(expiry)",
+                            "CREATE INDEX idx_segment ON instruments(segment)"
+                        };
+                        foreach (var idx in indexes)
+                        {
+                            using (var cmd = new SQLiteCommand(idx, conn)) await cmd.ExecuteNonQueryAsync();
+                        }
+
+                        // Insert new data (Bulk insert)
+                        // CSV columns: instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange
+                        // Note: underlying is derived from name for F&O instruments
+                        string insertSql = @"INSERT INTO instruments (instrument_token, exchange_token, tradingsymbol, name, expiry, strike, tick_size, lot_size, instrument_type, segment, exchange, underlying)
+                                           VALUES (@token, @etoken, @symbol, @name, @expiry, @strike, @tick, @lot, @type, @segment, @exchange, @underlying)";
+
+                        using (var cmd = new SQLiteCommand(insertSql, conn))
+                        {
+                            cmd.Parameters.Add("@token", System.Data.DbType.Int64);
+                            cmd.Parameters.Add("@etoken", System.Data.DbType.Int64);
+                            cmd.Parameters.Add("@symbol", System.Data.DbType.String);
+                            cmd.Parameters.Add("@name", System.Data.DbType.String);
+                            cmd.Parameters.Add("@expiry", System.Data.DbType.String);
+                            cmd.Parameters.Add("@strike", System.Data.DbType.Double);
+                            cmd.Parameters.Add("@tick", System.Data.DbType.Double);
+                            cmd.Parameters.Add("@lot", System.Data.DbType.Int32);
+                            cmd.Parameters.Add("@type", System.Data.DbType.String);
+                            cmd.Parameters.Add("@segment", System.Data.DbType.String);
+                            cmd.Parameters.Add("@exchange", System.Data.DbType.String);
+                            cmd.Parameters.Add("@underlying", System.Data.DbType.String);
+
+                            var lines = csv.Split('\n');
+                            int count = 0;
+                            foreach (var line in lines.Skip(1)) // Skip header
+                            {
+                                if (string.IsNullOrWhiteSpace(line)) continue;
+                                var fields = line.Split(',');
+                                if (fields.Length < 12) continue;
+
+                                try
+                                {
+                                    cmd.Parameters["@token"].Value = long.Parse(fields[0]);
+                                    cmd.Parameters["@etoken"].Value = long.Parse(fields[1]);
+                                    cmd.Parameters["@symbol"].Value = fields[2];
+                                    cmd.Parameters["@name"].Value = fields[3];
+                                    // Skip last_price (fields[4]) - not stored
+                                    cmd.Parameters["@expiry"].Value = fields[5];
+                                    cmd.Parameters["@strike"].Value = string.IsNullOrEmpty(fields[6]) ? 0 : double.Parse(fields[6]);
+                                    cmd.Parameters["@tick"].Value = double.Parse(fields[7]);
+                                    cmd.Parameters["@lot"].Value = int.Parse(fields[8]);
+                                    cmd.Parameters["@type"].Value = fields[9];
+                                    cmd.Parameters["@segment"].Value = fields[10];
+                                    cmd.Parameters["@exchange"].Value = fields[11].TrimEnd('\r');
+
+                                    // Derive underlying: for F&O, name column contains underlying
+                                    // For equities, it's the tradingsymbol itself
+                                    string underlying = fields[3]; // name column
+                                    if (string.IsNullOrEmpty(underlying))
+                                    {
+                                        underlying = fields[2]; // use tradingsymbol as fallback
+                                    }
+                                    cmd.Parameters["@underlying"].Value = underlying;
+
+                                    await cmd.ExecuteNonQueryAsync();
+                                    count++;
+                                }
+                                catch (Exception ex)
+                                {
+                                    // Skip malformed rows
+                                    Logger.Debug($"[IDB] Skipping malformed row: {line.Substring(0, Math.Min(100, line.Length))}... Error: {ex.Message}");
+                                }
+                            }
+                            Logger.Info($"[IDB] Inserted {count} instruments into database.");
+                        }
+                        transaction.Commit();
+                    }
+                }
+
+                // Reload cache after download
+                _cacheLoaded = false;
+                _symbolToTokenCache.Clear();
+                LoadAllTokensToCache();
+
+                Logger.Info("[IDB] Instrument database updated successfully.");
+                return true;
             }
         }
 

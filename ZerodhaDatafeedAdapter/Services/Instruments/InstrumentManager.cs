@@ -4,12 +4,18 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Reactive.Linq;
+using System.Reactive.Threading.Tasks;
+using System.Threading;
 using System.Threading.Tasks;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaDatafeedAdapter.Helpers;
+using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
+using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Zerodha;
 
 namespace ZerodhaDatafeedAdapter.Services.Instruments
@@ -140,9 +146,140 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
 
         private async Task EnsureDatabaseExists()
         {
-            if (!File.Exists(_dbPath) || (DateTime.Now - File.GetLastWriteTime(_dbPath)).TotalDays > 1)
+            var hub = MarketDataReactiveHub.Instance;
+
+            // Phase 1: Check if database needs refresh
+            hub.PublishInitializationPhase(InitializationPhase.CheckingInstrumentDb, "Checking instrument database...", 10);
+            StartupLogger.LogInitializationState("CheckingInstrumentDb", "Checking instrument database...", 10);
+
+            bool needsRefresh = !File.Exists(_dbPath);
+            DateTime? lastModifiedDate = null;
+
+            if (!needsRefresh)
             {
-                await DownloadInstrumentsAsync();
+                // Check if the file was last modified today (using date only, not time)
+                var lastModified = File.GetLastWriteTime(_dbPath);
+                lastModifiedDate = lastModified;
+                var today = DateTime.Now.Date;
+                needsRefresh = lastModified.Date < today;
+
+                if (needsRefresh)
+                {
+                    Logger.Info($"[IM] InstrumentMasters.db is stale (last modified: {lastModified:yyyy-MM-dd}). Refreshing...");
+                    StartupLogger.LogInstrumentDbCheck(true, lastModified);
+                }
+                else
+                {
+                    Logger.Info($"[IM] InstrumentMasters.db is current (last modified: {lastModified:yyyy-MM-dd}). Skipping download.");
+                    StartupLogger.LogInstrumentDbCheck(false, lastModified);
+                    StartupLogger.LogInitializationReady(true, true);
+                    hub.PublishInitializationState(InitializationState.Ready(true, true));
+                    return;
+                }
+            }
+            else
+            {
+                Logger.Info("[IM] InstrumentMasters.db does not exist. Downloading...");
+                StartupLogger.LogInstrumentDbCheck(true, null);
+            }
+
+            // Phase 2: Await token validation using Rx pattern
+            hub.PublishInitializationPhase(InitializationPhase.ValidatingToken, "Awaiting token validation...", 20);
+            StartupLogger.LogInitializationState("ValidatingToken", "Awaiting token validation via Rx stream...", 20);
+            Logger.Info("[IM] Awaiting token validation via Rx stream before downloading instruments...");
+
+            try
+            {
+                // Use Rx to await token ready with timeout (60 seconds)
+                var tokenValid = await hub.TokenReadyStream
+                    .Timeout(TimeSpan.FromSeconds(60))
+                    .FirstAsync()
+                    .ToTask();
+
+                // Publish token validated state
+                var tokenState = InitializationState.ForPhase(
+                    InitializationPhase.TokenValidated,
+                    tokenValid ? "Token validated successfully" : "Token validation failed",
+                    30);
+                tokenState.IsTokenValid = tokenValid;
+                hub.PublishInitializationState(tokenState);
+                StartupLogger.LogInitializationState("TokenValidated", tokenValid ? "Token validated successfully" : "Token validation FAILED", 30, !tokenValid);
+
+                if (!tokenValid)
+                {
+                    Logger.Warn("[IM] Token validation failed. Cannot download instruments without valid token.");
+                    StartupLogger.LogInitializationFailed("Token validation failed. Manual login may be required.");
+                    hub.PublishInitializationState(InitializationState.Fail("Token validation failed. Manual login may be required."));
+                    return;
+                }
+
+                // Phase 3: Download instruments with retry
+                Logger.Info("[IM] Token is valid. Proceeding with instrument download...");
+                hub.PublishInitializationPhase(InitializationPhase.DownloadingInstruments, "Downloading instruments from Zerodha...", 40);
+                StartupLogger.LogInitializationState("DownloadingInstruments", "Downloading instruments from Zerodha API...", 40);
+
+                var downloadSuccess = await _dbService.DownloadAndCreateInstrumentDatabaseAsync(
+                    maxRetries: 3,
+                    initialDelayMs: 2000,
+                    cancellationToken: CancellationToken.None);
+
+                if (downloadSuccess)
+                {
+                    Logger.Info("[IM] Instrument database downloaded and refreshed successfully.");
+                    StartupLogger.LogInstrumentDbDownloadResult(true);
+
+                    // Phase 4: Load cache
+                    hub.PublishInitializationPhase(InitializationPhase.LoadingInstrumentCache, "Loading instruments into cache...", 80);
+                    StartupLogger.LogInitializationState("LoadingInstrumentCache", "Loading instruments into memory cache...", 80);
+                    _dbService.LoadAllTokensToCache();
+
+                    // Publish ready state
+                    StartupLogger.LogInitializationReady(true, true);
+                    hub.PublishInitializationState(InitializationState.Ready(true, true));
+                }
+                else
+                {
+                    Logger.Warn("[IM] Instrument download failed after all retries.");
+                    StartupLogger.LogInstrumentDbDownloadResult(false, null, "All retry attempts exhausted");
+                    bool hasExistingDb = File.Exists(_dbPath);
+
+                    if (hasExistingDb)
+                    {
+                        Logger.Info("[IM] Using existing (stale) database as fallback.");
+                        StartupLogger.LogInitializationState("LoadingInstrumentCache", "Loading STALE cache as fallback...", 80);
+                        hub.PublishInitializationPhase(InitializationPhase.LoadingInstrumentCache, "Loading existing cache (stale)...", 80);
+                        _dbService.LoadAllTokensToCache();
+                        StartupLogger.LogInitializationReady(true, true);
+                        hub.PublishInitializationState(InitializationState.Ready(true, true));
+                    }
+                    else
+                    {
+                        StartupLogger.LogInitializationFailed("Failed to download instruments and no existing database available.");
+                        hub.PublishInitializationState(InitializationState.Fail("Failed to download instruments and no existing database available."));
+                    }
+                }
+            }
+            catch (TimeoutException)
+            {
+                Logger.Error("[IM] Timeout waiting for token validation (60s). Cannot download instruments.");
+                StartupLogger.LogInitializationFailed("Timeout waiting for token validation (60s).");
+                hub.PublishInitializationState(InitializationState.Fail("Timeout waiting for token validation (60s)."));
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[IM] Error during instrument database refresh: {ex.Message}", ex);
+                bool hasExistingDb = File.Exists(_dbPath);
+                if (hasExistingDb)
+                {
+                    Logger.Info("[IM] Using existing database despite error.");
+                    StartupLogger.LogInitializationReady(true, true);
+                    hub.PublishInitializationState(InitializationState.Ready(true, true));
+                }
+                else
+                {
+                    StartupLogger.LogInitializationFailed($"Error: {ex.Message}");
+                    hub.PublishInitializationState(InitializationState.Fail($"Error: {ex.Message}"));
+                }
             }
         }
 

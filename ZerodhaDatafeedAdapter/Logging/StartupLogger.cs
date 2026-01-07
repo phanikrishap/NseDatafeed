@@ -319,6 +319,131 @@ namespace ZerodhaDatafeedAdapter.Logging
 
         #endregion
 
+        #region Instrument Database Logging
+
+        /// <summary>
+        /// Log instrument database initialization phase
+        /// </summary>
+        public static void LogInstrumentDbPhase(string phase, string message, int progressPercent = 0)
+        {
+            Info($"========== INSTRUMENT DATABASE: {phase.ToUpper()} ==========");
+            Info($"{message} ({progressPercent}% complete)");
+        }
+
+        /// <summary>
+        /// Log instrument database check result
+        /// </summary>
+        public static void LogInstrumentDbCheck(bool needsRefresh, DateTime? lastModified = null)
+        {
+            Info("========== INSTRUMENT DATABASE CHECK ==========");
+            if (needsRefresh)
+            {
+                if (lastModified.HasValue)
+                {
+                    Info($"Database is STALE (last modified: {lastModified.Value:yyyy-MM-dd HH:mm:ss})");
+                }
+                else
+                {
+                    Info("Database does NOT EXIST - download required");
+                }
+            }
+            else
+            {
+                Info($"Database is CURRENT (last modified: {lastModified?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A"})");
+            }
+        }
+
+        /// <summary>
+        /// Log instrument database download attempt
+        /// </summary>
+        public static void LogInstrumentDbDownloadAttempt(int attempt, int maxRetries)
+        {
+            Info($"[InstrumentDb] Download attempt {attempt}/{maxRetries}...");
+        }
+
+        /// <summary>
+        /// Log instrument database download result
+        /// </summary>
+        public static void LogInstrumentDbDownloadResult(bool success, int? instrumentCount = null, string errorMessage = null)
+        {
+            if (success)
+            {
+                Info("========== INSTRUMENT DATABASE UPDATED ==========");
+                if (instrumentCount.HasValue)
+                {
+                    Info($"Successfully downloaded and cached {instrumentCount} instruments");
+                }
+                else
+                {
+                    Info("Instrument database download completed successfully");
+                }
+            }
+            else
+            {
+                Error("========== INSTRUMENT DATABASE DOWNLOAD FAILED ==========");
+                if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    Error($"Error: {errorMessage}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Log instrument database download retry
+        /// </summary>
+        public static void LogInstrumentDbRetry(int attempt, int maxRetries, int delayMs, string reason)
+        {
+            Warn($"[InstrumentDb] Attempt {attempt} failed: {reason}");
+            Warn($"[InstrumentDb] Retrying in {delayMs}ms... ({maxRetries - attempt} attempts remaining)");
+        }
+
+        /// <summary>
+        /// Log initialization state change (Rx stream event)
+        /// </summary>
+        public static void LogInitializationState(string phase, string message, int progressPercent, bool isError = false)
+        {
+            string logMsg = $"[InitState] [{phase}] {message} ({progressPercent}%)";
+            if (isError)
+            {
+                Error(logMsg);
+            }
+            else
+            {
+                Info(logMsg);
+            }
+        }
+
+        /// <summary>
+        /// Log initialization ready state
+        /// </summary>
+        public static void LogInitializationReady(bool tokenValid, bool dbReady)
+        {
+            Info("");
+            Info("================================================================================");
+            Info("  INITIALIZATION COMPLETE");
+            Info($"  Token Valid: {(tokenValid ? "YES" : "NO")}");
+            Info($"  Instrument DB Ready: {(dbReady ? "YES" : "NO")}");
+            Info($"  Time to ready: {_startupStopwatch.ElapsedMilliseconds}ms from adapter start");
+            Info("================================================================================");
+            Info("");
+        }
+
+        /// <summary>
+        /// Log initialization failure
+        /// </summary>
+        public static void LogInitializationFailed(string errorMessage)
+        {
+            Error("");
+            Error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            Error("  INITIALIZATION FAILED");
+            Error($"  Error: {errorMessage}");
+            Error("  Market data subscriptions may not work correctly!");
+            Error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            Error("");
+        }
+
+        #endregion
+
         #region Utility Methods
 
         /// <summary>

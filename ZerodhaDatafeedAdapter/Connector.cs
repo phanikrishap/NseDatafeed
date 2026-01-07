@@ -2,6 +2,7 @@ using ZerodhaAPI.Common.Enums;
 using ZerodhaAPI.Zerodha.Websockets;
 using ZerodhaDatafeedAdapter.Classes;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Configuration;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.MarketData;
@@ -229,6 +230,9 @@ namespace ZerodhaDatafeedAdapter
                     // Signal token ready via TaskCompletionSource (safe for late subscribers)
                     Logger.Info($"[Connector] Setting TokenReady via TCS with result={tokenResult}");
                     _tokenReadyTcs.TrySetResult(tokenResult);
+
+                    // Also publish to Rx hub for reactive subscribers (InstrumentManager, etc.)
+                    MarketDataReactiveHub.Instance.PublishTokenReady(tokenResult);
                 }
                 catch (Exception ex)
                 {
@@ -244,6 +248,9 @@ namespace ZerodhaDatafeedAdapter
 
                     // Signal failure via TaskCompletionSource
                     _tokenReadyTcs.TrySetResult(false);
+
+                    // Also publish failure to Rx hub
+                    MarketDataReactiveHub.Instance.PublishTokenReady(false);
                 }
             });
         }
