@@ -28,6 +28,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private readonly SubscriptionManager _subscriptionManager;
         private readonly MarketDataReactiveHub _hub;
         private readonly CompositeDisposable _subscriptions = new CompositeDisposable();
+        private readonly HashSet<string> _persistenceSubscribedSymbols = new HashSet<string>();
         private bool _isRunning = false;
 
         private MarketAnalyzerService()
@@ -263,6 +264,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     if (subscribed)
                     {
                         Logger.Info($"[MarketAnalyzerService] SubscribeToIndexViaWebSocket({symbol}): Successfully subscribed to WebSocket");
+
+                        // Subscribe for NinjaTrader database persistence
+                        // This registers a NT callback so ticks are saved to the database
+                        SubscribeForPersistence(symbol);
 
                         // Request historical data to get prior close
                         await RequestIndexHistoricalData(symbol);
@@ -682,6 +687,13 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 if (subscribed)
                 {
                     Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesViaWebSocket({niftyFutSymbol}): Successfully subscribed");
+
+                    // Subscribe for NinjaTrader database persistence
+                    // This registers a NT callback so ticks are saved to the database
+                    SubscribeForPersistence(niftyFutSymbol);
+
+                    // Also try with NIFTY_I alias for persistence
+                    SubscribeForPersistence("NIFTY_I");
                 }
                 else
                 {
@@ -877,6 +889,99 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             Logger.Info($"[MarketAnalyzerService] OnOptionsGenerated(): Queueing options for subscription...");
             _subscriptionManager.QueueSubscription(evt.Options);
             Logger.Info($"[MarketAnalyzerService] OnOptionsGenerated(): Options queued successfully");
+        }
+
+        /// <summary>
+        /// Subscribes to NinjaTrader market data for the given symbol to enable database persistence.
+        /// This mirrors the OptionChainWindow.SubscribeForPersistence pattern.
+        /// If the instrument doesn't exist in NinjaTrader, it will be created first.
+        /// Even with an empty callback, NinjaTrader will persist ticks to its database.
+        /// </summary>
+        /// <param name="symbol">The NinjaTrader symbol name</param>
+        private void SubscribeForPersistence(string symbol)
+        {
+            if (_persistenceSubscribedSymbols.Contains(symbol))
+            {
+                Logger.Debug($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Already subscribed for persistence");
+                return;
+            }
+
+            try
+            {
+                // Must run on UI thread to access NinjaTrader instruments
+                NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        var nt = Instrument.GetInstrument(symbol);
+
+                        // If instrument doesn't exist, create it first
+                        if (nt == null)
+                        {
+                            Logger.Info($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Instrument not found, attempting to create...");
+
+                            // Try to get mapping from InstrumentManager (for indices and F&O)
+                            var mapping = InstrumentManager.Instance.GetMappingByNtSymbol(symbol);
+                            if (mapping != null)
+                            {
+                                string ntName;
+                                bool created = NinjaTraderHelper.CreateNTInstrumentFromMapping(mapping, out ntName);
+                                if (created)
+                                {
+                                    Logger.Info($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Created NT instrument '{ntName}'");
+                                    nt = Instrument.GetInstrument(ntName);
+                                }
+                            }
+                            else
+                            {
+                                // Create a basic instrument definition for indices without mapping
+                                var instrumentDef = new InstrumentDefinition
+                                {
+                                    Symbol = symbol,
+                                    BrokerSymbol = symbol,
+                                    Segment = "NSE",
+                                    TickSize = 0.05,
+                                    InstrumentToken = InstrumentManager.Instance.GetInstrumentToken(symbol)
+                                };
+
+                                string ntName;
+                                bool created = InstrumentManager.Instance.CreateInstrument(instrumentDef, out ntName);
+                                if (created)
+                                {
+                                    Logger.Info($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Created NT instrument '{ntName}'");
+                                    nt = Instrument.GetInstrument(ntName);
+                                }
+                            }
+                        }
+
+                        if (nt == null)
+                        {
+                            Logger.Warn($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Failed to get/create instrument");
+                            return;
+                        }
+
+                        var adapter = Connector.Instance?.GetAdapter() as ZerodhaAdapter;
+                        if (adapter == null)
+                        {
+                            Logger.Warn($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Adapter not available");
+                            return;
+                        }
+
+                        // Subscribe with empty callback - NinjaTrader will still persist ticks to database
+                        adapter.SubscribeMarketData(nt, (t, p, v, time, a5) => { });
+                        _persistenceSubscribedSymbols.Add(symbol);
+                        Logger.Info($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Successfully subscribed for NT database persistence");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Exception in dispatcher - {ex.Message}", ex);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Exception - {ex.Message}", ex);
+            }
         }
     }
 }

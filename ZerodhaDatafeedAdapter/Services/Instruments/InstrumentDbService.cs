@@ -570,6 +570,81 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
             return 0;
         }
 
+        /// <summary>
+        /// Looks up futures contract details (token and tradingsymbol) for a given segment/underlying.
+        /// Returns the nearest expiry futures contract (expiry >= today).
+        /// Used by NiftyFuturesMetricsService to resolve NIFTY Futures symbol.
+        /// </summary>
+        public (long token, string symbol) LookupFutures(string segment, string underlying, DateTime today)
+        {
+            if (string.IsNullOrEmpty(_dbPath) || !File.Exists(_dbPath))
+                return (0, null);
+
+            try
+            {
+                using (var conn = new SQLiteConnection($"Data Source={_dbPath};Version=3;Read Only=True;"))
+                {
+                    conn.Open();
+
+                    // Query for futures contract with nearest expiry >= today
+                    string sql = @"SELECT instrument_token, tradingsymbol FROM instruments
+                                   WHERE segment = @seg
+                                   AND underlying = @und
+                                   AND instrument_type = 'FUT'
+                                   AND expiry >= @today
+                                   ORDER BY expiry ASC
+                                   LIMIT 1";
+
+                    using (var cmd = new SQLiteCommand(sql, conn))
+                    {
+                        cmd.Parameters.AddWithValue("@seg", segment);
+                        cmd.Parameters.AddWithValue("@und", underlying);
+                        cmd.Parameters.AddWithValue("@today", today.ToString("yyyy-MM-dd"));
+
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                long token = reader.GetInt64(0);
+                                string tradingSymbol = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                                Logger.Info($"[IDB] Found futures {tradingSymbol} (token={token}) for {underlying}");
+                                return (token, tradingSymbol);
+                            }
+                        }
+                    }
+
+                    // If no results with unquoted underlying, try quoted (legacy data)
+                    if (!underlying.StartsWith("\""))
+                    {
+                        Logger.Debug($"[IDB] No futures found for '{underlying}', retrying with quoted value...");
+                        using (var cmd = new SQLiteCommand(sql, conn))
+                        {
+                            cmd.Parameters.AddWithValue("@seg", segment);
+                            cmd.Parameters.AddWithValue("@und", $"\"{underlying}\"");
+                            cmd.Parameters.AddWithValue("@today", today.ToString("yyyy-MM-dd"));
+
+                            using (var reader = cmd.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    long token = reader.GetInt64(0);
+                                    string tradingSymbol = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                                    Logger.Info($"[IDB] Found futures {tradingSymbol} (token={token}) for {underlying} (quoted)");
+                                    return (token, tradingSymbol);
+                                }
+                            }
+                        }
+                    }
+                }
+                Logger.Warn($"[IDB] No futures found for {segment} {underlying}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[IDB] Futures lookup failed for {segment}/{underlying}:", ex);
+            }
+            return (0, null);
+        }
+
         public string GetSegmentForToken(long token)
         {
             if (string.IsNullOrEmpty(_dbPath) || !File.Exists(_dbPath))
