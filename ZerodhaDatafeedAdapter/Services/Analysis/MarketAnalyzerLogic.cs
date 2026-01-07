@@ -8,6 +8,7 @@ using System.IO;
 using System.Linq;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
+using System.Reactive.Threading.Tasks;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
@@ -114,8 +115,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             Tickers.Add(SensexTicker);
             Tickers.Add(NiftyFuturesTicker);
 
-            // Resolve NIFTY Futures contract dynamically
-            ResolveNiftyFuturesContract();
+            // Resolve NIFTY Futures contract dynamically when instrument DB is ready
+            // Uses Rx to await the InstrumentDbReadyStream - fires once when DB is loaded
+            SubscribeToInstrumentDbReadyForFuturesResolution();
 
             MarketDataHub.Instance.PriceUpdated += (s, p) =>
             {
@@ -128,6 +130,24 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             // Setup System.Reactive pipeline for projected opens calculation
             // This fires ONCE when all required data is available (GIFT change% + NIFTY/SENSEX prior close)
             SetupReactiveProjectedOpensPipeline();
+        }
+
+        /// <summary>
+        /// Subscribes to InstrumentDbReadyStream to resolve NIFTY futures when DB is ready.
+        /// This decouples the constructor from blocking on database availability.
+        /// </summary>
+        private void SubscribeToInstrumentDbReadyForFuturesResolution()
+        {
+            MarketDataReactiveHub.Instance.InstrumentDbReadyStream
+                .Where(ready => ready)
+                .Take(1) // Only resolve once
+                .Subscribe(
+                    _ =>
+                    {
+                        Logger.Info("[MarketAnalyzerLogic] InstrumentDbReady received - resolving NIFTY Futures contract");
+                        ResolveNiftyFuturesContract();
+                    },
+                    ex => Logger.Error($"[MarketAnalyzerLogic] Error awaiting InstrumentDbReady: {ex.Message}", ex));
         }
 
         /// <summary>
@@ -549,6 +569,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <summary>
         /// Generates option symbols based on DTE priority:
         /// 1. NIFTY 0DTE, 2. SENSEX 0DTE, 3. NIFTY 1DTE, 4. SENSEX 1DTE, 5. Default NIFTY
+        /// Awaits InstrumentDbReadyStream before performing database lookups.
         /// </summary>
         private async void GenerateOptions(double niftyProjected, double sensexProjected)
         {
@@ -558,6 +579,33 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             {
                 // Flag already set by Interlocked.CompareExchange in CheckAndCalculate()
                 // No need to set again here
+
+                // Await instrument database ready signal before performing lookups
+                // This ensures the SQLite database is loaded before we query expiries and options
+                try
+                {
+                    Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Awaiting InstrumentDbReady signal...");
+                    var dbReady = await MarketDataReactiveHub.Instance.InstrumentDbReadyStream
+                        .Timeout(TimeSpan.FromSeconds(60))
+                        .FirstAsync()
+                        .ToTask();
+
+                    if (!dbReady)
+                    {
+                        Logger.Error("[MarketAnalyzerLogic] GenerateOptions(): Instrument DB not ready - cannot generate options");
+                        System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
+                        StatusUpdated?.Invoke("Error: Instrument database not ready");
+                        return;
+                    }
+                    Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): InstrumentDbReady signal received, proceeding with option generation");
+                }
+                catch (TimeoutException)
+                {
+                    Logger.Error("[MarketAnalyzerLogic] GenerateOptions(): Timeout waiting for InstrumentDbReady (60s)");
+                    System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
+                    StatusUpdated?.Invoke("Error: Timeout waiting for instrument database");
+                    return;
+                }
 
                 // Fetch expiries from database
                 Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Fetching NIFTY expiries from database...");
@@ -829,6 +877,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         /// <summary>
         /// Generates options and publishes to MarketDataReactiveHub.
+        /// Awaits InstrumentDbReadyStream before performing database lookups.
         /// </summary>
         private async void GenerateOptionsAndPublishToHub(double niftyProjected, double sensexProjected)
         {
@@ -836,6 +885,30 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             try
             {
+                // Await instrument database ready signal before performing lookups
+                try
+                {
+                    Logger.Info("[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Awaiting InstrumentDbReady signal...");
+                    var dbReady = await MarketDataReactiveHub.Instance.InstrumentDbReadyStream
+                        .Timeout(TimeSpan.FromSeconds(60))
+                        .FirstAsync()
+                        .ToTask();
+
+                    if (!dbReady)
+                    {
+                        Logger.Error("[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Instrument DB not ready - cannot generate options");
+                        System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
+                        return;
+                    }
+                    Logger.Info("[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): InstrumentDbReady signal received, proceeding");
+                }
+                catch (TimeoutException)
+                {
+                    Logger.Error("[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Timeout waiting for InstrumentDbReady (60s)");
+                    System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
+                    return;
+                }
+
                 // Fetch expiries from database
                 var niftyExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlyingAsync("NIFTY");
                 var sensexExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlyingAsync("SENSEX");

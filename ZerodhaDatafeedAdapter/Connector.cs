@@ -233,6 +233,10 @@ namespace ZerodhaDatafeedAdapter
 
                     // Also publish to Rx hub for reactive subscribers (InstrumentManager, etc.)
                     MarketDataReactiveHub.Instance.PublishTokenReady(tokenResult);
+
+                    // Initialize InstrumentManager (downloads instruments if needed)
+                    // This awaits TokenReadyStream internally, but since we just published, it will proceed
+                    await InstrumentManager.Instance.InitializeAsync();
                 }
                 catch (Exception ex)
                 {

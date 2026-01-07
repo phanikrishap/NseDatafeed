@@ -2,6 +2,8 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reactive.Linq;
+using System.Reactive.Threading.Tasks;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
@@ -388,13 +390,36 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         // The ActionBlock processes items automatically with proper backpressure and parallelism control.
 
         /// <summary>
-        /// Subscribes to a single instrument - full workflow
+        /// Subscribes to a single instrument - full workflow.
+        /// Awaits InstrumentDbReadyStream before performing SQLite lookups to ensure database is ready.
         /// </summary>
         private async Task SubscribeToInstrument(MappedInstrument instrument)
         {
             Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Starting subscription workflow");
 
-            // Step 0: Look up instrument token from SQLite database by segment/underlying/expiry/strike/option_type
+            // Step 0a: Await instrument database ready signal before performing lookups
+            // This ensures the SQLite database is loaded and cache is populated before we query it
+            try
+            {
+                var dbReady = await _hub.InstrumentDbReadyStream
+                    .Timeout(TimeSpan.FromSeconds(60))
+                    .FirstAsync()
+                    .ToTask();
+
+                if (!dbReady)
+                {
+                    Logger.Warn($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Instrument DB not ready - cannot perform lookups");
+                    return;
+                }
+                Logger.Debug($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Instrument DB ready, proceeding with lookup");
+            }
+            catch (TimeoutException)
+            {
+                Logger.Error($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Timeout waiting for InstrumentDbReady (60s)");
+                return;
+            }
+
+            // Step 0b: Look up instrument token from SQLite database by segment/underlying/expiry/strike/option_type
             if (instrument.instrument_token == 0 && instrument.expiry.HasValue && instrument.strike.HasValue && !string.IsNullOrEmpty(instrument.option_type))
             {
                 Logger.Info($"[SubscriptionManager] SubscribeToInstrument({instrument.symbol}): Looking up option token in SQLite...");
