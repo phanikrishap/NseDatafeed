@@ -633,25 +633,21 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         }
                     }
 
-                    // Extract last price and update UI - BUT only if data is recent!
-                    // Historical data API may return stale data (e.g., from 10:48 when querying at 13:27)
-                    // If we blindly update price, we corrupt live WebSocket prices with old data
+                    // Extract last price and update UI
+                    // Always publish the historical price as initial value - better to show stale price than "---"
+                    // Live WebSocket will override with fresh data when trades come in
                     var lastRecord = records.OrderByDescending(r => r.TimeStamp).FirstOrDefault();
                     if (lastRecord != null && lastRecord.Close > 0)
                     {
                         var dataAge = DateTime.Now - lastRecord.TimeStamp;
-                        Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): LastPrice={lastRecord.Close} from {lastRecord.TimeStamp:yyyy-MM-dd HH:mm} (age={dataAge.TotalMinutes:F1}min)");
+                        bool isStale = dataAge.TotalMinutes > 5;
+                        string source = isStale ? "Historical-Stale" : "Historical";
 
-                        // Only use historical price if it's within last 5 minutes
-                        // Otherwise, live WebSocket price is more accurate
-                        if (dataAge.TotalMinutes <= 5)
-                        {
-                            _hub.PublishOptionPrice(ntSymbol, lastRecord.Close, 0, "Historical");
-                        }
-                        else
-                        {
-                            Logger.Warn($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): Skipping stale price update (age={dataAge.TotalMinutes:F1}min > 5min threshold)");
-                        }
+                        Logger.Info($"[SubscriptionManager] TriggerBackfillAndUpdatePrice({ntSymbol}): LastPrice={lastRecord.Close} from {lastRecord.TimeStamp:yyyy-MM-dd HH:mm} (age={dataAge.TotalMinutes:F1}min, stale={isStale})");
+
+                        // Always publish historical price for initial display
+                        // Live WebSocket will override with fresh prices when available
+                        _hub.PublishOptionPrice(ntSymbol, lastRecord.Close, 0, source);
                     }
                 }
                 else

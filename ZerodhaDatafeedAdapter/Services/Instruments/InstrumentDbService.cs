@@ -229,7 +229,7 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                                     cmd.Parameters["@token"].Value = long.Parse(fields[0]);
                                     cmd.Parameters["@etoken"].Value = long.Parse(fields[1]);
                                     cmd.Parameters["@symbol"].Value = fields[2];
-                                    cmd.Parameters["@name"].Value = fields[3];
+                                    cmd.Parameters["@name"].Value = fields[3].Trim('"'); // Strip quotes from name
                                     // Skip last_price (fields[4]) - not stored
                                     cmd.Parameters["@expiry"].Value = fields[5];
                                     cmd.Parameters["@strike"].Value = string.IsNullOrEmpty(fields[6]) ? 0 : double.Parse(fields[6]);
@@ -241,7 +241,8 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
 
                                     // Derive underlying: for F&O, name column contains underlying
                                     // For equities, it's the tradingsymbol itself
-                                    string underlying = fields[3]; // name column
+                                    // IMPORTANT: Zerodha's CSV has quoted values like "NIFTY" - strip the quotes
+                                    string underlying = fields[3].Trim('"'); // name column, strip quotes
                                     if (string.IsNullOrEmpty(underlying))
                                     {
                                         underlying = fields[2]; // use tradingsymbol as fallback
@@ -391,6 +392,7 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
         /// <summary>
         /// Looks up option details (token and tradingsymbol) using underlying column.
         /// Matches original LookupOptionDetailsInSqlite behavior.
+        /// Robust: retries with quoted underlying if unquoted returns no results (legacy data).
         /// </summary>
         public (long token, string symbol) LookupOptionDetails(string segment, string underlying, string expiry, double strike, string optionType)
         {
@@ -402,31 +404,21 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                 using (var conn = new SQLiteConnection($"Data Source={_dbPath};Version=3;Read Only=True;"))
                 {
                     conn.Open();
-                    // Use underlying column for F&O lookups
-                    string sql = @"SELECT instrument_token, tradingsymbol FROM instruments
-                                   WHERE segment = @seg
-                                   AND underlying = @und
-                                   AND expiry = @exp
-                                   AND strike = @str
-                                   AND instrument_type = @typ
-                                   LIMIT 1";
-                    using (var cmd = new SQLiteCommand(sql, conn))
+
+                    // First try with the underlying as-is
+                    var result = QueryOptionDetailsInternal(conn, segment, underlying, expiry, strike, optionType);
+
+                    // If no results, try with quoted underlying (legacy data may have "NIFTY" instead of NIFTY)
+                    if (result.token == 0 && !underlying.StartsWith("\""))
                     {
-                        cmd.Parameters.AddWithValue("@seg", segment);
-                        cmd.Parameters.AddWithValue("@und", underlying);
-                        cmd.Parameters.AddWithValue("@exp", expiry);
-                        cmd.Parameters.AddWithValue("@str", strike);
-                        cmd.Parameters.AddWithValue("@typ", optionType);
-                        using (var reader = cmd.ExecuteReader())
-                        {
-                            if (reader.Read())
-                            {
-                                long token = reader.GetInt64(0);
-                                string tradingSymbol = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                                Logger.Debug($"[IDB] Found option {tradingSymbol} (token={token}) for {underlying} {expiry} {strike} {optionType}");
-                                return (token, tradingSymbol);
-                            }
-                        }
+                        Logger.Debug($"[IDB] No option found for '{underlying}', retrying with quoted value...");
+                        result = QueryOptionDetailsInternal(conn, segment, $"\"{underlying}\"", expiry, strike, optionType);
+                    }
+
+                    if (result.token > 0)
+                    {
+                        Logger.Debug($"[IDB] Found option {result.symbol} (token={result.token}) for {underlying} {expiry} {strike} {optionType}");
+                        return result;
                     }
                 }
                 Logger.Warn($"[IDB] No option found for {segment} {underlying} {expiry} {strike} {optionType}");
@@ -438,8 +430,38 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
             return (0, null);
         }
 
+        private (long token, string symbol) QueryOptionDetailsInternal(SQLiteConnection conn, string segment, string underlying, string expiry, double strike, string optionType)
+        {
+            string sql = @"SELECT instrument_token, tradingsymbol FROM instruments
+                           WHERE segment = @seg
+                           AND underlying = @und
+                           AND expiry = @exp
+                           AND strike = @str
+                           AND instrument_type = @typ
+                           LIMIT 1";
+            using (var cmd = new SQLiteCommand(sql, conn))
+            {
+                cmd.Parameters.AddWithValue("@seg", segment);
+                cmd.Parameters.AddWithValue("@und", underlying);
+                cmd.Parameters.AddWithValue("@exp", expiry);
+                cmd.Parameters.AddWithValue("@str", strike);
+                cmd.Parameters.AddWithValue("@typ", optionType);
+                using (var reader = cmd.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        long token = reader.GetInt64(0);
+                        string tradingSymbol = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                        return (token, tradingSymbol);
+                    }
+                }
+            }
+            return (0, null);
+        }
+
         /// <summary>
         /// Gets unique expiry dates for an underlying using the underlying column.
+        /// Robust: retries with quoted underlying if unquoted returns no results (legacy data).
         /// </summary>
         public List<DateTime> GetExpiries(string underlying)
         {
@@ -452,19 +474,15 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                 using (var conn = new SQLiteConnection($"Data Source={_dbPath};Version=3;Read Only=True;"))
                 {
                     conn.Open();
-                    // Use underlying column, not name
-                    using (var cmd = new SQLiteCommand("SELECT DISTINCT expiry FROM instruments WHERE underlying = @und AND expiry IS NOT NULL AND expiry != '' ORDER BY expiry", conn))
+
+                    // First try with the underlying as-is
+                    expiries = QueryExpiriesInternal(conn, underlying);
+
+                    // If no results, try with quoted underlying (legacy data may have "NIFTY" instead of NIFTY)
+                    if (expiries.Count == 0 && !underlying.StartsWith("\""))
                     {
-                        cmd.Parameters.AddWithValue("@und", underlying);
-                        using (var reader = cmd.ExecuteReader())
-                        {
-                            while (reader.Read())
-                            {
-                                string dateStr = reader.GetString(0);
-                                if (DateTime.TryParse(dateStr, out var dt))
-                                    expiries.Add(dt);
-                            }
-                        }
+                        Logger.Debug($"[IDB] No expiries found for '{underlying}', retrying with quoted value...");
+                        expiries = QueryExpiriesInternal(conn, $"\"{underlying}\"");
                     }
                 }
                 Logger.Debug($"[IDB] Found {expiries.Count} expiries for {underlying}");
@@ -476,9 +494,29 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
             return expiries;
         }
 
+        private List<DateTime> QueryExpiriesInternal(SQLiteConnection conn, string underlying)
+        {
+            var expiries = new List<DateTime>();
+            using (var cmd = new SQLiteCommand("SELECT DISTINCT expiry FROM instruments WHERE underlying = @und AND expiry IS NOT NULL AND expiry != '' ORDER BY expiry", conn))
+            {
+                cmd.Parameters.AddWithValue("@und", underlying);
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        string dateStr = reader.GetString(0);
+                        if (DateTime.TryParse(dateStr, out var dt))
+                            expiries.Add(dt);
+                    }
+                }
+            }
+            return expiries;
+        }
+
         /// <summary>
         /// Gets lot size for an underlying using the underlying column.
         /// Looks for options (CE/PE) instruments to get the lot size.
+        /// Robust: retries with quoted underlying if unquoted returns no results (legacy data).
         /// </summary>
         public int GetLotSize(string underlying)
         {
@@ -490,27 +528,44 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                 using (var conn = new SQLiteConnection($"Data Source={_dbPath};Version=3;Read Only=True;"))
                 {
                     conn.Open();
-                    // Use underlying column, look for option instruments to get lot size
-                    using (var cmd = new SQLiteCommand(@"SELECT lot_size FROM instruments
-                                                         WHERE underlying = @und
-                                                         AND instrument_type IN ('CE', 'PE')
-                                                         AND lot_size > 0
-                                                         LIMIT 1", conn))
+
+                    // First try with the underlying as-is
+                    int lotSize = QueryLotSizeInternal(conn, underlying);
+
+                    // If no results, try with quoted underlying (legacy data may have "NIFTY" instead of NIFTY)
+                    if (lotSize == 0 && !underlying.StartsWith("\""))
                     {
-                        cmd.Parameters.AddWithValue("@und", underlying);
-                        var result = cmd.ExecuteScalar();
-                        if (result != null && result != DBNull.Value)
-                        {
-                            int lotSize = Convert.ToInt32(result);
-                            Logger.Debug($"[IDB] Found lot size {lotSize} for {underlying}");
-                            return lotSize;
-                        }
+                        Logger.Debug($"[IDB] No lot size found for '{underlying}', retrying with quoted value...");
+                        lotSize = QueryLotSizeInternal(conn, $"\"{underlying}\"");
                     }
+
+                    if (lotSize > 0)
+                        Logger.Debug($"[IDB] Found lot size {lotSize} for {underlying}");
+
+                    return lotSize;
                 }
             }
             catch (Exception ex)
             {
                 Logger.Error($"[IDB] Error fetching lot size for {underlying}:", ex);
+            }
+            return 0;
+        }
+
+        private int QueryLotSizeInternal(SQLiteConnection conn, string underlying)
+        {
+            using (var cmd = new SQLiteCommand(@"SELECT lot_size FROM instruments
+                                                 WHERE underlying = @und
+                                                 AND instrument_type IN ('CE', 'PE')
+                                                 AND lot_size > 0
+                                                 LIMIT 1", conn))
+            {
+                cmd.Parameters.AddWithValue("@und", underlying);
+                var result = cmd.ExecuteScalar();
+                if (result != null && result != DBNull.Value)
+                {
+                    return Convert.ToInt32(result);
+                }
             }
             return 0;
         }
