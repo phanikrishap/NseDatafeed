@@ -172,6 +172,14 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                 {
                     Logger.Info($"[IM] InstrumentMasters.db is current (last modified: {lastModified:yyyy-MM-dd}). Skipping download.");
                     StartupLogger.LogInstrumentDbCheck(false, lastModified);
+
+                    // IMPORTANT: Load cache BEFORE publishing Ready signal
+                    // Subscribers await InstrumentDbReadyStream before doing lookups,
+                    // so cache must be populated before we signal ready
+                    Logger.Info("[IM] Loading instrument cache from existing database...");
+                    _dbService.LoadAllTokensToCache();
+                    _mappingService.LoadFOMappings();
+
                     StartupLogger.LogInitializationReady(true, true);
                     hub.PublishInitializationState(InitializationState.Ready(true, true));
                     return;
