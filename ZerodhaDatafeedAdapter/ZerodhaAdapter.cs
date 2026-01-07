@@ -132,20 +132,43 @@ namespace ZerodhaDatafeedAdapter
         {
             if (this._zerodhaConncetion.Status == ConnectionStatus.Connecting)
             {
-                if (Connector.Instance.CheckConnection())
+                // Step 1: Check token connection (non-blocking async version)
+                Logger.Info("ZerodhaAdapter: Checking token connection...");
+                var tokenReady = await Connector.Instance.CheckConnectionAsync();
+
+                if (!tokenReady)
                 {
-                    Logger.Info("ZerodhaAdapter: Connection to provider (Zerodha) successful.");
-                    this.SetInstruments();
-                    this._zerodhaConncetion.ConnectionStatusCallback(ConnectionStatus.Connected, ConnectionStatus.Connected, ErrorCode.NoError, "");
+                    Logger.Error("ZerodhaAdapter: Token validation failed.");
+                    this._zerodhaConncetion.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.LogOnFailed, "Unable to connect to provider Zerodha - token validation failed.");
+                    return;
+                }
 
-                    // Start the cleanup timer to remove stale callbacks periodically
-                    StartCleanupTimer();
+                Logger.Info("ZerodhaAdapter: Token validated. Setting connection as Connected...");
+                this.SetInstruments();
 
+                // Report Connected immediately after token validation
+                // This allows NinjaTrader to proceed while we wait for instrument DB
+                this._zerodhaConncetion.ConnectionStatusCallback(ConnectionStatus.Connected, ConnectionStatus.Connected, ErrorCode.NoError, "");
+
+                // Start the cleanup timer to remove stale callbacks periodically
+                StartCleanupTimer();
+
+                // Step 2: Wait for Instrument Database to be ready BEFORE registering instruments
+                // This is critical - RegisterInstruments reads from the DB which may still be downloading
+                Logger.Info("ZerodhaAdapter: Waiting for instrument database to be ready...");
+                var dbReady = await Connector.Instance.WaitForInstrumentDbReadyAsync(timeoutMs: 90000);
+
+                if (dbReady)
+                {
+                    Logger.Info("ZerodhaAdapter: Instrument database ready. Registering instruments...");
                     await Connector.Instance.RegisterInstruments();
+                    Logger.Info("ZerodhaAdapter: Instrument registration complete.");
                 }
                 else
                 {
-                    this._zerodhaConncetion.ConnectionStatusCallback(ConnectionStatus.Disconnected, ConnectionStatus.Disconnected, ErrorCode.LogOnFailed, "Unable to connect to provider Zerodha.");
+                    // DB not ready but we're already "Connected" - log warning but don't disconnect
+                    // Users can still trade existing instruments, just won't have fresh F&O mappings
+                    Logger.Warn("ZerodhaAdapter: Instrument database not ready (timeout or error). Skipping instrument registration. Existing instruments will still work.");
                 }
             }
             else

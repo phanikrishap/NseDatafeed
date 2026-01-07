@@ -114,31 +114,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             SubscribeToIndicator("SENSEX");
 
             // Subscribe to NIFTY Futures (NIFTY_I) - uses dynamically resolved symbol (e.g., NIFTY26JANFUT)
-            string niftyFutSymbol = MarketAnalyzerLogic.Instance.NiftyFuturesSymbol;
-            if (!string.IsNullOrEmpty(niftyFutSymbol))
-            {
-                Logger.Info($"[MarketAnalyzerService] Start(): Subscribing to NIFTY_I via resolved symbol '{niftyFutSymbol}'");
-                SubscribeToNiftyFutures(niftyFutSymbol);
-            }
-            else
-            {
-                Logger.Warn("[MarketAnalyzerService] Start(): NIFTY Futures symbol not resolved yet, will retry");
-                // Retry after a delay
-                Task.Run(async () =>
-                {
-                    await Task.Delay(3000);
-                    string resolvedSymbol = MarketAnalyzerLogic.Instance.NiftyFuturesSymbol;
-                    if (!string.IsNullOrEmpty(resolvedSymbol))
-                    {
-                        Logger.Info($"[MarketAnalyzerService] Start(): Retry - subscribing to NIFTY_I via '{resolvedSymbol}'");
-                        SubscribeToNiftyFutures(resolvedSymbol);
-                    }
-                    else
-                    {
-                        Logger.Error("[MarketAnalyzerService] Start(): NIFTY Futures symbol still not resolved after retry");
-                    }
-                });
-            }
+            // Use Rx to await InstrumentDbReady before subscribing - this ensures the symbol is resolved
+            SubscribeToNiftyFuturesWhenReady();
 
             Logger.Info("[MarketAnalyzerService] Start(): Subscription requests queued for all indicators");
         }
@@ -501,6 +478,57 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             {
                 Logger.Error($"[MarketAnalyzerService] SubscribeToIndicatorWithClosure({instrumentName}): Adapter is NULL - cannot subscribe to market data");
             }
+        }
+
+        /// <summary>
+        /// Uses Rx to await InstrumentDbReady before subscribing to NIFTY Futures.
+        /// This ensures the NiftyFuturesSymbol is resolved from the database before we try to use it.
+        /// </summary>
+        private void SubscribeToNiftyFuturesWhenReady()
+        {
+            // First check if symbol is already resolved (in case InstrumentDbReady already fired)
+            string niftyFutSymbol = MarketAnalyzerLogic.Instance.NiftyFuturesSymbol;
+            if (!string.IsNullOrEmpty(niftyFutSymbol))
+            {
+                Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesWhenReady(): Symbol already resolved: '{niftyFutSymbol}'");
+                SubscribeToNiftyFutures(niftyFutSymbol);
+                return;
+            }
+
+            // Symbol not resolved yet - wait for InstrumentDbReady via Rx with timeout
+            Logger.Info("[MarketAnalyzerService] SubscribeToNiftyFuturesWhenReady(): Waiting for InstrumentDbReady (timeout=90s)...");
+
+            _subscriptions.Add(
+                _hub.InstrumentDbReadyStream
+                    .Where(ready => ready)
+                    .Timeout(TimeSpan.FromSeconds(90)) // Timeout to prevent infinite wait
+                    .Take(1)
+                    .Delay(TimeSpan.FromMilliseconds(500)) // Small delay to ensure symbol resolution completes
+                    .Subscribe(
+                        _ =>
+                        {
+                            string resolvedSymbol = MarketAnalyzerLogic.Instance.NiftyFuturesSymbol;
+                            if (!string.IsNullOrEmpty(resolvedSymbol))
+                            {
+                                Logger.Info($"[MarketAnalyzerService] SubscribeToNiftyFuturesWhenReady(): InstrumentDbReady received, symbol resolved: '{resolvedSymbol}'");
+                                SubscribeToNiftyFutures(resolvedSymbol);
+                            }
+                            else
+                            {
+                                Logger.Error("[MarketAnalyzerService] SubscribeToNiftyFuturesWhenReady(): InstrumentDbReady received but symbol still not resolved!");
+                            }
+                        },
+                        ex =>
+                        {
+                            if (ex is TimeoutException)
+                            {
+                                Logger.Error("[MarketAnalyzerService] SubscribeToNiftyFuturesWhenReady(): Timeout waiting for InstrumentDbReady (90s) - NIFTY_I will not be available");
+                            }
+                            else
+                            {
+                                Logger.Error($"[MarketAnalyzerService] SubscribeToNiftyFuturesWhenReady(): Error - {ex.Message}", ex);
+                            }
+                        }));
         }
 
         /// <summary>

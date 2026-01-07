@@ -25,6 +25,8 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Reactive.Linq;
+using System.Reactive.Threading.Tasks;
 using System.Xml.Linq;
 
 #nullable disable
@@ -308,6 +310,47 @@ namespace ZerodhaDatafeedAdapter
             StartupLogger.LogConnectionCheck(true, "Zerodha API");
             this.IsConnected = true;
             return true;
+        }
+
+        /// <summary>
+        /// Waits for the instrument database to be ready with timeout.
+        /// Uses Rx-based InstrumentDbReadyStream for event-driven waiting.
+        /// Returns true if DB is ready, false if timeout or failure.
+        /// </summary>
+        /// <param name="timeoutMs">Timeout in milliseconds (default 90 seconds - DB download can be slow)</param>
+        /// <param name="cancellationToken">Optional cancellation token</param>
+        public async Task<bool> WaitForInstrumentDbReadyAsync(int timeoutMs = 90000, CancellationToken cancellationToken = default)
+        {
+            Logger.Info("[Connector] WaitForInstrumentDbReadyAsync: Waiting for instrument database initialization...");
+
+            try
+            {
+                // Use Rx to await InstrumentDbReadyStream with timeout
+                var hub = MarketDataReactiveHub.Instance;
+
+                var dbReady = await hub.InstrumentDbReadyStream
+                    .Timeout(TimeSpan.FromMilliseconds(timeoutMs))
+                    .FirstAsync()
+                    .ToTask(cancellationToken);
+
+                Logger.Info($"[Connector] WaitForInstrumentDbReadyAsync: Completed with result={dbReady}");
+                return dbReady;
+            }
+            catch (TimeoutException)
+            {
+                Logger.Error($"[Connector] WaitForInstrumentDbReadyAsync: Timeout after {timeoutMs}ms waiting for instrument database.");
+                return false;
+            }
+            catch (OperationCanceledException)
+            {
+                Logger.Warn("[Connector] WaitForInstrumentDbReadyAsync: Cancelled");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[Connector] WaitForInstrumentDbReadyAsync: Error - {ex.Message}");
+                return false;
+            }
         }
 
         /// <summary>

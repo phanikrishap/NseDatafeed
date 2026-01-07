@@ -10,6 +10,7 @@ using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Reactive.Threading.Tasks;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using NinjaTrader.Cbi;
@@ -132,14 +133,115 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             SetupReactiveProjectedOpensPipeline();
         }
 
+        #region SQLite Retry Helper
+
+        /// <summary>
+        /// Executes a SQLite operation with retry logic for database busy/locked errors.
+        /// Uses exponential backoff with jitter to handle concurrent access during startup.
+        /// </summary>
+        /// <typeparam name="T">Return type of the operation</typeparam>
+        /// <param name="operation">The database operation to execute</param>
+        /// <param name="operationName">Name for logging</param>
+        /// <param name="maxRetries">Maximum number of retries (default 3)</param>
+        /// <returns>Result of the operation, or default(T) if all retries fail</returns>
+        private T ExecuteWithSqliteRetry<T>(Func<T> operation, string operationName, int maxRetries = 3)
+        {
+            int attempt = 0;
+            Exception lastException = null;
+
+            while (attempt < maxRetries)
+            {
+                try
+                {
+                    return operation();
+                }
+                catch (SQLiteException ex) when (ex.ResultCode == SQLiteErrorCode.Busy || ex.ResultCode == SQLiteErrorCode.Locked)
+                {
+                    attempt++;
+                    lastException = ex;
+
+                    if (attempt >= maxRetries)
+                    {
+                        Logger.Error($"[MarketAnalyzerLogic] {operationName}: SQLite busy/locked after {maxRetries} retries - {ex.Message}");
+                        break;
+                    }
+
+                    // Exponential backoff with jitter: 100ms, 200ms, 400ms + random 0-50ms
+                    int baseDelayMs = 100 * (int)Math.Pow(2, attempt - 1);
+                    int jitterMs = new Random().Next(0, 50);
+                    int delayMs = baseDelayMs + jitterMs;
+
+                    Logger.Warn($"[MarketAnalyzerLogic] {operationName}: SQLite busy, retry {attempt}/{maxRetries} in {delayMs}ms");
+                    Thread.Sleep(delayMs);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerLogic] {operationName}: Non-retryable error - {ex.Message}");
+                    lastException = ex;
+                    break;
+                }
+            }
+
+            Logger.Error($"[MarketAnalyzerLogic] {operationName}: Failed after {attempt} attempts. Last error: {lastException?.Message}");
+            return default;
+        }
+
+        /// <summary>
+        /// Async version of ExecuteWithSqliteRetry for async operations.
+        /// </summary>
+        private async Task<T> ExecuteWithSqliteRetryAsync<T>(Func<Task<T>> operation, string operationName, int maxRetries = 3)
+        {
+            int attempt = 0;
+            Exception lastException = null;
+
+            while (attempt < maxRetries)
+            {
+                try
+                {
+                    return await operation();
+                }
+                catch (SQLiteException ex) when (ex.ResultCode == SQLiteErrorCode.Busy || ex.ResultCode == SQLiteErrorCode.Locked)
+                {
+                    attempt++;
+                    lastException = ex;
+
+                    if (attempt >= maxRetries)
+                    {
+                        Logger.Error($"[MarketAnalyzerLogic] {operationName}: SQLite busy/locked after {maxRetries} retries - {ex.Message}");
+                        break;
+                    }
+
+                    int baseDelayMs = 100 * (int)Math.Pow(2, attempt - 1);
+                    int jitterMs = new Random().Next(0, 50);
+                    int delayMs = baseDelayMs + jitterMs;
+
+                    Logger.Warn($"[MarketAnalyzerLogic] {operationName}: SQLite busy, retry {attempt}/{maxRetries} in {delayMs}ms");
+                    await Task.Delay(delayMs);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerLogic] {operationName}: Non-retryable error - {ex.Message}");
+                    lastException = ex;
+                    break;
+                }
+            }
+
+            Logger.Error($"[MarketAnalyzerLogic] {operationName}: Failed after {attempt} attempts. Last error: {lastException?.Message}");
+            return default;
+        }
+
+        #endregion
+
         /// <summary>
         /// Subscribes to InstrumentDbReadyStream to resolve NIFTY futures when DB is ready.
         /// This decouples the constructor from blocking on database availability.
+        /// Includes 90-second timeout to prevent infinite wait if DB initialization fails.
         /// </summary>
         private void SubscribeToInstrumentDbReadyForFuturesResolution()
         {
             MarketDataReactiveHub.Instance.InstrumentDbReadyStream
                 .Where(ready => ready)
+                .Timeout(TimeSpan.FromSeconds(90)) // Timeout to prevent infinite wait
                 .Take(1) // Only resolve once
                 .Subscribe(
                     _ =>
@@ -147,35 +249,47 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         Logger.Info("[MarketAnalyzerLogic] InstrumentDbReady received - resolving NIFTY Futures contract");
                         ResolveNiftyFuturesContract();
                     },
-                    ex => Logger.Error($"[MarketAnalyzerLogic] Error awaiting InstrumentDbReady: {ex.Message}", ex));
+                    ex =>
+                    {
+                        if (ex is TimeoutException)
+                        {
+                            Logger.Error("[MarketAnalyzerLogic] Timeout waiting for InstrumentDbReady (90s) - NIFTY Futures symbol will not be resolved");
+                        }
+                        else
+                        {
+                            Logger.Error($"[MarketAnalyzerLogic] Error awaiting InstrumentDbReady: {ex.Message}", ex);
+                        }
+                    });
         }
 
         /// <summary>
         /// Resolves the current month's NIFTY Futures contract from the instrument database.
         /// Query: segment='NFO-FUT', name='NIFTY', expiry >= today, order by expiry ASC, take first
+        /// Uses SQLite retry logic to handle database busy/locked during concurrent access.
         /// </summary>
         private void ResolveNiftyFuturesContract()
         {
-            try
+            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "ZerodhaAdapter");
+            string dbPath = Path.Combine(folder, "InstrumentMasters.db");
+
+            if (!File.Exists(dbPath))
             {
-                string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "ZerodhaAdapter");
-                string dbPath = Path.Combine(folder, "InstrumentMasters.db");
+                Logger.Warn("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Database not found, will retry later");
+                return;
+            }
 
-                if (!File.Exists(dbPath))
-                {
-                    Logger.Warn("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Database not found, will retry later");
-                    return;
-                }
-
+            // Use retry helper to handle SQLite busy/locked during startup
+            var result = ExecuteWithSqliteRetry(() =>
+            {
                 using (var conn = new SQLiteConnection($"Data Source={dbPath};Version=3;Read Only=True;"))
                 {
                     conn.Open();
-                    // Query: NFO-FUT segment, underlying='NIFTY', expiry >= today, earliest expiry first
-                    // Note: 'name' column has quoted values like "NIFTY", so we use 'underlying' which has clean values
+                    // Query: NFO-FUT segment, underlying='NIFTY' or '"NIFTY"', expiry >= today, earliest expiry first
+                    // Note: underlying column may have quoted values like "NIFTY" (with quotes) due to CSV import
                     string sql = @"SELECT instrument_token, tradingsymbol, expiry
                                    FROM instruments
                                    WHERE segment = 'NFO-FUT'
-                                   AND underlying = 'NIFTY'
+                                   AND (underlying = 'NIFTY' OR underlying = '""NIFTY""')
                                    AND expiry >= @today
                                    ORDER BY expiry ASC
                                    LIMIT 1";
@@ -187,29 +301,41 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         {
                             if (reader.Read())
                             {
-                                NiftyFuturesToken = reader.GetInt64(0);
-                                NiftyFuturesSymbol = reader.GetString(1);
-                                if (DateTime.TryParse(reader.GetString(2), out var expiry))
-                                {
-                                    NiftyFuturesExpiry = expiry;
-                                }
-
-                                // Add the trading symbol to aliases for matching
-                                _niftyFuturesAliases.Add(NiftyFuturesSymbol);
-
-                                Logger.Info($"[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Resolved NIFTY_I -> {NiftyFuturesSymbol} (token={NiftyFuturesToken}, expiry={NiftyFuturesExpiry:yyyy-MM-dd})");
+                                return (
+                                    token: reader.GetInt64(0),
+                                    symbol: reader.GetString(1),
+                                    expiry: reader.GetString(2),
+                                    found: true
+                                );
                             }
-                            else
-                            {
-                                Logger.Warn("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): No NIFTY futures contract found");
-                            }
+                            return (token: 0L, symbol: "", expiry: "", found: false);
                         }
                     }
                 }
-            }
-            catch (Exception ex)
+            }, "ResolveNiftyFuturesContract");
+
+            if (result.found)
             {
-                Logger.Error($"[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Exception - {ex.Message}", ex);
+                NiftyFuturesToken = result.token;
+                NiftyFuturesSymbol = result.symbol;
+                if (DateTime.TryParse(result.expiry, out var expiryDate))
+                {
+                    NiftyFuturesExpiry = expiryDate;
+                }
+
+                // Add the trading symbol to aliases for matching
+                _niftyFuturesAliases.Add(NiftyFuturesSymbol);
+
+                Logger.Info($"[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Resolved NIFTY_I -> {NiftyFuturesSymbol} (token={NiftyFuturesToken}, expiry={NiftyFuturesExpiry:yyyy-MM-dd})");
+            }
+            else if (result.symbol == null)
+            {
+                // ExecuteWithSqliteRetry returned default - all retries failed
+                Logger.Error("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Failed to query database after retries");
+            }
+            else
+            {
+                Logger.Warn("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): No NIFTY futures contract found");
             }
         }
 
