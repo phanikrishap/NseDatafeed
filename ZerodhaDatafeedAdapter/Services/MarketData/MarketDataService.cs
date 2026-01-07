@@ -4,6 +4,8 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.WebSockets;
+using System.Reactive.Linq;
+using System.Reactive.Threading.Tasks;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,6 +16,7 @@ using ZerodhaAPI.Zerodha.Websockets;
 using ZerodhaAPI.Zerodha.Utility;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.MarketData;
+using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Configuration;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.WebSocket;
@@ -472,7 +475,29 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 // Initialize shared WebSocket service if needed
                 await EnsureSharedWebSocketInitializedAsync(l1Subscriptions);
 
-                // Get instrument token
+                // Await instrument database ready before attempting token resolution
+                // This handles the case where NinjaTrader requests subscriptions immediately after "Connected"
+                // but the instrument DB is still being downloaded/initialized
+                try
+                {
+                    var dbReady = await MarketDataReactiveHub.Instance.InstrumentDbReadyStream
+                        .Timeout(TimeSpan.FromSeconds(60))
+                        .FirstAsync()
+                        .ToTask();
+
+                    if (!dbReady)
+                    {
+                        Logger.Warn($"[TICK-SHARED] InstrumentDb not ready, skipping subscription for {symbol}");
+                        return;
+                    }
+                }
+                catch (TimeoutException)
+                {
+                    Logger.Error($"[TICK-SHARED] Timeout waiting for InstrumentDbReady (60s) - skipping {symbol}");
+                    return;
+                }
+
+                // Get instrument token (now safe - DB is ready)
                 int tokenInt = (int)_instrumentManager.GetInstrumentToken(symbol);
                 Logger.Debug($"[TICK-SHARED] Got token {tokenInt} for symbol='{symbol}'");
 
