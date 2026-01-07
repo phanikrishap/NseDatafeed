@@ -2,18 +2,21 @@ using System;
 using System.IO;
 using System.Text;
 using ZerodhaDatafeedAdapter.Classes;
+using ZerodhaDatafeedAdapter.Logging;
 
 namespace ZerodhaDatafeedAdapter.SyntheticInstruments
 {
     /// <summary>
-    /// CSV logger for synthetic straddle data to avoid cluttering NinjaTrader logs
+    /// CSV logger for synthetic straddle data to avoid cluttering NinjaTrader logs.
+    /// Writes to the unified log folder structure.
+    /// Log location: Documents\NinjaTrader 8\ZerodhaAdapter\Logs\{dd-MM-yyyy}\SyntheticData.csv
     /// </summary>
     public static class SyntheticDataLogger
     {
         private static readonly object _logLock = new object();
         private static string _logDirectory;
         private static string _currentLogFile;
-        private static DateTime _currentLogDate;
+        private static bool _headerWritten = false;
 
         // Debug mode controls - CSV logging only happens in debug mode
         private static bool _isDebugMode = false;
@@ -21,7 +24,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         static SyntheticDataLogger()
         {
             InitializeLogDirectory();
-            
+
 #if DEBUG
             _isDebugMode = true;
 #else
@@ -30,19 +33,14 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         }
 
         /// <summary>
-        /// Initialize the log directory
+        /// Initialize the log directory using the unified LoggerFactory path
         /// </summary>
         private static void InitializeLogDirectory()
         {
             try
             {
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                _logDirectory = Path.Combine(documentsPath, Constants.BaseDataFolder, "SyntheticLogs");
-                
-                if (!Directory.Exists(_logDirectory))
-                {
-                    Directory.CreateDirectory(_logDirectory);
-                }
+                // Use the unified LoggerFactory path (date-wise folder structure)
+                _logDirectory = LoggerFactory.LogFolderPath;
             }
             catch (Exception ex)
             {
@@ -51,24 +49,24 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         }
 
         /// <summary>
-        /// Get the current log file path (creates new file daily)
+        /// Get the current log file path (no date suffix - folder provides date context)
         /// </summary>
         private static string GetCurrentLogFile()
         {
-            DateTime today = DateTime.Now.Date;
-            
-            if (_currentLogFile == null || _currentLogDate != today)
+            if (_currentLogFile == null)
             {
-                _currentLogDate = today;
-                string fileName = $"SyntheticData_{today:yyyyMMdd}.csv";
+                // Use simple filename without date (folder provides date context)
+                string fileName = "SyntheticData.csv";
                 _currentLogFile = Path.Combine(_logDirectory, fileName);
-                
-                if (!File.Exists(_currentLogFile))
+
+                // Note: Log cleanup is handled by LoggerFactory on initialization
+                // Write header for new session
+                if (!_headerWritten && !File.Exists(_currentLogFile))
                 {
                     WriteHeader();
                 }
             }
-            
+
             return _currentLogFile;
         }
 
@@ -81,6 +79,7 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
             {
                 string header = "Timestamp,LogType,Symbol,Message,CEPrice,PEPrice,SyntheticPrice,Volume,CEBid,CEAsk,PEBid,PEAsk,SyntheticBid,SyntheticAsk";
                 File.WriteAllText(_currentLogFile, header + Environment.NewLine);
+                _headerWritten = true;
             }
             catch (Exception ex)
             {

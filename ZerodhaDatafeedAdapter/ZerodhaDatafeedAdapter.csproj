@@ -162,6 +162,7 @@
     <Compile Include="Logging\ILoggerService.cs" />
     <Compile Include="Logging\LoggerFactory.cs" />
     <Compile Include="Logging\LoggingLevel.cs" />
+    <Compile Include="Logging\RangeBarLogger.cs" />
     <Compile Include="Logging\TBSLogger.cs" />
     <Compile Include="Logging\StartupLogger.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
@@ -181,6 +182,7 @@
     <Compile Include="Services\Auth\ZerodhaTokenGenerator.cs" />
     <Compile Include="Services\Analysis\InstrumentBackfillService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerLogic.cs" />
+    <Compile Include="Services\Analysis\NiftyFuturesMetricsService.cs" />
     <Compile Include="Services\HolidayCalendarService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerService.cs" />
     <Compile Include="Services\Analysis\SubscriptionManager.cs" />

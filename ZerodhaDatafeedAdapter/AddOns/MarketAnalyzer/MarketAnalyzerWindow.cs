@@ -271,6 +271,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         private ObservableCollection<AnalyzerRow> _rows;
         private DateTime _priorWorkingDay;
         private IDisposable _projectedOpenSubscription; // System.Reactive subscription for projected opens
+        private IDisposable _vpMetricsSubscription; // Subscription to NiftyFuturesMetricsService
+
+        // VP Metrics panel labels
+        private TextBlock _lblPOC;
+        private TextBlock _lblVAH;
+        private TextBlock _lblVAL;
+        private TextBlock _lblVWAP;
+        private TextBlock _lblHVNCount;
+        private TextBlock _lblBarCount;
+        private TextBlock _lblVPStatus;
 
         // NinjaTrader-style colors
         private static readonly SolidColorBrush _bgColor = new SolidColorBrush(Color.FromRgb(27, 27, 28));
@@ -328,6 +338,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 // Main ListView
                 _listView = CreateListView();
                 dockPanel.Children.Add(_listView);
+
+                // Nifty Futures Metrics Panel (below ListView)
+                var vpMetricsPanel = CreateNiftyFuturesMetricsPanel();
+                DockPanel.SetDock(vpMetricsPanel, Dock.Bottom);
+                // Insert before the ListView (which fills remaining space)
+                dockPanel.Children.Insert(dockPanel.Children.Count - 1, vpMetricsPanel);
 
                 // Hook Events
                 Loaded += OnWindowLoaded;
@@ -557,6 +573,120 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             return listView;
         }
 
+        /// <summary>
+        /// Creates the Nifty Futures Volume Profile Metrics panel.
+        /// Displays POC, VAH, VAL, VWAP, HVN count, and bar count.
+        /// </summary>
+        private Border CreateNiftyFuturesMetricsPanel()
+        {
+            var border = new Border
+            {
+                Background = _headerBg,
+                BorderBrush = _borderColor,
+                BorderThickness = new Thickness(0, 1, 0, 0),
+                Padding = new Thickness(8, 6, 8, 6)
+            };
+
+            var mainPanel = new StackPanel();
+
+            // Header row
+            var headerPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
+            headerPanel.Children.Add(new TextBlock
+            {
+                Text = "Nifty Futures Volume Profile",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(100, 180, 255)),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            _lblVPStatus = new TextBlock
+            {
+                Text = " - Loading...",
+                FontFamily = _ntFont,
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(5, 0, 0, 0)
+            };
+            headerPanel.Children.Add(_lblVPStatus);
+            mainPanel.Children.Add(headerPanel);
+
+            // Metrics grid (2 rows x 3 columns)
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            // Row 1: POC, VAH, VAL
+            var pocPanel = CreateMetricPanel("POC:", out _lblPOC);
+            Grid.SetRow(pocPanel, 0);
+            Grid.SetColumn(pocPanel, 0);
+            grid.Children.Add(pocPanel);
+
+            var vahPanel = CreateMetricPanel("VAH:", out _lblVAH);
+            Grid.SetRow(vahPanel, 0);
+            Grid.SetColumn(vahPanel, 1);
+            grid.Children.Add(vahPanel);
+
+            var valPanel = CreateMetricPanel("VAL:", out _lblVAL);
+            Grid.SetRow(valPanel, 0);
+            Grid.SetColumn(valPanel, 2);
+            grid.Children.Add(valPanel);
+
+            // Row 2: VWAP, HVNs, Bars
+            var vwapPanel = CreateMetricPanel("VWAP:", out _lblVWAP);
+            Grid.SetRow(vwapPanel, 1);
+            Grid.SetColumn(vwapPanel, 0);
+            grid.Children.Add(vwapPanel);
+
+            var hvnPanel = CreateMetricPanel("HVNs:", out _lblHVNCount);
+            Grid.SetRow(hvnPanel, 1);
+            Grid.SetColumn(hvnPanel, 1);
+            grid.Children.Add(hvnPanel);
+
+            var barPanel = CreateMetricPanel("Bars:", out _lblBarCount);
+            Grid.SetRow(barPanel, 1);
+            Grid.SetColumn(barPanel, 2);
+            grid.Children.Add(barPanel);
+
+            mainPanel.Children.Add(grid);
+            border.Child = mainPanel;
+            return border;
+        }
+
+        /// <summary>
+        /// Creates a label + value panel for a VP metric.
+        /// </summary>
+        private StackPanel CreateMetricPanel(string label, out TextBlock valueLabel)
+        {
+            var panel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 10, 2) };
+
+            panel.Children.Add(new TextBlock
+            {
+                Text = label,
+                FontFamily = _ntFont,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)),
+                Width = 45
+            });
+
+            valueLabel = new TextBlock
+            {
+                Text = "---",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = _fgColor
+            };
+            panel.Children.Add(valueLabel);
+
+            return panel;
+        }
+
         private void OnWindowLoaded(object sender, RoutedEventArgs e)
         {
             Logger.Info("[MarketAnalyzerWindow] OnWindowLoaded: Window loaded, starting service");
@@ -566,12 +696,75 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 MarketAnalyzerService.Instance.Start();
                 Logger.Info("[MarketAnalyzerWindow] OnWindowLoaded: Service started");
                 _lblStatus.Text = "Service started - connecting...";
+
+                // Start NiftyFuturesMetricsService and subscribe to updates
+                StartNiftyFuturesMetricsServiceAsync();
             }
             catch (Exception ex)
             {
                 Logger.Error($"[MarketAnalyzerWindow] OnWindowLoaded: Exception - {ex.Message}", ex);
                 _lblStatus.Text = $"Error: {ex.Message}";
             }
+        }
+
+        /// <summary>
+        /// Starts the NiftyFuturesMetricsService and subscribes to its metrics stream.
+        /// </summary>
+        private async void StartNiftyFuturesMetricsServiceAsync()
+        {
+            try
+            {
+                Logger.Info("[MarketAnalyzerWindow] Starting NiftyFuturesMetricsService...");
+                _lblVPStatus.Text = " - Starting...";
+
+                // Subscribe to the metrics stream
+                _vpMetricsSubscription = NiftyFuturesMetricsService.Instance.MetricsStream
+                    .Where(m => m != null)
+                    .Subscribe(OnNiftyFuturesMetricsUpdated);
+
+                // Start the service (async)
+                await NiftyFuturesMetricsService.Instance.StartAsync();
+
+                Logger.Info("[MarketAnalyzerWindow] NiftyFuturesMetricsService started");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerWindow] StartNiftyFuturesMetricsServiceAsync: Exception - {ex.Message}", ex);
+                Dispatcher.InvokeAsync(() =>
+                {
+                    _lblVPStatus.Text = $" - Error: {ex.Message}";
+                });
+            }
+        }
+
+        /// <summary>
+        /// Handles VP metrics updates from NiftyFuturesMetricsService.
+        /// </summary>
+        private void OnNiftyFuturesMetricsUpdated(NiftyFuturesVPMetrics metrics)
+        {
+            Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    if (metrics == null || !metrics.IsValid)
+                    {
+                        _lblVPStatus.Text = " - No data";
+                        return;
+                    }
+
+                    _lblPOC.Text = metrics.POC.ToString("F2");
+                    _lblVAH.Text = metrics.VAH.ToString("F2");
+                    _lblVAL.Text = metrics.VAL.ToString("F2");
+                    _lblVWAP.Text = metrics.VWAP.ToString("F2");
+                    _lblHVNCount.Text = (metrics.HVNs?.Count ?? 0).ToString();
+                    _lblBarCount.Text = metrics.BarCount.ToString();
+                    _lblVPStatus.Text = $" - Updated {metrics.LastUpdate:HH:mm:ss}";
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerWindow] OnNiftyFuturesMetricsUpdated: Exception - {ex.Message}", ex);
+                }
+            });
         }
 
         private void OnWindowUnloaded(object sender, RoutedEventArgs e)
@@ -582,9 +775,22 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             MarketAnalyzerLogic.Instance.TickerUpdated -= OnTickerUpdated;
             MarketAnalyzerLogic.Instance.HistoricalDataStatusChanged -= OnHistoricalDataStatusChanged;
 
-            // Dispose Rx subscription
+            // Dispose Rx subscriptions
             _projectedOpenSubscription?.Dispose();
             _projectedOpenSubscription = null;
+
+            _vpMetricsSubscription?.Dispose();
+            _vpMetricsSubscription = null;
+
+            // Stop NiftyFuturesMetricsService
+            try
+            {
+                NiftyFuturesMetricsService.Instance.Stop();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[MarketAnalyzerWindow] OnWindowUnloaded: Error stopping NiftyFuturesMetricsService - {ex.Message}", ex);
+            }
 
             Logger.Info("[MarketAnalyzerWindow] OnWindowUnloaded: Cleanup complete");
         }

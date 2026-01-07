@@ -1,17 +1,22 @@
 using System;
 using System.IO;
-using System.Reflection;
-using System.Text;
-using System.Threading;
 using System.Windows;
 using log4net;
 using log4net.Appender;
-using log4net.Config;
 using log4net.Core;
 using log4net.Layout;
+using Newtonsoft.Json;
+using ZerodhaDatafeedAdapter.Logging;
 
 namespace ZerodhaDatafeedAdapter
 {
+    /// <summary>
+    /// Main application logger. Writes to the unified log folder structure.
+    /// Log location: Documents\NinjaTrader 8\ZerodhaAdapter\Logs\{dd-MM-yyyy}\ZerodhaAdapter.log
+    ///
+    /// Log level can be configured via: Documents\NinjaTrader 8\ZerodhaAdapter\adapterLog-settings.json
+    /// Example: { "LogLevel": "DEBUG" }
+    /// </summary>
     public static class Logger
     {
         private static readonly ILog _log;
@@ -20,36 +25,25 @@ namespace ZerodhaDatafeedAdapter
         private static bool _initialized = false;
         private static readonly object _lockObject = new object();
 
+        /// <summary>
+        /// Default log level if no settings file exists.
+        /// Now uses LogSettingsManager for centralized configuration.
+        /// </summary>
+        public const string DefaultLogLevel = "INFO"; // Kept for backwards compatibility
+
         static Logger()
         {
             try
             {
-                // Get the user's Documents folder path
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                _logFolderPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "Logs");
+                // Use the unified LoggerFactory path (date-wise folder structure)
+                _logFolderPath = LoggerFactory.LogFolderPath;
 
-                // Create the log directory if it doesn't exist
-                if (!Directory.Exists(_logFolderPath))
-                {
-                    Directory.CreateDirectory(_logFolderPath);
-                }
-
-                // Create log file name with date
-                string fileName = $"ZerodhaAdapter_{DateTime.Now:yyyy-MM-dd}.log";
+                // Create log file name (no date suffix - folder provides date context)
+                string fileName = "ZerodhaAdapter.log";
                 _logFilePath = Path.Combine(_logFolderPath, fileName);
 
-                // Try to load log4net.config from user's ZerodhaAdapter folder first
-                string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "log4net.config");
-                if (File.Exists(configPath))
-                {
-                    var configFile = new FileInfo(configPath);
-                    XmlConfigurator.Configure(configFile);
-                }
-                else
-                {
-                    // Fall back to programmatic configuration
-                    ConfigureLog4Net();
-                }
+                // Always use programmatic configuration for unified folder structure
+                ConfigureLog4Net();
 
                 // Get logger instance
                 _log = LogManager.GetLogger(typeof(Logger));
@@ -64,32 +58,21 @@ namespace ZerodhaDatafeedAdapter
 
         private static void ConfigureLog4Net()
         {
-            // Clear the log file on startup for a fresh session
-            try
-            {
-                if (File.Exists(_logFilePath))
-                {
-                    File.WriteAllText(_logFilePath, string.Empty);
-                }
-            }
-            catch
-            {
-                // Ignore errors clearing file - it may be locked
-            }
+            // Note: Log cleanup is handled by LoggerFactory on initialization
+            // No need to clear files here as LoggerFactory.CleanupTodayLogs() handles it
 
             // Create a new configuration
             var hierarchy = (log4net.Repository.Hierarchy.Hierarchy)LogManager.GetRepository();
             hierarchy.Root.RemoveAllAppenders(); // Remove any existing appenders
 
-            // Create a rolling file appender
+            // Create a rolling file appender (size-based only, date organization via folders)
             var roller = new RollingFileAppender
             {
                 File = _logFilePath,
                 AppendToFile = true,
-                RollingStyle = RollingFileAppender.RollingMode.Date,
-                DatePattern = "yyyyMMdd",
+                RollingStyle = RollingFileAppender.RollingMode.Size,
                 LockingModel = new FileAppender.MinimalLock(),
-                MaxSizeRollBackups = 10,
+                MaxSizeRollBackups = 5,
                 MaximumFileSize = "10MB"
             };
 
@@ -105,9 +88,36 @@ namespace ZerodhaDatafeedAdapter
             roller.ActivateOptions();
             hierarchy.Root.AddAppender(roller);
 
-            // Set default logging level
-            hierarchy.Root.Level = Level.Info;
+            // Read log level from settings file or use default
+            var logLevel = ReadLogLevelFromSettings();
+            hierarchy.Root.Level = logLevel;
             hierarchy.Configured = true;
+        }
+
+        /// <summary>
+        /// Reads the log level from adapterLog-settings.json file via LogSettingsManager.
+        /// Uses the "Main" domain level or DefaultLogLevel.
+        /// </summary>
+        private static Level ReadLogLevelFromSettings()
+        {
+            // Use centralized LogSettingsManager for consistent configuration
+            return LogSettingsManager.GetLogLevel(LogDomain.Main);
+        }
+
+        /// <summary>
+        /// Parses a log level string to log4net Level.
+        /// </summary>
+        private static Level ParseLogLevel(string level)
+        {
+            return level?.ToUpperInvariant() switch
+            {
+                "DEBUG" => Level.Debug,
+                "INFO" => Level.Info,
+                "WARN" or "WARNING" => Level.Warn,
+                "ERROR" => Level.Error,
+                "FATAL" => Level.Fatal,
+                _ => Level.Info
+            };
         }
 
         public static void Initialize()
@@ -119,20 +129,8 @@ namespace ZerodhaDatafeedAdapter
                 {
                     try
                     {
-                        // Load log4net configuration from file if exists
-                        string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                        string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "log4net.config");
-
-                        if (File.Exists(configPath))
-                        {
-                            var configFile = new FileInfo(configPath);
-                            XmlConfigurator.Configure(configFile);
-                        }
-                        else
-                        {
-                            // Use default configuration
-                            ConfigureLog4Net();
-                        }
+                        // Always use programmatic configuration for unified folder structure
+                        ConfigureLog4Net();
 
                         _initialized = true;
                         Info($"Logger initialized. Logs will be saved to: {_logFilePath}");
@@ -340,30 +338,35 @@ namespace ZerodhaDatafeedAdapter
         }
 
         /// <summary>
-        /// Reloads configuration from the log4net.config file if it exists
+        /// Reloads log configuration from adapterLog-settings.json.
+        /// Call this after modifying the settings file to apply changes without restart.
         /// </summary>
         public static void ReloadConfiguration()
         {
             try
             {
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string configPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "log4net.config");
-
-                if (File.Exists(configPath))
-                {
-                    var configFile = new FileInfo(configPath);
-                    XmlConfigurator.Configure(configFile);
-                    Info($"[Logger] Reloaded configuration from: {configPath}");
-                }
-                else
-                {
-                    Warn($"[Logger] Configuration file not found at: {configPath}");
-                }
+                // Force reload of settings
+                LogSettingsManager.Reload();
+                ConfigureLog4Net();
+                Info($"[Logger] Configuration reloaded. Level={GetLogLevel()}, Logs at: {_logFilePath}");
             }
             catch (Exception ex)
             {
                 Error($"[Logger] Failed to reload configuration: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Gets the path to the settings file.
+        /// </summary>
+        public static string GetSettingsFilePath() => LogSettingsManager.SettingsFilePath;
+
+        /// <summary>
+        /// Creates a default settings file if it doesn't exist.
+        /// </summary>
+        public static void CreateDefaultSettingsFile()
+        {
+            LogSettingsManager.CreateDefaultSettingsFile();
         }
     }
 }

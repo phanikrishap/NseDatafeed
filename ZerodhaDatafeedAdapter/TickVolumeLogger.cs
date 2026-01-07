@@ -2,11 +2,14 @@ using System;
 using System.IO;
 using System.Text;
 using System.Threading;
+using ZerodhaDatafeedAdapter.Logging;
 
 namespace ZerodhaDatafeedAdapter
 {
     /// <summary>
-    /// Logger class specifically for recording tick volume data in CSV format
+    /// Logger class specifically for recording tick volume data in CSV format.
+    /// Writes to the unified log folder structure.
+    /// Log location: Documents\NinjaTrader 8\ZerodhaAdapter\Logs\{dd-MM-yyyy}\TickVolume.csv
     /// </summary>
     public static class TickVolumeLogger
     {
@@ -20,18 +23,11 @@ namespace ZerodhaDatafeedAdapter
         {
             try
             {
-                // Get the user's Documents folder path
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                _logFolderPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "Logs");
+                // Use the unified LoggerFactory path (date-wise folder structure)
+                _logFolderPath = LoggerFactory.LogFolderPath;
 
-                // Create the log directory if it doesn't exist
-                if (!Directory.Exists(_logFolderPath))
-                {
-                    Directory.CreateDirectory(_logFolderPath);
-                }
-
-                // Create log file name with date
-                string fileName = $"TickVolume_{DateTime.Now:yyyy-MM-dd}.csv";
+                // Create log file name (no date suffix - folder provides date context)
+                string fileName = "TickVolume.csv";
                 _logFilePath = Path.Combine(_logFolderPath, fileName);
 
                 Initialize();
@@ -51,20 +47,22 @@ namespace ZerodhaDatafeedAdapter
                 {
                     try
                     {
+                        // Note: Log cleanup is handled by LoggerFactory on initialization
+                        // File will not exist if cleanup ran, so we always write header for new session
                         bool fileExists = File.Exists(_logFilePath);
-                        
+
                         // Open the file for appending
                         _writer = new StreamWriter(_logFilePath, true, Encoding.UTF8);
-                        
-                        // Write header if file is new
+
+                        // Write header if file is new (always true after cleanup)
                         if (!fileExists)
                         {
                             _writer.WriteLine("Timestamp,Symbol,ReceivedTime,ExchangeTime,ParsedTime,LTP,LTQ,Volume,VolumeDelta,LatencyMs");
                             _writer.Flush();
                         }
-                        
+
                         _initialized = true;
-                        
+
                         // Log initialization
                         ZerodhaDatafeedAdapter.Logger.Info($"Tick volume logger initialized. Data will be saved to: {_logFilePath}");
                     }

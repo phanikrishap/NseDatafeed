@@ -1,0 +1,14 @@
+{
+  "DefaultLogLevel": "INFO",
+  "DomainLogLevels": {
+    "_comment": "Uncomment any domain below to set its log level independently",
+    "_Main": "INFO",
+    "_TBS": "DEBUG",
+    "_Startup": "INFO",
+    "_TickVolume": "INFO",
+    "_Synthetic": "INFO",
+    "_WebSocket": "INFO",
+    "_MarketData": "INFO",
+    "_RangeBar": "DEBUG"
+  }
+}
