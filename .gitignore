@@ -96,6 +96,10 @@ secrets.json
 auth.json
 token.json
 credentials.json
+icici_config.json
+
+# TokenGeneratorTest config folder (contains credentials)
+TokenGeneratorTest/config/
 
 # Windows reserved names (accidentally created)
 nul

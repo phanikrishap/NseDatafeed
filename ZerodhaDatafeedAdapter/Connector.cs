@@ -5,6 +5,7 @@ using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Auth;
 using ZerodhaDatafeedAdapter.Services.Configuration;
+using ZerodhaDatafeedAdapter.Services.Historical;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.MarketData;
 using ZerodhaDatafeedAdapter.Services.Zerodha;
@@ -255,6 +256,10 @@ namespace ZerodhaDatafeedAdapter
                             {
                                 Logger.Info($"[ICICI Broker] Status: {status.Message} (Available: {status.IsAvailable})");
                             });
+
+                        // Initialize ICICI Historical Tick Data Service (for option chain backfill)
+                        // This service subscribes to ICICI availability and provides historical data when ready
+                        IciciHistoricalTickDataService.Instance.Initialize();
                     }
                     catch (Exception iciciEx)
                     {

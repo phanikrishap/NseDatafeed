@@ -265,6 +265,11 @@ namespace ZerodhaDatafeedAdapter.Logging
         public static ILoggerService RangeBar => GetLogger(LogDomain.RangeBar);
 
         /// <summary>
+        /// Gets the ICICI API logger for Breeze API operations.
+        /// </summary>
+        public static ILoggerService IciciApi => GetLogger(LogDomain.IciciApi);
+
+        /// <summary>
         /// Gets today's log folder path where all logs are stored.
         /// Format: Documents\NinjaTrader 8\ZerodhaAdapter\Logs\{dd-MM-yyyy}\
         /// </summary>
@@ -526,7 +531,10 @@ namespace ZerodhaDatafeedAdapter.Logging
         MarketData,
 
         /// <summary>RangeATR bar processing log (RangeBar.log)</summary>
-        RangeBar
+        RangeBar,
+
+        /// <summary>ICICI Breeze API log (IciciApi.log)</summary>
+        IciciApi
     }
 
     /// <summary>
@@ -585,6 +593,7 @@ namespace ZerodhaDatafeedAdapter.Logging
                 LogDomain.WebSocket => "WebSocket.log",
                 LogDomain.MarketData => "MarketData.log",
                 LogDomain.RangeBar => "RangeBar.log",
+                LogDomain.IciciApi => "IciciApi.log",
                 _ => "ZerodhaAdapter.log"
             };
         }
