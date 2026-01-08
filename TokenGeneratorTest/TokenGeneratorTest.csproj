@@ -54,6 +54,10 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="InstrumentDownloader.cs" />
+    <Compile Include="BreezeApiClient.cs" />
+    <Compile Include="BreezeHistoricalDataTest.cs" />
+    <Compile Include="BreezeTokenGenerator.cs" />
+    <Compile Include="TotpGenerator.cs" />
     <!-- Include the ZerodhaTokenGenerator from the main project -->
     <Compile Include="..\ZerodhaDatafeedAdapter\Services\Auth\ZerodhaTokenGenerator.cs">
       <Link>ZerodhaTokenGenerator.cs</Link>

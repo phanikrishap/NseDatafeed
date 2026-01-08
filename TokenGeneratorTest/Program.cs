@@ -8,9 +8,9 @@ using ZerodhaDatafeedAdapter.Services.Auth;
 namespace TokenGeneratorTest
 {
     /// <summary>
-    /// Standalone test application for Zerodha Token Generator
+    /// Standalone test application for Zerodha Token Generator and ICICI Breeze API
     /// Tests the automated OAuth flow before integrating into NinjaTrader
-    /// Also supports downloading instruments to mapped_instruments.json and InstrumentMasters.db
+    /// Also supports downloading instruments and testing Breeze historical data
     /// </summary>
     class Program
     {
@@ -31,6 +31,43 @@ namespace TokenGeneratorTest
 
         static async Task Main(string[] args)
         {
+            // Check for Breeze test mode
+            if (args.Length > 0 && args[0].ToLower() == "breeze")
+            {
+                await BreezeHistoricalDataTest.RunTestAsync();
+                WaitForExit();
+                return;
+            }
+
+            Console.WriteLine("===========================================");
+            Console.WriteLine("  Token Generator & API Test Application");
+            Console.WriteLine("===========================================");
+            Console.WriteLine();
+            Console.WriteLine("Select mode:");
+            Console.WriteLine("  1. Zerodha Token Generator & Instruments");
+            Console.WriteLine("  2. ICICI Breeze Historical Data Test");
+            Console.WriteLine("  3. ICICI Breeze Token Generation Test (HTTP-based)");
+            Console.WriteLine();
+            Console.Write("Enter choice (1, 2, or 3): ");
+
+            string choice = Console.ReadLine()?.Trim();
+
+            if (choice == "2")
+            {
+                await BreezeHistoricalDataTest.RunTestAsync();
+                WaitForExit();
+                return;
+            }
+
+            if (choice == "3")
+            {
+                await RunBreezeTokenGenerationTest();
+                WaitForExit();
+                return;
+            }
+
+            // Default: Zerodha mode
+            Console.WriteLine();
             Console.WriteLine("===========================================");
             Console.WriteLine("  Zerodha Token Generator & Instrument Downloader");
             Console.WriteLine("===========================================");
@@ -199,6 +236,11 @@ namespace TokenGeneratorTest
                 Console.WriteLine(ex.StackTrace);
             }
 
+            WaitForExit();
+        }
+
+        private static void WaitForExit()
+        {
             Console.WriteLine();
             Console.WriteLine("Press Enter to exit...");
             try
@@ -366,6 +408,128 @@ namespace TokenGeneratorTest
             catch (Exception ex)
             {
                 Console.WriteLine($"    ERROR: Failed to save token: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Test ICICI Breeze HTTP-based token generation (similar to Zerodha approach)
+        /// </summary>
+        private static async Task RunBreezeTokenGenerationTest()
+        {
+            Console.WriteLine();
+            Console.WriteLine("===========================================");
+            Console.WriteLine("  ICICI Breeze Token Generation Test");
+            Console.WriteLine("  (HTTP-based, no Selenium)");
+            Console.WriteLine("===========================================");
+            Console.WriteLine();
+
+            try
+            {
+                // Load Breeze configuration from local config folder
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "config", "icici_config.json");
+                configPath = Path.GetFullPath(configPath);
+                Console.WriteLine($"[1] Loading Breeze config from: {configPath}");
+
+                if (!File.Exists(configPath))
+                {
+                    Console.WriteLine($"    ERROR: Config file not found at: {configPath}");
+                    return;
+                }
+
+                string json = File.ReadAllText(configPath);
+                var config = JObject.Parse(json);
+
+                string apiKey = config["apiKey"]?.ToString();
+                string apiSecret = config["apiSecret"]?.ToString();
+                string login = config["login"]?.ToString();
+                string password = config["password"]?.ToString();
+                string totpKey = config["totpKey"]?.ToString();
+
+                Console.WriteLine($"    API Key: {apiKey?.Substring(0, Math.Min(8, apiKey?.Length ?? 0))}...");
+                Console.WriteLine($"    Login: {login}");
+                Console.WriteLine($"    TOTP Key Present: {!string.IsNullOrEmpty(totpKey)}");
+                Console.WriteLine();
+
+                // Validate credentials
+                if (string.IsNullOrEmpty(apiKey) || string.IsNullOrEmpty(apiSecret) ||
+                    string.IsNullOrEmpty(login) || string.IsNullOrEmpty(password) ||
+                    string.IsNullOrEmpty(totpKey))
+                {
+                    Console.WriteLine("    ERROR: Missing required credentials");
+                    Console.WriteLine($"    apiKey: {(string.IsNullOrEmpty(apiKey) ? "MISSING" : "OK")}");
+                    Console.WriteLine($"    apiSecret: {(string.IsNullOrEmpty(apiSecret) ? "MISSING" : "OK")}");
+                    Console.WriteLine($"    login: {(string.IsNullOrEmpty(login) ? "MISSING" : "OK")}");
+                    Console.WriteLine($"    password: {(string.IsNullOrEmpty(password) ? "MISSING" : "OK")}");
+                    Console.WriteLine($"    totpKey: {(string.IsNullOrEmpty(totpKey) ? "MISSING" : "OK")}");
+                    return;
+                }
+
+                // Test TOTP generation first
+                Console.WriteLine("[2] Testing TOTP generation...");
+                string totp = TotpGenerator.GenerateTotp(totpKey);
+                Console.WriteLine($"    Generated TOTP: {totp}");
+                Console.WriteLine();
+
+                // Initialize Breeze token generator
+                Console.WriteLine("[3] Initializing Breeze Token Generator...");
+                var generator = new BreezeTokenGenerator(apiKey, apiSecret, login, password, totpKey);
+
+                // Subscribe to status updates
+                generator.StatusChanged += (sender, e) =>
+                {
+                    var timestamp = e.Timestamp.ToString("HH:mm:ss.fff");
+                    if (e.IsError)
+                        Console.WriteLine($"    [{timestamp}] ERROR: {e.Message}");
+                    else
+                        Console.WriteLine($"    [{timestamp}] {e.Message}");
+                };
+                Console.WriteLine();
+
+                // Attempt token generation
+                Console.WriteLine("[4] Starting HTTP-based token generation...");
+                Console.WriteLine("    NOTE: This is an experimental approach.");
+                Console.WriteLine("    ICICI may require Selenium for full login flow.");
+                Console.WriteLine();
+
+                var result = await generator.GenerateTokenAsync();
+
+                Console.WriteLine();
+                if (result.Success)
+                {
+                    Console.WriteLine("===========================================");
+                    Console.WriteLine("  TOKEN GENERATION SUCCESSFUL!");
+                    Console.WriteLine("===========================================");
+                    Console.WriteLine($"  Session Token: {result.SessionToken}");
+                    Console.WriteLine();
+
+                    // Save to config
+                    config["sessionKey"] = result.SessionToken;
+                    config["sessionKeyGeneratedAt"] = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.ffffff");
+                    File.WriteAllText(configPath, config.ToString(Formatting.Indented));
+                    Console.WriteLine("  Token saved to config file.");
+                }
+                else
+                {
+                    Console.WriteLine("===========================================");
+                    Console.WriteLine("  TOKEN GENERATION FAILED");
+                    Console.WriteLine("===========================================");
+                    Console.WriteLine($"  Error: {result.Error}");
+                    Console.WriteLine();
+                    Console.WriteLine("  ICICI's login flow may require Selenium-based automation.");
+                    Console.WriteLine("  Unlike Zerodha which has JSON API endpoints (/api/login, /api/twofa),");
+                    Console.WriteLine("  ICICI uses form-based login with server-side rendering.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine();
+                Console.WriteLine("===========================================");
+                Console.WriteLine("  TEST FAILED!");
+                Console.WriteLine("===========================================");
+                Console.WriteLine($"  Error: {ex.Message}");
+                Console.WriteLine();
+                Console.WriteLine("Stack Trace:");
+                Console.WriteLine(ex.StackTrace);
             }
         }
     }

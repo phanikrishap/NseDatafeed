@@ -184,6 +184,8 @@
     <Compile Include="Services\MarketData\ProcessorHealthMonitor.cs" />
     <Compile Include="Services\MarketData\PerformanceMonitor.cs" />
     <Compile Include="Services\Auth\ZerodhaTokenGenerator.cs" />
+    <Compile Include="Services\Auth\IciciDirectTokenGenerator.cs" />
+    <Compile Include="Services\Auth\IciciDirectTokenService.cs" />
     <Compile Include="Services\Analysis\InstrumentBackfillService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerLogic.cs" />
     <Compile Include="Services\Analysis\NiftyFuturesMetricsService.cs" />

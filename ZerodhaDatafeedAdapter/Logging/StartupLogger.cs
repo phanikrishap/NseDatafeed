@@ -444,6 +444,140 @@ namespace ZerodhaDatafeedAdapter.Logging
 
         #endregion
 
+        #region ICICI Direct Broker Logging
+
+        /// <summary>
+        /// Log ICICI Direct initialization start
+        /// </summary>
+        public static void LogIciciInitStart()
+        {
+            Info("========== ICICI DIRECT BROKER INIT (NON-BLOCKING) ==========");
+            Info("Starting ICICI Direct broker initialization...");
+            Info("Note: ICICI failures will NOT affect Zerodha live trading");
+        }
+
+        /// <summary>
+        /// Log ICICI session validation attempt
+        /// </summary>
+        public static void LogIciciSessionValidation(bool existing, string sessionKey = null)
+        {
+            if (existing)
+            {
+                string keyPreview = !string.IsNullOrEmpty(sessionKey) && sessionKey.Length > 4
+                    ? sessionKey.Substring(0, 4) + "****"
+                    : "****";
+                Info($"[ICICI] Validating existing session: {keyPreview}");
+            }
+            else
+            {
+                Info("[ICICI] No existing session - will attempt auto-login");
+            }
+        }
+
+        /// <summary>
+        /// Log ICICI session validation result
+        /// </summary>
+        public static void LogIciciSessionValidationResult(bool success, string details = null)
+        {
+            if (success)
+            {
+                Info($"[ICICI] Session validation: VALID" + (details != null ? $" | {details}" : ""));
+            }
+            else
+            {
+                Warn($"[ICICI] Session validation: INVALID/EXPIRED" + (details != null ? $" | {details}" : ""));
+            }
+        }
+
+        /// <summary>
+        /// Log ICICI token generation attempt
+        /// </summary>
+        public static void LogIciciTokenGenerationStart()
+        {
+            Info("[ICICI] Starting automated token generation (HTTP-based)...");
+            Info("[ICICI] Note: This may take 10-30 seconds due to TOTP timing");
+        }
+
+        /// <summary>
+        /// Log ICICI token generation step
+        /// </summary>
+        public static void LogIciciTokenGenerationStep(string step, string message)
+        {
+            Info($"[ICICI] {step}: {message}");
+        }
+
+        /// <summary>
+        /// Log ICICI token generation result
+        /// </summary>
+        public static void LogIciciTokenGenerationResult(bool success, string sessionKey = null, string error = null)
+        {
+            if (success)
+            {
+                string keyPreview = !string.IsNullOrEmpty(sessionKey) && sessionKey.Length > 4
+                    ? sessionKey.Substring(0, 4) + "****"
+                    : "****";
+                Info("========== ICICI TOKEN GENERATED ==========");
+                Info($"[ICICI] Session token generated: {keyPreview}");
+                Info("[ICICI] Historical data access is now available");
+            }
+            else
+            {
+                Warn("========== ICICI TOKEN GENERATION FAILED ==========");
+                Warn($"[ICICI] Error: {error ?? "Unknown error"}");
+                Warn("[ICICI] Historical data from ICICI will NOT be available");
+                Warn("[ICICI] This does NOT affect Zerodha live trading");
+            }
+        }
+
+        /// <summary>
+        /// Log ICICI broker status change
+        /// </summary>
+        public static void LogIciciBrokerStatus(bool available, string message)
+        {
+            if (available)
+            {
+                Info($"[ICICI] Broker Status: AVAILABLE | {message}");
+            }
+            else
+            {
+                Warn($"[ICICI] Broker Status: UNAVAILABLE | {message}");
+            }
+        }
+
+        /// <summary>
+        /// Log ICICI initialization complete
+        /// </summary>
+        public static void LogIciciInitComplete(bool success, long elapsedMs)
+        {
+            Info("");
+            if (success)
+            {
+                Info($"[ICICI] Initialization COMPLETE in {elapsedMs}ms - Broker AVAILABLE");
+            }
+            else
+            {
+                Info($"[ICICI] Initialization COMPLETE in {elapsedMs}ms - Broker NOT available (non-critical)");
+            }
+            Info("========== END ICICI DIRECT BROKER INIT ==========");
+            Info("");
+        }
+
+        /// <summary>
+        /// Log ICICI configuration status
+        /// </summary>
+        public static void LogIciciConfiguration(bool found, bool autoLoginEnabled, bool credentialsComplete)
+        {
+            Info("[ICICI] Configuration check:");
+            Info($"  - Config section found: {(found ? "YES" : "NO")}");
+            if (found)
+            {
+                Info($"  - AutoLogin enabled: {(autoLoginEnabled ? "YES" : "NO")}");
+                Info($"  - Credentials complete: {(credentialsComplete ? "YES" : "NO")}");
+            }
+        }
+
+        #endregion
+
         #region Utility Methods
 
         /// <summary>

@@ -3,6 +3,7 @@ using ZerodhaAPI.Zerodha.Websockets;
 using ZerodhaDatafeedAdapter.Classes;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
+using ZerodhaDatafeedAdapter.Services.Auth;
 using ZerodhaDatafeedAdapter.Services.Configuration;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.MarketData;
@@ -239,6 +240,27 @@ namespace ZerodhaDatafeedAdapter
                     // Initialize InstrumentManager (downloads instruments if needed)
                     // This awaits TokenReadyStream internally, but since we just published, it will proceed
                     await InstrumentManager.Instance.InitializeAsync();
+
+                    // Initialize ICICI Direct broker in background (non-blocking)
+                    // This is for historical data access, not live trading
+                    // Failures here don't affect Zerodha operations
+                    try
+                    {
+                        Logger.Info("[Connector] Starting ICICI Direct broker initialization (non-blocking)...");
+                        IciciDirectTokenService.Instance.Initialize();
+
+                        // Subscribe to status updates (logging only)
+                        IciciDirectTokenService.Instance.BrokerStatus
+                            .Subscribe(status =>
+                            {
+                                Logger.Info($"[ICICI Broker] Status: {status.Message} (Available: {status.IsAvailable})");
+                            });
+                    }
+                    catch (Exception iciciEx)
+                    {
+                        // ICICI failures are non-blocking
+                        Logger.Info($"[Connector] ICICI initialization skipped: {iciciEx.Message}");
+                    }
                 }
                 catch (Exception ex)
                 {
