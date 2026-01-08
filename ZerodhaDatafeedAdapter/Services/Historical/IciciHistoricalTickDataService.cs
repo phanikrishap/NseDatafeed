@@ -12,11 +12,14 @@ using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Auth;
+using ZerodhaDatafeedAdapter.Services.Instruments;
 
 namespace ZerodhaDatafeedAdapter.Services.Historical
 {
@@ -41,7 +44,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         private const int MAX_SECONDS_PER_CALL = 999;
 
         // Parallel fetch configuration
-        private const int PARALLEL_STRIKES = 3;
+        private const int PARALLEL_STRIKES = 4;
         private const int RATE_LIMIT_DELAY_MS = 500;
 
         // Symbol mapping for ICICI API
@@ -75,6 +78,18 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         private readonly BehaviorSubject<HistoricalDataServiceStatus> _serviceStatusSubject;
         private readonly Subject<HistoricalDataDownloadProgress> _progressSubject;
 
+        // Request queue for handling requests before service is ready
+        // ReplaySubject buffers requests and replays them when subscribed
+        private readonly ReplaySubject<HistoricalDownloadRequest> _requestQueue;
+        private IDisposable _requestQueueSubscription;
+        private readonly object _queueLock = new object();
+
+        // Per-instrument tick data request queue (queued when cache misses and ICICI not ready)
+        private readonly ReplaySubject<InstrumentTickDataRequest> _instrumentRequestQueue;
+        private IDisposable _instrumentQueueSubscription;
+        private readonly ConcurrentDictionary<string, BehaviorSubject<InstrumentTickDataStatus>> _instrumentStatusSubjects
+            = new ConcurrentDictionary<string, BehaviorSubject<InstrumentTickDataStatus>>();
+
         #endregion
 
         #region State
@@ -93,6 +108,9 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         // Track which strikes have been downloaded
         private readonly ConcurrentDictionary<string, bool> _downloadedStrikes
             = new ConcurrentDictionary<string, bool>();
+
+        // Current Zerodha symbol map for NT persistence (set during DownloadOptionChainHistoryAsync)
+        private Dictionary<(int strike, string optionType), string> _currentZerodhaSymbolMap;
 
         #endregion
 
@@ -119,12 +137,29 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             return subject.AsObservable();
         }
 
+        /// <summary>
+        /// Get observable for a specific instrument's tick data status.
+        /// Subscribe to this to get notified when tick data becomes available.
+        /// </summary>
+        public IObservable<InstrumentTickDataStatus> GetInstrumentTickStatusStream(string zerodhaSymbol)
+        {
+            var subject = _instrumentStatusSubjects.GetOrAdd(zerodhaSymbol,
+                _ => new BehaviorSubject<InstrumentTickDataStatus>(
+                    new InstrumentTickDataStatus { ZerodhaSymbol = zerodhaSymbol, State = TickDataState.Pending }));
+            return subject.AsObservable();
+        }
+
         #endregion
 
         #region Properties
 
         public bool IsInitialized => _isInitialized;
         public bool IsDownloading => _isDownloading;
+
+        /// <summary>
+        /// True when service is fully ready to process requests (initialized AND has valid session token)
+        /// </summary>
+        public bool IsReady => _isInitialized && !string.IsNullOrEmpty(_base64SessionToken);
 
         #endregion
 
@@ -135,6 +170,12 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             _serviceStatusSubject = new BehaviorSubject<HistoricalDataServiceStatus>(
                 new HistoricalDataServiceStatus { State = HistoricalDataState.NotInitialized });
             _progressSubject = new Subject<HistoricalDataDownloadProgress>();
+
+            // ReplaySubject with buffer size of 10 - stores up to 10 requests until service is ready
+            _requestQueue = new ReplaySubject<HistoricalDownloadRequest>(bufferSize: 10);
+
+            // Per-instrument request queue - uses ReplaySubject to buffer requests until ICICI is ready
+            _instrumentRequestQueue = new ReplaySubject<InstrumentTickDataRequest>(bufferSize: 200);
 
             IciciApiLogger.Info("[IciciHistoricalTickDataService] Singleton instance created");
         }
@@ -205,6 +246,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         Message = "ICICI Historical Data Service is ready"
                     });
                     IciciApiLogger.Info("[IciciHistoricalTickDataService] Service is READY for historical data requests");
+
+                    // Subscribe to the request queue now that we're ready
+                    // This will replay any buffered requests
+                    SubscribeToRequestQueue();
+                    SubscribeToInstrumentQueue();
                 }
                 else
                 {
@@ -223,6 +269,95 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     State = HistoricalDataState.Error,
                     Message = $"Session error: {ex.Message}"
                 });
+            }
+        }
+
+        /// <summary>
+        /// Subscribes to the request queue and processes any pending/buffered requests.
+        /// Called when service becomes ready.
+        /// </summary>
+        private void SubscribeToRequestQueue()
+        {
+            lock (_queueLock)
+            {
+                if (_requestQueueSubscription != null)
+                {
+                    IciciApiLogger.Debug("[IciciHistoricalTickDataService] Already subscribed to request queue");
+                    return;
+                }
+
+                IciciApiLogger.Info("[IciciHistoricalTickDataService] Subscribing to request queue - processing any pending requests");
+
+                _requestQueueSubscription = _requestQueue
+                    .Subscribe(
+                        request =>
+                        {
+                            // Process on a background thread to avoid blocking the Rx pipeline
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    IciciApiLogger.Info($"[IciciHistoricalTickDataService] Processing queued request: {request}");
+                                    await ProcessDownloadRequestAsync(request);
+                                }
+                                catch (Exception ex)
+                                {
+                                    IciciApiLogger.Error($"[IciciHistoricalTickDataService] Error processing queued request: {ex.Message}");
+                                }
+                            });
+                        },
+                        ex => IciciApiLogger.Error($"[IciciHistoricalTickDataService] Request queue error: {ex.Message}"),
+                        () => IciciApiLogger.Info("[IciciHistoricalTickDataService] Request queue completed")
+                    );
+            }
+        }
+
+        /// <summary>
+        /// Subscribes to the per-instrument request queue.
+        /// Processes 3 instruments at a time with rate limiting.
+        /// Called when service becomes ready.
+        /// </summary>
+        private void SubscribeToInstrumentQueue()
+        {
+            lock (_queueLock)
+            {
+                if (_instrumentQueueSubscription != null)
+                {
+                    IciciApiLogger.Debug("[IciciHistoricalTickDataService] Already subscribed to instrument queue");
+                    return;
+                }
+
+                IciciApiLogger.Info("[IciciHistoricalTickDataService] Subscribing to instrument queue - processing 4 at a time");
+
+                // Use Buffer with count=PARALLEL_STRIKES to process instruments in parallel batches
+                // Then use SelectMany to process each batch
+                _instrumentQueueSubscription = _instrumentRequestQueue
+                    .Buffer(PARALLEL_STRIKES) // Batch into groups of 4
+                    .Where(batch => batch.Count > 0)
+                    .Subscribe(
+                        batch =>
+                        {
+                            // Process batch on background thread
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    IciciApiLogger.Info($"[INST-QUEUE] Processing batch of {batch.Count} instruments");
+                                    var tasks = batch.Select(req => ProcessInstrumentRequestAsync(req)).ToList();
+                                    await Task.WhenAll(tasks);
+
+                                    // Rate limit between batches
+                                    await Task.Delay(RATE_LIMIT_DELAY_MS);
+                                }
+                                catch (Exception ex)
+                                {
+                                    IciciApiLogger.Error($"[INST-QUEUE] Batch processing error: {ex.Message}");
+                                }
+                            });
+                        },
+                        ex => IciciApiLogger.Error($"[INST-QUEUE] Queue error: {ex.Message}"),
+                        () => IciciApiLogger.Info("[INST-QUEUE] Queue completed")
+                    );
             }
         }
 
@@ -342,27 +477,607 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #endregion
 
-        #region Historical Data Fetching
+        #region Request Queue API
 
         /// <summary>
-        /// Download historical tick data for option chain using center-out propagation.
-        /// Call this when option chain is generated and ICICI is available.
+        /// Queue a download request. If service is ready, processes immediately.
+        /// If not ready, the request is buffered and will be processed when service becomes ready.
+        /// This is the recommended API for callers - it handles the race condition automatically.
         /// </summary>
         /// <param name="underlying">Underlying symbol (e.g., "NIFTY")</param>
         /// <param name="expiry">Expiry date</param>
         /// <param name="projectedAtmStrike">Projected ATM strike for center-out propagation</param>
         /// <param name="strikes">List of all strikes to download</param>
+        /// <param name="zerodhaSymbolMap">Optional mapping of (strike,optionType) to Zerodha trading symbol for NT persistence</param>
         /// <param name="historicalDate">Date to fetch history for (defaults to prior working day)</param>
-        public async Task DownloadOptionChainHistoryAsync(
+        public void QueueDownloadRequest(
             string underlying,
             DateTime expiry,
             int projectedAtmStrike,
             List<int> strikes,
+            Dictionary<(int strike, string optionType), string> zerodhaSymbolMap = null,
             DateTime? historicalDate = null)
         {
-            if (!_isInitialized || string.IsNullOrEmpty(_base64SessionToken))
+            var request = new HistoricalDownloadRequest
             {
-                IciciApiLogger.Warn("[IciciHistoricalTickDataService] Cannot download - not initialized");
+                Underlying = underlying,
+                Expiry = expiry,
+                ProjectedAtmStrike = projectedAtmStrike,
+                Strikes = strikes,
+                ZerodhaSymbolMap = zerodhaSymbolMap,
+                HistoricalDate = historicalDate
+            };
+
+            IciciApiLogger.Info($"[IciciHistoricalTickDataService] Queueing download request: {request} (IsReady={IsReady})");
+
+            // Push to the ReplaySubject
+            // If service is ready and subscribed, it processes immediately
+            // If not ready, the request is buffered until subscription happens
+            _requestQueue.OnNext(request);
+        }
+
+        /// <summary>
+        /// Queue a single instrument tick data request from BarsWorker.
+        /// This is the API for on-demand tick data requests when cache misses.
+        /// Returns an observable that signals when data becomes available.
+        /// </summary>
+        /// <param name="zerodhaSymbol">Zerodha trading symbol (e.g., SENSEX2610884200CE)</param>
+        /// <param name="tradeDate">Date to fetch tick data for</param>
+        /// <returns>Observable that signals when tick data is available</returns>
+        public IObservable<InstrumentTickDataStatus> QueueInstrumentTickRequest(string zerodhaSymbol, DateTime tradeDate)
+        {
+            if (string.IsNullOrEmpty(zerodhaSymbol))
+            {
+                IciciApiLogger.Warn("[INST-QUEUE] Cannot queue null/empty symbol");
+                return Observable.Return(new InstrumentTickDataStatus
+                {
+                    ZerodhaSymbol = zerodhaSymbol,
+                    State = TickDataState.Failed,
+                    ErrorMessage = "Symbol is null or empty"
+                });
+            }
+
+            // Check if already queued or completed
+            var statusSubject = _instrumentStatusSubjects.GetOrAdd(zerodhaSymbol,
+                _ => new BehaviorSubject<InstrumentTickDataStatus>(
+                    new InstrumentTickDataStatus { ZerodhaSymbol = zerodhaSymbol, State = TickDataState.Pending }));
+
+            // Check current state
+            var currentStatus = statusSubject.Value;
+            if (currentStatus.State == TickDataState.Ready)
+            {
+                IciciApiLogger.Debug($"[INST-QUEUE] {zerodhaSymbol} already ready, returning cached status");
+                return statusSubject.AsObservable();
+            }
+
+            if (currentStatus.State == TickDataState.Downloading)
+            {
+                IciciApiLogger.Debug($"[INST-QUEUE] {zerodhaSymbol} already downloading, returning status stream");
+                return statusSubject.AsObservable();
+            }
+
+            // Queue the request
+            var request = new InstrumentTickDataRequest
+            {
+                ZerodhaSymbol = zerodhaSymbol,
+                TradeDate = tradeDate,
+                QueuedAt = DateTime.Now
+            };
+
+            IciciApiLogger.Info($"[INST-QUEUE] Queueing {zerodhaSymbol} for {tradeDate:yyyy-MM-dd} (IsReady={IsReady})");
+
+            // Update status to queued
+            statusSubject.OnNext(new InstrumentTickDataStatus
+            {
+                ZerodhaSymbol = zerodhaSymbol,
+                State = TickDataState.Queued,
+                TradeDate = tradeDate
+            });
+
+            // Push to the queue - will be buffered if not ready, processed when ready
+            _instrumentRequestQueue.OnNext(request);
+
+            return statusSubject.AsObservable();
+        }
+
+        /// <summary>
+        /// Process a single instrument tick data request.
+        /// Downloads from ICICI, caches to SQLite, and signals NT8 to refresh.
+        /// Handles market timing scenarios:
+        /// - Pre-market (before 9 AM): fetch prior working day only
+        /// - Market hours (9:15 AM - 3:30 PM): fetch prior day + current day up to current time
+        /// - Post-market (after 3:30 PM): fetch prior day + current day full
+        /// </summary>
+        private async Task ProcessInstrumentRequestAsync(InstrumentTickDataRequest request)
+        {
+            if (request == null || string.IsNullOrEmpty(request.ZerodhaSymbol))
+                return;
+
+            string symbol = request.ZerodhaSymbol;
+
+            // Get or create status subject
+            var statusSubject = _instrumentStatusSubjects.GetOrAdd(symbol,
+                _ => new BehaviorSubject<InstrumentTickDataStatus>(
+                    new InstrumentTickDataStatus { ZerodhaSymbol = symbol, State = TickDataState.Pending }));
+
+            try
+            {
+                // Check if request is stale (older than 10 minutes)
+                var age = DateTime.Now - request.QueuedAt;
+                if (age.TotalMinutes > 10)
+                {
+                    IciciApiLogger.Warn($"[INST-QUEUE] Skipping stale request for {symbol} (age={age.TotalMinutes:F1}min)");
+                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    {
+                        ZerodhaSymbol = symbol,
+                        State = TickDataState.Failed,
+                        ErrorMessage = "Request expired"
+                    });
+                    return;
+                }
+
+                // Determine which days to fetch based on current IST time
+                var daysToFetch = GetDaysToFetch();
+                IciciApiLogger.Info($"[INST-QUEUE] {symbol}: Market phase={daysToFetch.Phase}, days to fetch: {string.Join(", ", daysToFetch.Dates.Select(d => d.ToString("yyyy-MM-dd")))}");
+
+                // Check if all required days are already in cache
+                bool allDaysCached = daysToFetch.Dates.All(d =>
+                    IciciTickCacheDb.Instance.HasCachedData(symbol, d));
+
+                if (allDaysCached)
+                {
+                    // Get total tick count from all cached days
+                    int totalTicks = 0;
+                    foreach (var date in daysToFetch.Dates)
+                    {
+                        var cached = IciciTickCacheDb.Instance.GetCachedTicks(symbol, date);
+                        if (cached != null) totalTicks += cached.Count;
+                    }
+
+                    IciciApiLogger.Info($"[INST-QUEUE] CACHE HIT: {symbol} has {totalTicks} ticks across {daysToFetch.Dates.Count} day(s)");
+                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    {
+                        ZerodhaSymbol = symbol,
+                        State = TickDataState.Ready,
+                        TradeDate = daysToFetch.Dates.Last(),
+                        TickCount = totalTicks
+                    });
+
+                    // Signal NT8 to refresh this instrument's bars
+                    await TriggerNT8BarsRefreshAsync(symbol);
+                    return;
+                }
+
+                // Update status to downloading
+                statusSubject.OnNext(new InstrumentTickDataStatus
+                {
+                    ZerodhaSymbol = symbol,
+                    State = TickDataState.Downloading,
+                    TradeDate = daysToFetch.Dates.LastOrDefault()
+                });
+
+                // Parse symbol to extract underlying, expiry, strike, optionType
+                var parsedInfo = ParseZerodhaOptionSymbol(symbol);
+                if (parsedInfo == null)
+                {
+                    IciciApiLogger.Warn($"[INST-QUEUE] Cannot parse symbol: {symbol}");
+                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    {
+                        ZerodhaSymbol = symbol,
+                        State = TickDataState.Failed,
+                        ErrorMessage = "Cannot parse symbol"
+                    });
+                    return;
+                }
+
+                IciciApiLogger.Info($"[INST-QUEUE] Downloading {symbol}: {parsedInfo.Underlying} {parsedInfo.Strike}{parsedInfo.OptionType} exp={parsedInfo.Expiry:dd-MMM}");
+
+                int totalDownloaded = 0;
+                int totalFiltered = 0;
+
+                // Download each day that's not in cache
+                foreach (var tradeDate in daysToFetch.Dates)
+                {
+                    // Skip if this day is already cached
+                    if (IciciTickCacheDb.Instance.HasCachedData(symbol, tradeDate))
+                    {
+                        var cached = IciciTickCacheDb.Instance.GetCachedTicks(symbol, tradeDate);
+                        IciciApiLogger.Debug($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Already cached ({cached?.Count ?? 0} ticks)");
+                        totalFiltered += cached?.Count ?? 0;
+                        continue;
+                    }
+
+                    // Determine time range for this day
+                    DateTime fromTime = tradeDate.Date.AddHours(9).AddMinutes(15); // 9:15 AM
+                    DateTime toTime;
+
+                    // For current day during market hours, fetch up to current time
+                    if (tradeDate.Date == DateTime.Today && daysToFetch.Phase == MarketPhase.MarketHours)
+                    {
+                        var istNow = GetCurrentIstTime();
+                        toTime = new DateTime(tradeDate.Year, tradeDate.Month, tradeDate.Day, istNow.Hour, istNow.Minute, istNow.Second);
+                        // Ensure we don't go past market close
+                        var marketClose = tradeDate.Date.AddHours(15).AddMinutes(30);
+                        if (toTime > marketClose) toTime = marketClose;
+                    }
+                    else
+                    {
+                        toTime = tradeDate.Date.AddHours(15).AddMinutes(30); // 3:30 PM
+                    }
+
+                    IciciApiLogger.Info($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Fetching {fromTime:HH:mm:ss} to {toTime:HH:mm:ss}");
+
+                    // Download ALL 999-second chunks for this day
+                    var candles = await DownloadSecondDataInChunksAsync(
+                        parsedInfo.Underlying,
+                        parsedInfo.Strike,
+                        parsedInfo.OptionType,
+                        parsedInfo.Expiry,
+                        fromTime,
+                        toTime);
+
+                    totalDownloaded += candles?.Count ?? 0;
+
+                    if (candles != null && candles.Count > 0)
+                    {
+                        // Filter zero-volume ticks
+                        var filteredCandles = candles.Where(c => c.Volume > 0).ToList();
+                        int dayFiltered = candles.Count - filteredCandles.Count;
+
+                        IciciApiLogger.Info($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Downloaded {candles.Count} ticks, removed {dayFiltered} zero-volume");
+
+                        if (filteredCandles.Count > 0)
+                        {
+                            // Cache this day to SQLite (CacheTicks handles replace/insert)
+                            IciciTickCacheDb.Instance.CacheTicks(symbol, tradeDate, filteredCandles);
+                            totalFiltered += filteredCandles.Count;
+                        }
+                    }
+                    else
+                    {
+                        IciciApiLogger.Warn($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: No data from API");
+                    }
+
+                    // Rate limit between days
+                    if (daysToFetch.Dates.Count > 1)
+                    {
+                        await Task.Delay(RATE_LIMIT_DELAY_MS);
+                    }
+                }
+
+                // Final status update
+                if (totalFiltered > 0)
+                {
+                    IciciApiLogger.Info($"[INST-QUEUE] {symbol}: COMPLETE - {totalFiltered} ticks across {daysToFetch.Dates.Count} day(s)");
+                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    {
+                        ZerodhaSymbol = symbol,
+                        State = TickDataState.Ready,
+                        TradeDate = daysToFetch.Dates.Last(),
+                        TickCount = totalFiltered
+                    });
+
+                    // Signal NT8 to refresh this instrument's bars
+                    await TriggerNT8BarsRefreshAsync(symbol);
+                }
+                else
+                {
+                    IciciApiLogger.Warn($"[INST-QUEUE] {symbol}: No data after filtering (downloaded {totalDownloaded})");
+                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    {
+                        ZerodhaSymbol = symbol,
+                        State = TickDataState.NoData,
+                        TradeDate = daysToFetch.Dates.LastOrDefault(),
+                        ErrorMessage = totalDownloaded > 0 ? "All ticks had zero volume" : "No data from ICICI API"
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                IciciApiLogger.Error($"[INST-QUEUE] Error processing {symbol}: {ex.Message}");
+                statusSubject.OnNext(new InstrumentTickDataStatus
+                {
+                    ZerodhaSymbol = symbol,
+                    State = TickDataState.Failed,
+                    ErrorMessage = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
+        /// Market phase enumeration for timing-based data fetching
+        /// </summary>
+        private enum MarketPhase
+        {
+            PreMarket,    // Before 9:00 AM IST
+            MarketHours,  // 9:15 AM - 3:30 PM IST
+            PostMarket    // After 3:30 PM IST
+        }
+
+        /// <summary>
+        /// Result of determining which days to fetch
+        /// </summary>
+        private class DaysToFetchResult
+        {
+            public MarketPhase Phase { get; set; }
+            public List<DateTime> Dates { get; set; } = new List<DateTime>();
+        }
+
+        /// <summary>
+        /// Get current time in IST timezone
+        /// </summary>
+        private DateTime GetCurrentIstTime()
+        {
+            TimeZoneInfo istZone = TimeZoneInfo.FindSystemTimeZoneById(Classes.Constants.IndianTimeZoneId);
+            return TimeZoneInfo.ConvertTime(DateTime.Now, istZone);
+        }
+
+        /// <summary>
+        /// Determine which days to fetch based on current IST time.
+        /// - Pre-market (before 9 AM): fetch prior working day only
+        /// - Market hours (9:15 AM - 3:30 PM): fetch prior day + current day
+        /// - Post-market (after 3:30 PM): fetch prior day + current day
+        /// </summary>
+        private DaysToFetchResult GetDaysToFetch()
+        {
+            var result = new DaysToFetchResult();
+            var istNow = GetCurrentIstTime();
+            var timeOfDay = istNow.TimeOfDay;
+
+            // Market timing constants
+            var preMarketEnd = new TimeSpan(9, 0, 0);       // 9:00 AM
+            var marketOpen = new TimeSpan(9, 15, 0);        // 9:15 AM
+            var marketClose = new TimeSpan(15, 30, 0);      // 3:30 PM
+
+            // Determine market phase
+            if (timeOfDay < preMarketEnd)
+            {
+                result.Phase = MarketPhase.PreMarket;
+            }
+            else if (timeOfDay >= marketOpen && timeOfDay <= marketClose)
+            {
+                result.Phase = MarketPhase.MarketHours;
+            }
+            else
+            {
+                result.Phase = MarketPhase.PostMarket;
+            }
+
+            // Get prior working day
+            DateTime priorWorkingDay = HolidayCalendarService.Instance.GetPriorWorkingDay();
+            DateTime today = istNow.Date;
+
+            switch (result.Phase)
+            {
+                case MarketPhase.PreMarket:
+                    // Only fetch prior working day
+                    result.Dates.Add(priorWorkingDay);
+                    IciciApiLogger.Debug($"[GetDaysToFetch] PreMarket ({istNow:HH:mm}): fetching prior day {priorWorkingDay:yyyy-MM-dd}");
+                    break;
+
+                case MarketPhase.MarketHours:
+                    // Fetch prior day + current day (up to current time)
+                    result.Dates.Add(priorWorkingDay);
+                    result.Dates.Add(today);
+                    IciciApiLogger.Debug($"[GetDaysToFetch] MarketHours ({istNow:HH:mm}): fetching prior {priorWorkingDay:yyyy-MM-dd} + today {today:yyyy-MM-dd}");
+                    break;
+
+                case MarketPhase.PostMarket:
+                    // Fetch prior day + current day (full day)
+                    result.Dates.Add(priorWorkingDay);
+                    result.Dates.Add(today);
+                    IciciApiLogger.Debug($"[GetDaysToFetch] PostMarket ({istNow:HH:mm}): fetching prior {priorWorkingDay:yyyy-MM-dd} + today {today:yyyy-MM-dd}");
+                    break;
+            }
+
+            // Remove duplicates (in case prior working day is today - shouldn't happen but safety)
+            result.Dates = result.Dates.Distinct().OrderBy(d => d).ToList();
+
+            return result;
+        }
+
+        /// <summary>
+        /// Trigger NinjaTrader to refresh/reload bars for an instrument.
+        /// This causes NT8 to call BarsWorker again, which will now find the cached data.
+        /// </summary>
+        private async Task TriggerNT8BarsRefreshAsync(string zerodhaSymbol)
+        {
+            try
+            {
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        var ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
+                        if (ntInstrument == null)
+                        {
+                            IciciApiLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Instrument not found, skipping refresh");
+                            return;
+                        }
+
+                        // Force a bars reload by creating a new BarsRequest
+                        // This triggers BarsWorker which will now find the cached ICICI data
+                        var barsRequest = new BarsRequest(ntInstrument, 1);
+                        barsRequest.BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Tick, Value = 1 };
+                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                        barsRequest.FromLocal = DateTime.Today.AddHours(9).AddMinutes(15);
+                        barsRequest.ToLocal = DateTime.Today.AddHours(15).AddMinutes(30);
+
+                        barsRequest.Request((result, error, msg) =>
+                        {
+                            if (error == ErrorCode.NoError)
+                            {
+                                IciciApiLogger.Info($"[NT8-REFRESH] {zerodhaSymbol}: Bars refresh triggered successfully");
+                            }
+                            else
+                            {
+                                IciciApiLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Refresh completed with {error}");
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        IciciApiLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Exception: {ex.Message}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                IciciApiLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Dispatcher exception: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Parse a Zerodha option symbol to extract underlying, expiry, strike, and option type.
+        /// Example: SENSEX2610884200CE -> SENSEX, 2026-10-08, 84200, CE
+        /// </summary>
+        private OptionSymbolInfo ParseZerodhaOptionSymbol(string symbol)
+        {
+            if (string.IsNullOrEmpty(symbol))
+                return null;
+
+            try
+            {
+                // Determine option type
+                string optionType = null;
+                if (symbol.EndsWith("CE"))
+                    optionType = "CE";
+                else if (symbol.EndsWith("PE"))
+                    optionType = "PE";
+                else
+                    return null;
+
+                // Remove option type suffix
+                string remaining = symbol.Substring(0, symbol.Length - 2);
+
+                // Find the underlying (SENSEX, NIFTY, BANKNIFTY, etc.)
+                string underlying = null;
+                foreach (var known in new[] { "SENSEX", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY" })
+                {
+                    if (remaining.StartsWith(known))
+                    {
+                        underlying = known;
+                        remaining = remaining.Substring(known.Length);
+                        break;
+                    }
+                }
+
+                if (underlying == null)
+                    return null;
+
+                // Remaining should be YYMMDDSSSSS (date + strike)
+                // Date is first 5 chars: YYMDD (e.g., 26108 = 2026-10-08)
+                if (remaining.Length < 6)
+                    return null;
+
+                string dateStr = remaining.Substring(0, 5);
+                string strikeStr = remaining.Substring(5);
+
+                int year = 2000 + int.Parse(dateStr.Substring(0, 2));
+                int month = int.Parse(dateStr.Substring(2, 2));
+                int day = int.Parse(dateStr.Substring(4, 1));
+
+                // Handle single-digit day (1-9) vs double-digit encoding
+                // Actually Zerodha uses YYMDD where DD can be 01-31 encoded as 01-09, 0A-0V (hex-ish)
+                // Let's try a simpler approach - parse the full date properly
+                // Format is actually YYMDD where M is 1-9,O,N,D for months and D is 01-31
+                // This gets complex - let's use a regex approach
+
+                // Simpler: assume format YYMD... where Y=year, M=month code, D=day
+                // Month codes: 1-9 for Jan-Sep, O=Oct, N=Nov, D=Dec
+                char monthChar = dateStr[2];
+                if (monthChar >= '1' && monthChar <= '9')
+                    month = monthChar - '0';
+                else if (monthChar == 'O')
+                    month = 10;
+                else if (monthChar == 'N')
+                    month = 11;
+                else if (monthChar == 'D')
+                    month = 12;
+
+                day = int.Parse(dateStr.Substring(3, 2));
+
+                DateTime expiry = new DateTime(year, month, day);
+                int strike = int.Parse(strikeStr);
+
+                return new OptionSymbolInfo
+                {
+                    Underlying = underlying,
+                    Expiry = expiry,
+                    Strike = strike,
+                    OptionType = optionType
+                };
+            }
+            catch (Exception ex)
+            {
+                IciciApiLogger.Debug($"[ParseSymbol] Error parsing {symbol}: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Process a download request from the queue.
+        /// This is the internal handler that executes when a queued request is consumed.
+        /// </summary>
+        private async Task ProcessDownloadRequestAsync(HistoricalDownloadRequest request)
+        {
+            if (request == null)
+            {
+                IciciApiLogger.Warn("[IciciHistoricalTickDataService] ProcessDownloadRequestAsync: null request");
+                return;
+            }
+
+            // Check how old the request is - skip stale requests (older than 5 minutes)
+            var age = DateTime.Now - request.QueuedAt;
+            if (age.TotalMinutes > 5)
+            {
+                IciciApiLogger.Warn($"[IciciHistoricalTickDataService] Skipping stale request (age={age.TotalMinutes:F1}min): {request}");
+                return;
+            }
+
+            await DownloadOptionChainHistoryAsync(
+                request.Underlying,
+                request.Expiry,
+                request.ProjectedAtmStrike,
+                request.Strikes,
+                request.ZerodhaSymbolMap,
+                request.HistoricalDate);
+        }
+
+        #endregion
+
+        #region Historical Data Fetching
+
+        /// <summary>
+        /// Download historical tick data for option chain using center-out propagation.
+        /// Starts from projected open strike (accounting for overnight gap) and propagates
+        /// simultaneously upward and downward.
+        ///
+        /// Propagation order:
+        /// 1. Center strike CE + PE
+        /// 2. Center+1 CE/PE AND Center-1 CE/PE (simultaneously up and down)
+        /// 3. Center+2 CE/PE AND Center-2 CE/PE
+        /// ... and so on
+        ///
+        /// NOTE: Prefer using QueueDownloadRequest() which handles race conditions automatically.
+        /// </summary>
+        /// <param name="underlying">Underlying symbol (e.g., "NIFTY")</param>
+        /// <param name="expiry">Expiry date</param>
+        /// <param name="projectedOpenStrike">Projected open strike (accounts for overnight price action)</param>
+        /// <param name="strikes">List of all strikes to download</param>
+        /// <param name="zerodhaSymbolMap">Optional mapping of (strike,optionType) to Zerodha trading symbol for NT persistence</param>
+        /// <param name="historicalDate">Date to fetch history for (defaults to prior working day)</param>
+        public async Task DownloadOptionChainHistoryAsync(
+            string underlying,
+            DateTime expiry,
+            int projectedOpenStrike,
+            List<int> strikes,
+            Dictionary<(int strike, string optionType), string> zerodhaSymbolMap = null,
+            DateTime? historicalDate = null)
+        {
+            if (!IsReady)
+            {
+                IciciApiLogger.Warn("[IciciHistoricalTickDataService] Cannot download - not ready (use QueueDownloadRequest instead)");
                 return;
             }
 
@@ -385,20 +1100,24 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 DateTime targetDate = historicalDate ?? HolidayCalendarService.Instance.GetPriorWorkingDay();
                 IciciApiLogger.LogBatchStart(underlying, expiry, strikes.Count, PARALLEL_STRIKES);
 
-                // Sort strikes by distance from ATM (center-out)
-                var orderedStrikes = strikes
-                    .OrderBy(s => Math.Abs(s - projectedAtmStrike))
-                    .ToList();
+                // Build center-out propagation order
+                // Start from projected open strike and expand outward (up and down simultaneously)
+                var centerOutStrikes = BuildCenterOutStrikeOrder(strikes, projectedOpenStrike);
 
-                IciciApiLogger.Info($"[IciciHistoricalTickDataService] Projected ATM={projectedAtmStrike}, Total strikes={orderedStrikes.Count}, TargetDate={targetDate:yyyy-MM-dd}");
+                IciciApiLogger.Info($"[IciciHistoricalTickDataService] Projected Open Strike={projectedOpenStrike}, Total strikes={centerOutStrikes.Count}, TargetDate={targetDate:yyyy-MM-dd}");
+                IciciApiLogger.Debug($"[CENTER-OUT] First 10 strikes in order: {string.Join(", ", centerOutStrikes.Take(10))}");
+
+                // Store zerodha symbol map for use in DownloadStrikeDataAsync
+                _currentZerodhaSymbolMap = zerodhaSymbolMap;
 
                 // Process in parallel batches of PARALLEL_STRIKES
-                int totalStrikes = orderedStrikes.Count * 2; // CE + PE for each strike
-                int completedStrikes = 0;
+                // Each batch processes N strikes with both CE and PE
+                int totalOptions = centerOutStrikes.Count * 2; // CE + PE for each strike
+                int completedOptions = 0;
 
-                for (int i = 0; i < orderedStrikes.Count; i += PARALLEL_STRIKES)
+                for (int i = 0; i < centerOutStrikes.Count; i += PARALLEL_STRIKES)
                 {
-                    var batch = orderedStrikes.Skip(i).Take(PARALLEL_STRIKES).ToList();
+                    var batch = centerOutStrikes.Skip(i).Take(PARALLEL_STRIKES).ToList();
                     var tasks = new List<Task>();
 
                     foreach (var strike in batch)
@@ -409,18 +1128,18 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     }
 
                     await Task.WhenAll(tasks);
-                    completedStrikes += batch.Count * 2;
+                    completedOptions += batch.Count * 2;
 
                     _progressSubject.OnNext(new HistoricalDataDownloadProgress
                     {
-                        TotalStrikes = totalStrikes,
-                        CompletedStrikes = completedStrikes,
+                        TotalStrikes = totalOptions,
+                        CompletedStrikes = completedOptions,
                         CurrentBatch = batch,
-                        PercentComplete = (double)completedStrikes / totalStrikes * 100
+                        PercentComplete = (double)completedOptions / totalOptions * 100
                     });
 
                     // Rate limiting between batches
-                    if (i + PARALLEL_STRIKES < orderedStrikes.Count)
+                    if (i + PARALLEL_STRIKES < centerOutStrikes.Count)
                     {
                         await Task.Delay(RATE_LIMIT_DELAY_MS);
                     }
@@ -429,10 +1148,10 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 _serviceStatusSubject.OnNext(new HistoricalDataServiceStatus
                 {
                     State = HistoricalDataState.Ready,
-                    Message = $"Downloaded {completedStrikes} strike options history"
+                    Message = $"Downloaded {completedOptions} strike options history"
                 });
 
-                IciciApiLogger.LogBatchComplete(underlying, expiry, completedStrikes, 0, 0);
+                IciciApiLogger.LogBatchComplete(underlying, expiry, completedOptions, 0, 0);
             }
             catch (Exception ex)
             {
@@ -450,6 +1169,52 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         }
 
         /// <summary>
+        /// Build center-out strike order starting from projected open strike.
+        /// Returns strikes in order: center, center+1, center-1, center+2, center-2, ...
+        /// This ensures we download the most relevant strikes first (near the projected open).
+        /// </summary>
+        private List<int> BuildCenterOutStrikeOrder(List<int> allStrikes, int projectedOpenStrike)
+        {
+            if (allStrikes == null || allStrikes.Count == 0)
+                return new List<int>();
+
+            // Sort strikes to find positions
+            var sortedStrikes = allStrikes.OrderBy(s => s).ToList();
+
+            // Find the center strike (closest to projected open)
+            int centerStrike = sortedStrikes.OrderBy(s => Math.Abs(s - projectedOpenStrike)).First();
+            int centerIndex = sortedStrikes.IndexOf(centerStrike);
+
+            var result = new List<int>();
+
+            // Add center strike first
+            result.Add(centerStrike);
+
+            // Expand outward - alternate between up and down
+            int upIndex = centerIndex + 1;
+            int downIndex = centerIndex - 1;
+
+            while (upIndex < sortedStrikes.Count || downIndex >= 0)
+            {
+                // Add strike above center
+                if (upIndex < sortedStrikes.Count)
+                {
+                    result.Add(sortedStrikes[upIndex]);
+                    upIndex++;
+                }
+
+                // Add strike below center
+                if (downIndex >= 0)
+                {
+                    result.Add(sortedStrikes[downIndex]);
+                    downIndex--;
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
         /// Download historical data for a single strike
         /// </summary>
         private async Task DownloadStrikeDataAsync(
@@ -461,33 +1226,55 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             string strikeKey = GetStrikeKey(underlying, expiry, strike, optionType);
 
-            // Skip if already downloaded
+            // Skip if already downloaded in this session
             if (_downloadedStrikes.ContainsKey(strikeKey))
             {
-                IciciApiLogger.Debug($"[IciciHistoricalTickDataService] Skipping {strikeKey} - already downloaded");
+                IciciApiLogger.Debug($"[IciciHistoricalTickDataService] Skipping {strikeKey} - already downloaded this session");
                 return;
             }
 
-            try
+            // Get Zerodha symbol for this strike
+            string zerodhaSymbol = null;
+            if (_currentZerodhaSymbolMap != null)
             {
-                // Market hours: 9:15 AM to 3:30 PM IST
-                // But user requested 15:30 to 11:00 check range for NT8 database
-                DateTime fromTime = targetDate.Date.AddHours(9).AddMinutes(15);
-                DateTime toTime = targetDate.Date.AddHours(15).AddMinutes(30);
+                _currentZerodhaSymbolMap.TryGetValue((strike, optionType), out zerodhaSymbol);
+            }
 
-                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            if (string.IsNullOrEmpty(zerodhaSymbol))
+            {
+                // Try to lookup symbol from InstrumentManager
+                string segment = underlying == "SENSEX" ? "BFO-OPT" : "NFO-OPT";
+                var (token, symbol) = InstrumentManager.Instance.LookupOptionDetails(
+                    segment, underlying, expiry.ToString("yyyy-MM-dd"), strike, optionType);
+                zerodhaSymbol = symbol;
+            }
 
-                var candles = await DownloadSecondDataInChunksAsync(
-                    underlying, strike, optionType, expiry, fromTime, toTime);
-
-                stopwatch.Stop();
-
-                if (candles != null && candles.Count > 0)
+            // Check if NT8 database already has tick data for this symbol and date
+            if (!string.IsNullOrEmpty(zerodhaSymbol))
+            {
+                bool hasExistingData = await HasTickDataInNT8Async(zerodhaSymbol, targetDate);
+                if (hasExistingData)
                 {
-                    _tickDataCache[strikeKey] = candles;
+                    IciciApiLogger.Info($"[IciciHistoricalTickDataService] Skipping {strikeKey} - NT8 already has tick data for {targetDate:yyyy-MM-dd}");
+                    _downloadedStrikes[strikeKey] = true; // Mark as done
+                    return;
+                }
+            }
+
+            // Check SQLite cache for this symbol and date
+            if (!string.IsNullOrEmpty(zerodhaSymbol) && IciciTickCacheDb.Instance.HasCachedData(zerodhaSymbol, targetDate))
+            {
+                var cachedCandles = IciciTickCacheDb.Instance.GetCachedTicks(zerodhaSymbol, targetDate);
+                if (cachedCandles != null && cachedCandles.Count > 0)
+                {
+                    IciciApiLogger.Info($"[IciciHistoricalTickDataService] CACHE HIT: {strikeKey} - using {cachedCandles.Count} cached ticks for {targetDate:yyyy-MM-dd}");
+                    _tickDataCache[strikeKey] = cachedCandles;
                     _downloadedStrikes[strikeKey] = true;
 
-                    // Emit status update for this strike
+                    // Persist cached data to NinjaTrader database
+                    await PersistToNinjaTraderDatabaseAsync(zerodhaSymbol, cachedCandles);
+
+                    // Emit status update
                     var subject = _strikeStatusSubjects.GetOrAdd(strikeKey,
                         _ => new BehaviorSubject<StrikeHistoricalDataStatus>(
                             new StrikeHistoricalDataStatus { StrikeKey = strikeKey, IsAvailable = false }));
@@ -496,16 +1283,79 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     {
                         StrikeKey = strikeKey,
                         IsAvailable = true,
-                        CandleCount = candles.Count,
-                        FirstTimestamp = candles.First().DateTime,
-                        LastTimestamp = candles.Last().DateTime
+                        CandleCount = cachedCandles.Count,
+                        FirstTimestamp = cachedCandles.First().DateTime,
+                        LastTimestamp = cachedCandles.Last().DateTime,
+                        ZerodhaSymbol = zerodhaSymbol
                     });
 
-                    IciciApiLogger.LogStrikeComplete(underlying, strike, optionType, candles.Count, stopwatch.ElapsedMilliseconds);
+                    return;
+                }
+            }
+
+            try
+            {
+                // Market hours: 9:15 AM to 3:30 PM IST
+                DateTime fromTime = targetDate.Date.AddHours(9).AddMinutes(15);
+                DateTime toTime = targetDate.Date.AddHours(15).AddMinutes(30);
+
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+                // CACHE MISS - Call ICICI API
+                IciciApiLogger.Debug($"[IciciHistoricalTickDataService] CACHE MISS: {strikeKey} - calling ICICI API");
+                var candles = await DownloadSecondDataInChunksAsync(
+                    underlying, strike, optionType, expiry, fromTime, toTime);
+
+                stopwatch.Stop();
+
+                if (candles != null && candles.Count > 0)
+                {
+                    // Filter zero-volume ticks before caching
+                    var filteredCandles = candles.Where(c => c.Volume > 0).ToList();
+                    int removedCount = candles.Count - filteredCandles.Count;
+                    if (removedCount > 0)
+                    {
+                        IciciApiLogger.Info($"[IciciHistoricalTickDataService] Filtered {removedCount} zero-volume ticks for {strikeKey}");
+                    }
+
+                    if (filteredCandles.Count > 0)
+                    {
+                        _tickDataCache[strikeKey] = filteredCandles;
+                        _downloadedStrikes[strikeKey] = true;
+
+                        // Cache to SQLite - BarsWorker will serve this when NT requests tick data
+                        if (!string.IsNullOrEmpty(zerodhaSymbol))
+                        {
+                            IciciTickCacheDb.Instance.CacheTicks(zerodhaSymbol, targetDate, filteredCandles);
+                            IciciApiLogger.Info($"[IciciHistoricalTickDataService] Cached {filteredCandles.Count} ticks for {zerodhaSymbol} in SQLite");
+                        }
+
+                        // Emit status update for this strike
+                        var subject = _strikeStatusSubjects.GetOrAdd(strikeKey,
+                            _ => new BehaviorSubject<StrikeHistoricalDataStatus>(
+                                new StrikeHistoricalDataStatus { StrikeKey = strikeKey, IsAvailable = false }));
+
+                        subject.OnNext(new StrikeHistoricalDataStatus
+                        {
+                            StrikeKey = strikeKey,
+                            IsAvailable = true,
+                            CandleCount = filteredCandles.Count,
+                            FirstTimestamp = filteredCandles.First().DateTime,
+                            LastTimestamp = filteredCandles.Last().DateTime,
+                            ZerodhaSymbol = zerodhaSymbol
+                        });
+
+                        IciciApiLogger.LogStrikeComplete(underlying, strike, optionType, filteredCandles.Count, stopwatch.ElapsedMilliseconds);
+                    }
+                    else
+                    {
+                        IciciApiLogger.Warn($"[IciciHistoricalTickDataService] {strikeKey}: All ticks filtered out (zero volume)");
+                        _downloadedStrikes[strikeKey] = true; // Mark as attempted
+                    }
                 }
                 else
                 {
-                    IciciApiLogger.Warn($"[IciciHistoricalTickDataService] {strikeKey}: No data received");
+                    IciciApiLogger.Warn($"[IciciHistoricalTickDataService] {strikeKey}: No data received from API");
                     _downloadedStrikes[strikeKey] = true; // Mark as attempted
                 }
             }
@@ -515,8 +1365,13 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
         }
 
+        // Retry configuration
+        private const int MAX_RETRIES = 2;
+        private const int INITIAL_BACKOFF_MS = 500;
+
         /// <summary>
-        /// Download 1-second data in chunks (max 999 seconds per call)
+        /// Download 1-second data in chunks (max 999 seconds per call).
+        /// Implements retry with exponential backoff for failed chunks.
         /// </summary>
         private async Task<List<HistoricalCandle>> DownloadSecondDataInChunksAsync(
             string symbol,
@@ -528,27 +1383,95 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             var allData = new List<HistoricalCandle>();
             var currentStart = fromDate;
+            int chunkNumber = 0;
+            int totalChunks = (int)Math.Ceiling((toDate - fromDate).TotalSeconds / MAX_SECONDS_PER_CALL);
+            int failedChunks = 0;
+            var failedRanges = new List<string>();
+
+            IciciApiLogger.Info($"[CHUNK-DL] Starting download: {symbol} {strikePrice}{optionType}, {totalChunks} chunks from {fromDate:HH:mm:ss} to {toDate:HH:mm:ss}");
 
             while (currentStart < toDate)
             {
+                chunkNumber++;
                 var chunkEnd = currentStart.AddSeconds(MAX_SECONDS_PER_CALL);
                 if (chunkEnd > toDate)
                     chunkEnd = toDate;
 
-                var response = await GetOptionsHistoricalDataAsync(
-                    symbol, strikePrice, optionType, expiryDate,
-                    currentStart, chunkEnd, "1second");
+                bool chunkSuccess = false;
+                HistoricalDataResponse response = null;
 
-                if (response.Success && response.Data != null)
+                // Retry loop with exponential backoff
+                for (int attempt = 0; attempt <= MAX_RETRIES; attempt++)
                 {
-                    allData.AddRange(response.Data);
+                    try
+                    {
+                        if (attempt > 0)
+                        {
+                            int backoffMs = INITIAL_BACKOFF_MS * (int)Math.Pow(2, attempt - 1);
+                            IciciApiLogger.Info($"[CHUNK-DL] Retry {attempt}/{MAX_RETRIES} for chunk {chunkNumber}/{totalChunks} after {backoffMs}ms backoff");
+                            await Task.Delay(backoffMs);
+                        }
+
+                        response = await GetOptionsHistoricalDataAsync(
+                            symbol, strikePrice, optionType, expiryDate,
+                            currentStart, chunkEnd, "1second");
+
+                        if (response.Success && response.Data != null)
+                        {
+                            allData.AddRange(response.Data);
+                            chunkSuccess = true;
+
+                            if (attempt > 0)
+                            {
+                                IciciApiLogger.Info($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} succeeded on retry {attempt}: {response.Data.Count} records");
+                            }
+                            break; // Success, exit retry loop
+                        }
+                        else
+                        {
+                            string errorMsg = response?.Error ?? "Unknown error";
+                            IciciApiLogger.Warn($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} failed (attempt {attempt + 1}): {errorMsg}");
+
+                            // Don't retry on certain errors
+                            if (errorMsg.Contains("No data") || errorMsg.Contains("session"))
+                            {
+                                IciciApiLogger.Debug($"[CHUNK-DL] Non-retryable error, skipping remaining retries");
+                                break;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        IciciApiLogger.Error($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} exception (attempt {attempt + 1}): {ex.Message}");
+
+                        // Continue to retry unless it's a fatal error
+                        if (ex is OutOfMemoryException || ex is StackOverflowException)
+                            throw;
+                    }
+                }
+
+                if (!chunkSuccess)
+                {
+                    failedChunks++;
+                    failedRanges.Add($"{currentStart:HH:mm:ss}-{chunkEnd:HH:mm:ss}");
+                    IciciApiLogger.Error($"[CHUNK-DL] FAILED chunk {chunkNumber}/{totalChunks} ({currentStart:HH:mm:ss}-{chunkEnd:HH:mm:ss}) after {MAX_RETRIES + 1} attempts");
                 }
 
                 currentStart = chunkEnd;
 
-                // Small delay between chunks
+                // Small delay between chunks to avoid rate limiting
                 if (currentStart < toDate)
                     await Task.Delay(100);
+            }
+
+            // Log summary
+            if (failedChunks > 0)
+            {
+                IciciApiLogger.Warn($"[CHUNK-DL] Download complete with {failedChunks}/{totalChunks} failed chunks. Missing ranges: {string.Join(", ", failedRanges)}");
+            }
+            else
+            {
+                IciciApiLogger.Info($"[CHUNK-DL] Download complete: {allData.Count} total records from {totalChunks} chunks");
             }
 
             return allData;
@@ -693,6 +1616,264 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #endregion
 
+        #region NT Database Check & Persistence
+
+        /// <summary>
+        /// Checks if NT8 database already has tick data for the given symbol and date.
+        /// Uses BarsRequest to query existing data.
+        /// </summary>
+        /// <param name="zerodhaSymbol">The Zerodha trading symbol (e.g., SENSEX2610884200CE)</param>
+        /// <param name="targetDate">The date to check for tick data</param>
+        /// <returns>True if tick data exists for that date, false otherwise</returns>
+        public async Task<bool> HasTickDataInNT8Async(string zerodhaSymbol, DateTime targetDate)
+        {
+            if (string.IsNullOrEmpty(zerodhaSymbol))
+            {
+                IciciApiLogger.Info($"[NT8-CHECK] Symbol is null/empty, returning false");
+                return false;
+            }
+
+            bool hasData = false;
+            bool requestCompleted = false;
+            string diagnosticInfo = "";
+
+            IciciApiLogger.Info($"[NT8-CHECK] START checking {zerodhaSymbol} for {targetDate:yyyy-MM-dd}");
+
+            try
+            {
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        IciciApiLogger.Info($"[NT8-CHECK] Inside dispatcher for {zerodhaSymbol}");
+
+                        var ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
+                        if (ntInstrument == null)
+                        {
+                            diagnosticInfo = "Instrument not found in NT8";
+                            IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
+                            return;
+                        }
+
+                        IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Instrument found, FullName={ntInstrument.FullName}, Exchange={ntInstrument.Exchange}");
+
+                        // Create a BarsRequest to check for existing tick data
+                        DateTime fromTime = targetDate.Date.AddHours(9).AddMinutes(15);  // 9:15 AM
+                        DateTime toTime = targetDate.Date.AddHours(15).AddMinutes(30);   // 3:30 PM
+
+                        IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Requesting ticks from {fromTime:HH:mm} to {toTime:HH:mm}");
+
+                        var barsRequest = new BarsRequest(ntInstrument, 100); // Request up to 100 bars to check
+                        barsRequest.BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Tick, Value = 1 };
+                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                        barsRequest.FromLocal = fromTime;
+                        barsRequest.ToLocal = toTime;
+
+                        IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: BarsRequest created - BarsPeriodType={barsRequest.BarsPeriod.BarsPeriodType}, Value={barsRequest.BarsPeriod.Value}");
+
+                        var completionEvent = new ManualResetEventSlim(false);
+
+                        barsRequest.Request((barsResult, errorCode, errorMessage) =>
+                        {
+                            requestCompleted = true;
+
+                            if (errorCode == ErrorCode.NoError)
+                            {
+                                if (barsResult != null && barsResult.Bars != null)
+                                {
+                                    int barCount = barsResult.Bars.Count;
+                                    if (barCount > 0)
+                                    {
+                                        hasData = true;
+                                        var firstBar = barsResult.Bars.GetTime(0);
+                                        var lastBar = barsResult.Bars.GetTime(barCount - 1);
+                                        diagnosticInfo = $"FOUND {barCount} ticks ({firstBar:HH:mm:ss} to {lastBar:HH:mm:ss})";
+                                    }
+                                    else
+                                    {
+                                        diagnosticInfo = "BarsRequest returned 0 bars";
+                                    }
+                                }
+                                else
+                                {
+                                    diagnosticInfo = $"BarsResult null={barsResult == null}, Bars null={barsResult?.Bars == null}";
+                                }
+                            }
+                            else
+                            {
+                                diagnosticInfo = $"ErrorCode={errorCode}, Message={errorMessage}";
+                            }
+
+                            IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Callback - {diagnosticInfo}");
+                            completionEvent.Set();
+                        });
+
+                        // Wait for the request to complete (max 5 seconds)
+                        bool waitResult = completionEvent.Wait(TimeSpan.FromSeconds(5));
+                        if (!waitResult)
+                        {
+                            diagnosticInfo = "TIMEOUT - BarsRequest did not complete within 5 seconds";
+                            IciciApiLogger.Warn($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        diagnosticInfo = $"Exception: {ex.Message}";
+                        IciciApiLogger.Error($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                IciciApiLogger.Error($"[NT8-CHECK] {zerodhaSymbol}: Dispatcher exception: {ex.Message}");
+            }
+
+            IciciApiLogger.Info($"[NT8-CHECK] END {zerodhaSymbol}: hasData={hasData}, requestCompleted={requestCompleted}, info={diagnosticInfo}");
+            return hasData;
+        }
+
+        /// <summary>
+        /// Persists historical tick data to NinjaTrader database using the Zerodha symbol name.
+        /// Uses NinjaTrader's BarsRequest to write tick data.
+        /// </summary>
+        private async Task PersistToNinjaTraderDatabaseAsync(string zerodhaSymbol, List<HistoricalCandle> candles)
+        {
+            if (string.IsNullOrEmpty(zerodhaSymbol) || candles == null || candles.Count == 0)
+                return;
+
+            try
+            {
+                var firstCandle = candles.First();
+                var lastCandle = candles.Last();
+                IciciApiLogger.Info($"[NT8-PERSIST] START {zerodhaSymbol}: {candles.Count} ticks, range={firstCandle.DateTime:yyyy-MM-dd HH:mm:ss} to {lastCandle.DateTime:HH:mm:ss}");
+
+                // Get or create the NT instrument on the UI thread
+                Instrument ntInstrument = null;
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
+                    if (ntInstrument == null)
+                    {
+                        IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Instrument not found, attempting to create...");
+                        // Try to create it via InstrumentManager
+                        var mapping = InstrumentManager.Instance.GetMappingByNtSymbol(zerodhaSymbol);
+                        if (mapping != null)
+                        {
+                            string ntName;
+                            NinjaTraderHelper.CreateNTInstrumentFromMapping(mapping, out ntName);
+                            ntInstrument = Instrument.GetInstrument(ntName);
+                            IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Created instrument, ntName={ntName}");
+                        }
+                        else
+                        {
+                            IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: No mapping found in InstrumentManager");
+                        }
+                    }
+                    else
+                    {
+                        IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Instrument found, FullName={ntInstrument.FullName}");
+                    }
+                });
+
+                if (ntInstrument == null)
+                {
+                    IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Cannot persist - instrument not available in NT");
+                    return;
+                }
+
+                // Write ticks to NinjaTrader database via BarsUpdateRequest
+                // NinjaTrader's tick database is written via subscription mechanism
+                // We need to use the adapter's subscription to trigger persistence
+                var adapter = Connector.Instance?.GetAdapter() as ZerodhaAdapter;
+                if (adapter == null)
+                {
+                    IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Cannot persist - adapter not available");
+                    return;
+                }
+
+                // Subscribe to the instrument via the adapter - this enables NT database persistence
+                // NinjaTrader persists ticks when a subscription is active
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        // Subscribe with empty callback - enables NT persistence
+                        adapter.SubscribeMarketData(ntInstrument, (t, p, v, time, a5) => { });
+                        IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Subscribed to market data");
+                    }
+                    catch (Exception ex)
+                    {
+                        IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Subscription setup error: {ex.Message}");
+                    }
+                });
+
+                // Use BarsRequest to trigger NT to write historical data
+                // NT will call our BarsWorker which can serve the cached ICICI data
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        // Create a BarsRequest - NT will call BarsWorker to get data
+                        // Using Tick type to match HasTickDataInNT8Async check (in Indian markets, tick ≈ second)
+                        var barsRequest = new BarsRequest(ntInstrument, candles.Count);
+                        barsRequest.BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Tick, Value = 1 };
+                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                        barsRequest.FromLocal = candles.First().DateTime;
+                        barsRequest.ToLocal = candles.Last().DateTime;
+                        barsRequest.IsResetOnNewTradingDay = false;
+
+                        IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest created - Type=Tick, From={barsRequest.FromLocal:HH:mm:ss}, To={barsRequest.ToLocal:HH:mm:ss}");
+
+                        barsRequest.Request((barsResult, errorCode, errorMessage) =>
+                        {
+                            if (errorCode == ErrorCode.NoError)
+                            {
+                                // Now add our ICICI historical data to the bars
+                                if (barsResult != null && barsResult.Bars != null)
+                                {
+                                    int beforeCount = barsResult.Bars.Count;
+                                    foreach (var candle in candles)
+                                    {
+                                        barsResult.Bars.Add(
+                                            (double)candle.Open,
+                                            (double)candle.High,
+                                            (double)candle.Low,
+                                            (double)candle.Close,
+                                            candle.DateTime,
+                                            candle.Volume,
+                                            double.MinValue,
+                                            double.MinValue);
+                                    }
+                                    int afterCount = barsResult.Bars.Count;
+                                    IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback SUCCESS - added {candles.Count} bars (before={beforeCount}, after={afterCount})");
+                                }
+                                else
+                                {
+                                    IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback - barsResult or Bars is null");
+                                }
+                            }
+                            else
+                            {
+                                IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback FAILED - ErrorCode={errorCode}, Message={errorMessage}");
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        IciciApiLogger.Error($"[NT8-PERSIST] {zerodhaSymbol}: Exception creating BarsRequest: {ex.Message}");
+                    }
+                });
+
+                IciciApiLogger.Info($"[NT8-PERSIST] END {zerodhaSymbol}: Persistence initiated");
+            }
+            catch (Exception ex)
+            {
+                IciciApiLogger.Error($"[IciciHistoricalTickDataService] PersistToNinjaTraderDatabaseAsync error: {ex.Message}");
+            }
+        }
+
+        #endregion
+
         #region Data Access
 
         /// <summary>
@@ -813,6 +1994,10 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         public void Dispose()
         {
             _iciciStatusSubscription?.Dispose();
+            _requestQueueSubscription?.Dispose();
+            _instrumentQueueSubscription?.Dispose();
+            _requestQueue?.Dispose();
+            _instrumentRequestQueue?.Dispose();
             _serviceStatusSubject?.Dispose();
             _progressSubject?.Dispose();
 
@@ -821,6 +2006,12 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 subject?.Dispose();
             }
             _strikeStatusSubjects.Clear();
+
+            foreach (var subject in _instrumentStatusSubjects.Values)
+            {
+                subject?.Dispose();
+            }
+            _instrumentStatusSubjects.Clear();
 
             IciciApiLogger.Info("[IciciHistoricalTickDataService] Disposed");
         }
@@ -872,6 +2063,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         public int CandleCount { get; set; }
         public DateTime FirstTimestamp { get; set; }
         public DateTime LastTimestamp { get; set; }
+        public string ZerodhaSymbol { get; set; }
     }
 
     /// <summary>
@@ -901,6 +2093,84 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             return $"{DateTime:yyyy-MM-dd HH:mm:ss} | O:{Open:F2} H:{High:F2} L:{Low:F2} C:{Close:F2} V:{Volume}";
         }
+    }
+
+    /// <summary>
+    /// Request model for queued historical data downloads.
+    /// Encapsulates all parameters needed to download option chain history.
+    /// </summary>
+    public class HistoricalDownloadRequest
+    {
+        public string Underlying { get; set; }
+        public DateTime Expiry { get; set; }
+        public int ProjectedAtmStrike { get; set; }
+        public List<int> Strikes { get; set; }
+        public Dictionary<(int strike, string optionType), string> ZerodhaSymbolMap { get; set; }
+        public DateTime? HistoricalDate { get; set; }
+        public DateTime QueuedAt { get; set; } = DateTime.Now;
+
+        public override string ToString()
+        {
+            return $"{Underlying} {Expiry:dd-MMM-yy} ATM={ProjectedAtmStrike} Strikes={Strikes?.Count ?? 0}";
+        }
+    }
+
+    /// <summary>
+    /// Request model for per-instrument tick data download.
+    /// Used by BarsWorker when cache misses to queue background download.
+    /// </summary>
+    public class InstrumentTickDataRequest
+    {
+        public string ZerodhaSymbol { get; set; }
+        public DateTime TradeDate { get; set; }
+        public DateTime QueuedAt { get; set; } = DateTime.Now;
+
+        public override string ToString()
+        {
+            return $"{ZerodhaSymbol} for {TradeDate:yyyy-MM-dd}";
+        }
+    }
+
+    /// <summary>
+    /// State of per-instrument tick data download
+    /// </summary>
+    public enum TickDataState
+    {
+        Pending,
+        Queued,
+        Downloading,
+        Ready,
+        NoData,
+        Failed
+    }
+
+    /// <summary>
+    /// Status of per-instrument tick data download.
+    /// Subscribe to GetInstrumentTickStatusStream() to receive updates.
+    /// </summary>
+    public class InstrumentTickDataStatus
+    {
+        public string ZerodhaSymbol { get; set; }
+        public TickDataState State { get; set; }
+        public DateTime TradeDate { get; set; }
+        public int TickCount { get; set; }
+        public string ErrorMessage { get; set; }
+
+        public override string ToString()
+        {
+            return $"{ZerodhaSymbol}: {State} ({TickCount} ticks)";
+        }
+    }
+
+    /// <summary>
+    /// Parsed option symbol information
+    /// </summary>
+    internal class OptionSymbolInfo
+    {
+        public string Underlying { get; set; }
+        public DateTime Expiry { get; set; }
+        public int Strike { get; set; }
+        public string OptionType { get; set; }
     }
 
     #endregion

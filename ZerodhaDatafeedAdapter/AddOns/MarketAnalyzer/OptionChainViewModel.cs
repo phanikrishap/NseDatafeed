@@ -13,6 +13,7 @@ using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Analysis;
+using ZerodhaDatafeedAdapter.Services.Historical;
 using ZerodhaDatafeedAdapter.ViewModels;
 
 namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
@@ -229,6 +230,58 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             }
 
             StatusText = $"Loaded {Rows.Count} strikes for {Underlying}";
+
+            // Build Zerodha symbol map for NT database persistence
+            var zerodhaSymbolMap = new Dictionary<(int strike, string optionType), string>();
+            foreach (var row in Rows)
+            {
+                int strike = (int)row.Strike;
+                if (!string.IsNullOrEmpty(row.CESymbol))
+                    zerodhaSymbolMap[(strike, "CE")] = row.CESymbol;
+                if (!string.IsNullOrEmpty(row.PESymbol))
+                    zerodhaSymbolMap[(strike, "PE")] = row.PESymbol;
+            }
+
+            // Trigger ICICI historical tick data download (non-blocking)
+            TriggerIciciHistoricalDataDownload(first.underlying, first.expiry, strikeGroups.Select(g => (int)g.Key).ToList(), zerodhaSymbolMap);
+        }
+
+        /// <summary>
+        /// Triggers ICICI historical tick data download using the queue-based API.
+        /// The queue handles race conditions automatically - if service is not ready,
+        /// the request is buffered and processed when it becomes ready.
+        /// </summary>
+        private void TriggerIciciHistoricalDataDownload(string underlying, DateTime? expiry, List<int> strikes,
+            Dictionary<(int strike, string optionType), string> zerodhaSymbolMap)
+        {
+            if (!expiry.HasValue || strikes == null || strikes.Count == 0)
+            {
+                Logger.Debug("[OptionChainViewModel] Skipping ICICI historical download - missing expiry or strikes");
+                return;
+            }
+
+            // Find projected ATM strike (use middle strike as approximation, or current ATM if available)
+            int projectedAtm = strikes.Count > 0 ? strikes[strikes.Count / 2] : 0;
+
+            // Try to get current ATM from rows
+            var atmRow = Rows.FirstOrDefault(r => r.IsATM);
+            if (atmRow != null)
+            {
+                projectedAtm = (int)atmRow.Strike;
+            }
+
+            Logger.Info($"[OptionChainViewModel] Queueing ICICI historical download: {underlying} {expiry.Value:dd-MMM-yy} ATM={projectedAtm} Strikes={strikes.Count} SymbolMappings={zerodhaSymbolMap?.Count ?? 0}");
+
+            // Use the queue-based API - handles race conditions automatically
+            // If service is ready, processes immediately; if not, buffers until ready
+            IciciHistoricalTickDataService.Instance.QueueDownloadRequest(
+                underlying,
+                expiry.Value,
+                projectedAtm,
+                strikes,
+                zerodhaSymbolMap,
+                null  // Use prior working day
+            );
         }
 
         private void OnOptionPriceBatch(IList<OptionPriceUpdate> batch)

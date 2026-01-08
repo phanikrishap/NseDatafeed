@@ -116,7 +116,10 @@
       "Bash(powershell: Get-Content \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\index_mappings.json\" -ErrorAction SilentlyContinue)",
       "Bash(powershell: Test-Path \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\log4net.config\")",
       "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"ZerodhaDatafeedAdapter\\\\ZerodhaDatafeedAdapter.csproj\" -t:Build -p:Configuration=Debug -verbosity:minimal)",
-      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"ZerodhaDatafeedAdapter\\\\ZerodhaDatafeedAdapter.csproj\" -t:Rebuild -p:Configuration=Debug -verbosity:minimal)"
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"ZerodhaDatafeedAdapter\\\\ZerodhaDatafeedAdapter.csproj\" -t:Rebuild -p:Configuration=Debug -verbosity:minimal)",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\TokenGeneratorTest\\\\TokenGeneratorTest.csproj\" -t:Build -p:Configuration=Debug -verbosity:minimal)",
+      "Bash(TokenGeneratorTest.exe)",
+      "Bash(TokenGeneratorTest.exe:*)"
     ]
   }
 }

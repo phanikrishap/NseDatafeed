@@ -4,11 +4,13 @@ using NinjaTrader.Data;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading.Tasks;
 using ZerodhaAdapterAddOn.ViewModels;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaDatafeedAdapter.Classes;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Services.Historical;
 using ZerodhaDatafeedAdapter.SyntheticInstruments;
 using ZerodhaDatafeedAdapter.ViewModels;
 
@@ -115,9 +117,26 @@ namespace ZerodhaDatafeedAdapter
                     }
                     else if (barsRequest.Bars.BarsPeriod.BarsPeriodType == BarsPeriodType.Tick)
                     {
-                        // Tick data not available from Zerodha
-                        source = new List<Record>();
-                        Logger.Info("Historical tick data not available from Zerodha. Using empty history with real-time tick subscription.");
+                        // Try to get tick data from ICICI SQLite cache
+                        source = GetTickDataFromIciciCache(symbolName, fromDateWithTime, toDateWithTime);
+                        if (source != null && source.Count > 0)
+                        {
+                            Logger.Info($"[BarsWorker] Serving {source.Count} ticks from ICICI cache for {symbolName}");
+                        }
+                        else
+                        {
+                            // Cache miss - queue background download from ICICI (non-blocking)
+                            // ICICI will download in background and trigger NT8 refresh when ready
+                            if (symbolName.Contains("CE") || symbolName.Contains("PE"))
+                            {
+                                Logger.Info($"[BarsWorker] Cache miss for {symbolName} - queueing ICICI background download");
+                                IciciHistoricalTickDataService.Instance.QueueInstrumentTickRequest(symbolName, fromDateWithTime.Date);
+                            }
+
+                            // Return empty for now - realtime data will flow, ICICI will fill cache async
+                            source = new List<Record>();
+                            Logger.Info($"[BarsWorker] {symbolName}: Returning empty history, background download queued.");
+                        }
                     }
 
                     if (task != null)
@@ -285,6 +304,92 @@ namespace ZerodhaDatafeedAdapter
             string name = instrument.MasterInstrument.Name;
             return name.EndsWith("-NSE") || name.EndsWith("-BSE") ||
                    instrument.Exchange == Exchange.Nse || instrument.Exchange == Exchange.Bse;
+        }
+
+        /// <summary>
+        /// Get tick data from ICICI SQLite cache for BarsWorker.
+        /// Converts cached HistoricalCandle data to Record format.
+        /// Fetches data from multiple days based on the request date range.
+        /// </summary>
+        private List<Record> GetTickDataFromIciciCache(string symbol, DateTime fromDate, DateTime toDate)
+        {
+            try
+            {
+                // Check if this is an option symbol (contains CE or PE)
+                if (!symbol.Contains("CE") && !symbol.Contains("PE"))
+                {
+                    return null;
+                }
+
+                var records = new List<Record>();
+
+                // Get all dates between fromDate and toDate
+                var datesToCheck = new List<DateTime>();
+                DateTime currentDate = fromDate.Date;
+                while (currentDate <= toDate.Date)
+                {
+                    datesToCheck.Add(currentDate);
+                    currentDate = currentDate.AddDays(1);
+                }
+
+                Logger.Debug($"[GetTickDataFromIciciCache] Checking {datesToCheck.Count} date(s) for {symbol}: {string.Join(", ", datesToCheck.Select(d => d.ToString("yyyy-MM-dd")))}");
+
+                int totalCached = 0;
+                int daysWithData = 0;
+
+                // Check each date for cached data
+                foreach (var tradeDate in datesToCheck)
+                {
+                    if (!Services.Historical.IciciTickCacheDb.Instance.HasCachedData(symbol, tradeDate))
+                    {
+                        Logger.Debug($"[GetTickDataFromIciciCache] No cache for {symbol} on {tradeDate:yyyy-MM-dd}");
+                        continue;
+                    }
+
+                    var cachedTicks = Services.Historical.IciciTickCacheDb.Instance.GetCachedTicks(symbol, tradeDate);
+                    if (cachedTicks == null || cachedTicks.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    daysWithData++;
+
+                    // Convert HistoricalCandle to Record format
+                    foreach (var candle in cachedTicks)
+                    {
+                        // Filter by requested time range
+                        if (candle.DateTime >= fromDate && candle.DateTime <= toDate)
+                        {
+                            records.Add(new Record
+                            {
+                                TimeStamp = candle.DateTime,
+                                Open = (double)candle.Open,
+                                High = (double)candle.High,
+                                Low = (double)candle.Low,
+                                Close = (double)candle.Close,
+                                Volume = candle.Volume
+                            });
+                            totalCached++;
+                        }
+                    }
+                }
+
+                if (records.Count > 0)
+                {
+                    // Sort by timestamp to ensure proper order
+                    records = records.OrderBy(r => r.TimeStamp).ToList();
+                    Logger.Info($"[GetTickDataFromIciciCache] Found {records.Count} ticks for {symbol} from {daysWithData} day(s)");
+                    return records;
+                }
+
+                Logger.Debug($"[GetTickDataFromIciciCache] No cached data found for {symbol} in requested range");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[GetTickDataFromIciciCache] Error: {ex.Message}");
+                return null;
+            }
         }
 
         private class BarsRequest

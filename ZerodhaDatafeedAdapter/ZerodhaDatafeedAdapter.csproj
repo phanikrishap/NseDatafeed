@@ -188,6 +188,7 @@
     <Compile Include="Services\Auth\IciciDirectTokenGenerator.cs" />
     <Compile Include="Services\Auth\IciciDirectTokenService.cs" />
     <Compile Include="Services\Historical\IciciHistoricalTickDataService.cs" />
+    <Compile Include="Services\Historical\IciciTickCacheDb.cs" />
     <Compile Include="Services\Analysis\InstrumentBackfillService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerLogic.cs" />
     <Compile Include="Services\Analysis\NiftyFuturesMetricsService.cs" />

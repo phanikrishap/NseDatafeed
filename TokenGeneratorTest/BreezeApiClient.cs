@@ -244,17 +244,28 @@ namespace TokenGeneratorTest
             DateTime expiryDate,
             DateTime fromDate,
             DateTime toDate,
-            string interval = "1second")
+            string interval = "1second",
+            string explicitExchange = null)  // Optional: explicitly specify exchange (e.g., "BFO" for SENSEX)
         {
-            // Map symbol to stock code
+            // Map symbol to stock code (use as-is if not in map)
             string stockCode = SymbolMap.ContainsKey(symbol.ToUpper())
                 ? SymbolMap[symbol.ToUpper()]
                 : symbol;
 
-            // Get exchange code
-            string exchangeCode = ExchangeMap.ContainsKey(symbol.ToUpper())
-                ? ExchangeMap[symbol.ToUpper()]
-                : "NFO";
+            // Get exchange code - use explicit exchange if provided, otherwise lookup or default to NFO
+            string exchangeCode;
+            if (!string.IsNullOrEmpty(explicitExchange))
+            {
+                exchangeCode = explicitExchange;
+            }
+            else if (ExchangeMap.ContainsKey(symbol.ToUpper()))
+            {
+                exchangeCode = ExchangeMap[symbol.ToUpper()];
+            }
+            else
+            {
+                exchangeCode = "NFO";
+            }
 
             // Map option type
             string right = optionType.ToUpper() == "CE" ? "call" : "put";
