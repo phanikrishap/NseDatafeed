@@ -20,6 +20,18 @@ ZerodhaDatafeedAdapter serves as a bridge between NinjaTrader 8 and the Zerodha 
 - **Projected Open Calculations**: Uses GIFT NIFTY to project market opens
 - **0DTE/1DTE Selection**: Automatic selection of optimal expiry based on DTE
 
+### Nifty Futures Volume Profile
+Real-time Volume Profile analysis for NIFTY Futures with buy/sell classification:
+
+- **Session Volume Profile**: POC, VAH, VAL, VWAP calculated from session start
+- **Rolling Volume Profile**: 60-minute rolling window for short-term context
+- **HVN Buy/Sell Classification**: High Volume Nodes classified by price relative to close
+  - HVN Buy: Nodes at/below close (support zones)
+  - HVN Sell: Nodes above close (resistance zones)
+- **Relative Metrics**: Current values compared to historical time-of-day averages
+- **Cumulative Metrics**: Session totals ranked against reference benchmarks
+- **RangeATR Bars**: Tick-accurate volume attribution using custom bar type
+
 ### TBS Manager (Time-Based Straddle)
 - **Excel-Based Configuration**: Read straddle configs from `tbsConfig.xlsx`
 - **Multi-Tranche Support**: Multiple entry/exit times per day
@@ -134,6 +146,10 @@ The adapter uses modern event-driven patterns to eliminate "Sleep & Hope" anti-p
 | **TBSConfigurationService**| Excel-driven strategy configuration and tranche management |
 | **InstrumentManager** | Orchestrates symbol mapping and SQLite-based instrument caching |
 | **TickCacheManager** | Efficiently manages last-known-tick caching and replay for new subscribers |
+| **NiftyFuturesMetricsService** | Orchestrator for NIFTY Futures Volume Profile analysis |
+| **InternalVolumeProfileEngine** | Session VP calculation (POC, VAH, VAL, VWAP, HVNs) |
+| **RollingVolumeProfileEngine** | 60-minute rolling VP calculation |
+| **VPRelativeMetricsEngine** | Relative/cumulative metrics against historical averages |
 | **Health Monitors** | Specialized monitors for Memory, GC, and Processor performance |
 
 ### MarketDataReactiveHub - Centralized Reactive Architecture (v2.2)
@@ -257,6 +273,40 @@ GIFT_NIFTY tick (with change %)
          │
          ▼
   Trigger Options Generation (when IsComplete)
+```
+
+### Nifty Futures Volume Profile Metrics
+
+The `NiftyFuturesMetricsService` provides real-time Volume Profile analysis for NIFTY Futures, published via `MarketDataReactiveHub.NiftyFuturesStream`.
+
+**Metrics Available (`NiftyFuturesVPMetrics`):**
+
+| Category | Metric | Description |
+|----------|--------|-------------|
+| **Session VP** | POC, VAH, VAL, VWAP | Core Volume Profile levels from session start |
+| **Session VP** | HVNBuyCount, HVNSellCount | HVN count by buy/sell classification |
+| **Session VP** | HVNBuyVolume, HVNSellVolume | Volume at buy/sell HVNs |
+| **Rolling VP** | RollingPOC, RollingVAH, RollingVAL | 60-minute rolling window levels |
+| **Rolling VP** | RollingHVNBuyCount, RollingHVNSellCount | Rolling HVN counts |
+| **Relative** | RelHVNBuy, RelHVNSell, RelValueWidth | Current vs historical time-of-day average (×100) |
+| **Relative** | RelHVNBuyRolling, RelHVNSellRolling | Rolling relative metrics |
+| **Cumulative** | CumHVNBuyRank, CumHVNSellRank | Session total vs reference benchmark (percentile) |
+| **Cumulative** | CumValueWidthRank | Value area width rank |
+| **Metadata** | BarCount, LastBarTime, Symbol | Session context |
+
+**HVN Buy/Sell Classification:**
+- **HVN Buy**: High Volume Node at or below current close → Support zone
+- **HVN Sell**: High Volume Node above current close → Resistance zone
+
+**Usage Example:**
+```csharp
+MarketDataReactiveHub.Instance.NiftyFuturesStream
+    .Where(m => m.IsValid)
+    .Subscribe(metrics => {
+        Console.WriteLine($"POC: {metrics.POC:F2}, VAH: {metrics.VAH:F2}, VAL: {metrics.VAL:F2}");
+        Console.WriteLine($"HVN Buy: {metrics.HVNBuyCount}, HVN Sell: {metrics.HVNSellCount}");
+        Console.WriteLine($"Rel HVN Buy: {metrics.RelHVNBuy:F0}%, Cum Rank: {metrics.CumHVNBuyRank:F0}%");
+    });
 ```
 
 ### TPL Dataflow Pipeline (SubscriptionManager)
@@ -709,7 +759,24 @@ Enable DEBUG level to see:
 
 ## Version History
 
-### v2.2 - Reactive Architecture (Current)
+### v2.3 - Modular Refactoring (Current)
+- **NiftyFuturesMetricsService Decomposition**: Split 2300+ line monolithic service into modular components
+  - `NiftySymbolResolver` - NIFTY Futures symbol resolution from SQLite
+  - `NiftyHistoricalDataLoader` - Parallel loading of RangeATR and Tick data slices
+  - `MetricsCalculator` - Uptick/downtick classification and index mapping
+  - `InternalTickToBarMapper` - Maps ticks to RangeATR bars for volume profiling
+  - `InternalVolumeProfileEngine` - Session Volume Profile (POC, VAH, VAL, VWAP, HVNs)
+  - `RollingVolumeProfileEngine` - 60-minute rolling Volume Profile
+  - `VPRelativeMetricsEngine` - Relative metrics against historical averages
+  - `AnalysisModels` - Shared data models (RangeATRBar, HistoricalTick, etc.)
+- **MarketAnalyzerWindow MVVM Refactoring**: Split 1300+ line Window into MVVM pattern
+  - `MarketAnalyzerWindow` - Thin View layer, initializes Window and sets DataContext
+  - `MarketAnalyzerViewModel` - ViewModel with state (Rows, VPMetrics), business logic, subscriptions
+  - `MarketAnalyzerUIHelpers` - Static methods to create WPF controls with Data Binding
+  - `MarketAnalyzerAddOn` - NinjaTrader AddOn for menu integration and auto-launch
+- **Architecture Goals**: 300-400 lines per file, single responsibility, testable components
+
+### v2.2 - Reactive Architecture
 - **MarketDataReactiveHub**: Single source of truth for all market data streams
 - **Reactive DTOs**: `IndexPriceUpdate`, `ProjectedOpenState`, `OptionPriceUpdate`, `OptionStatusUpdate`, `VWAPUpdate`, `StraddlePriceUpdate`
 - **Backpressure Streams**: `OptionPriceBatchStream` (100ms/50 items), `OptionPriceSampledStream` (per-symbol 100ms)

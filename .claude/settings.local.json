@@ -114,7 +114,9 @@
       "Bash(del \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\AddOns\\\\TBSManager\\\\Models\\\\TBSTrancheRow.cs\")",
       "Bash(copy /Y \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\References\\\\FilterDataGrid.dll\" \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\bin\\\\Custom\\\\FilterDataGrid.dll\")",
       "Bash(powershell: Get-Content \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\index_mappings.json\" -ErrorAction SilentlyContinue)",
-      "Bash(powershell: Test-Path \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\log4net.config\")"
+      "Bash(powershell: Test-Path \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\log4net.config\")",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"ZerodhaDatafeedAdapter\\\\ZerodhaDatafeedAdapter.csproj\" -t:Build -p:Configuration=Debug -verbosity:minimal)",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"ZerodhaDatafeedAdapter\\\\ZerodhaDatafeedAdapter.csproj\" -t:Rebuild -p:Configuration=Debug -verbosity:minimal)"
     ]
   }
 }
