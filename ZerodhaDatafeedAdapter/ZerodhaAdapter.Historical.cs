@@ -58,7 +58,10 @@ namespace ZerodhaDatafeedAdapter
 
             try
             {
-                Logger.Debug($"Starting bars request for {barsRequest?.Bars?.Instrument?.MasterInstrument?.Name}");
+                string rawName = barsRequest?.Bars?.Instrument?.MasterInstrument?.Name ?? "NULL";
+                var barsPeriodType = barsRequest?.Bars?.BarsPeriod?.BarsPeriodType;
+                Logger.Info($"[BarsWorker] ========== BARS REQUEST ==========");
+                Logger.Info($"[BarsWorker] Incoming symbol: '{rawName}', BarsPeriodType: {barsPeriodType}");
 
                 if (barsRequest.Progress != null)
                 {
@@ -71,6 +74,8 @@ namespace ZerodhaDatafeedAdapter
                 string name = barsRequest.Bars.Instrument.MasterInstrument.Name;
                 MarketType marketType = MarketType.Spot;
                 string symbolName = Connector.GetSymbolName(name, out marketType);
+
+                Logger.Info($"[BarsWorker] Resolved: '{name}' -> '{symbolName}' (MarketType={marketType})");
 
                 // Create the loading UI
                 LoadViewModel loadViewModel = new LoadViewModel();

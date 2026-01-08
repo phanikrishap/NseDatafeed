@@ -105,10 +105,19 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         public void UpdateL2SubscriptionCache(ConcurrentDictionary<string, L2Subscription> subscriptions) 
             => _subscriptionRegistry.UpdateL2Subscriptions(subscriptions);
 
+        /// <summary>
+        /// Adds or updates symbol mappings. Mappings allow ticks received for one symbol (Value)
+        /// to be forwarded to subscribers of another symbol (Key).
+        /// Example: { "NIFTY_I": "NIFTY26JANFUT" } means ticks for NIFTY26JANFUT go to NIFTY_I subscribers.
+        /// </summary>
         public void UpdateSymbolMappingCache(Dictionary<string, string> mappings)
         {
-            _symbolMappingCache.Clear();
-            foreach (var kvp in mappings) _symbolMappingCache[kvp.Value] = kvp.Key;
+            // Add/update mappings without clearing existing ones
+            // The cache stores: receivedSymbol -> subscriberSymbol (reversed from input)
+            foreach (var kvp in mappings)
+            {
+                _symbolMappingCache[kvp.Value] = kvp.Key;
+            }
         }
 
         private HealthMetricsSnapshot GetHealthSnapshot()

@@ -30,6 +30,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer.Controls
             _lblStrikePosition.Text = $"{strikesAbove} above | {strikesBelow} below ATM ({totalStrikes} total)";
         }
 
+        public string StrikePositionText
+        {
+            set => _lblStrikePosition.Text = value;
+        }
+
         public string SelectedInstrument
         {
             set

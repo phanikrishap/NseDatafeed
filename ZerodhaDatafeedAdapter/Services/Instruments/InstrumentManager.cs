@@ -311,6 +311,51 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                 return "GIFT NIFTY";
             }
 
+            // Handle NIFTY_I (NIFTY Futures continuous contract)
+            // This is a virtual symbol that maps to the current month NIFTY Futures (e.g., NIFTY26JANFUT)
+            // Get the resolved symbol from MarketAnalyzerLogic which tracks the current contract
+            if (symbol == "NIFTY_I")
+            {
+                marketType = MarketType.Futures;
+                var resolvedSymbol = Services.Analysis.MarketAnalyzerLogic.Instance?.NiftyFuturesSymbol;
+                if (!string.IsNullOrEmpty(resolvedSymbol))
+                {
+                    Logger.Debug($"[IM] GetSymbolName: NIFTY_I resolved to '{resolvedSymbol}'");
+                    return resolvedSymbol;
+                }
+                // Fallback: If not yet resolved, return as-is and let the caller handle it
+                Logger.Warn("[IM] GetSymbolName: NIFTY_I not yet resolved, returning as-is");
+                return symbol;
+            }
+
+            // Handle NIFTY****FUT pattern (e.g., NIFTY26JANFUT, NIFTY26FEBFUT, NIFTY25MAYFUT)
+            // NinjaTrader may request stale/expired contracts - redirect ALL NIFTY FUT requests
+            // to the current active contract from MarketAnalyzerLogic
+            if (symbol.StartsWith("NIFTY") && symbol.EndsWith("FUT") && !symbol.StartsWith("BANKNIFTY"))
+            {
+                marketType = MarketType.Futures;
+                var currentContract = Services.Analysis.MarketAnalyzerLogic.Instance?.NiftyFuturesSymbol;
+                if (!string.IsNullOrEmpty(currentContract))
+                {
+                    if (symbol != currentContract)
+                    {
+                        Logger.Info($"[IM] GetSymbolName: Redirecting stale NIFTY FUT '{symbol}' -> current contract '{currentContract}'");
+                    }
+                    return currentContract;
+                }
+                // Fallback: Return as-is if current contract not yet resolved
+                Logger.Debug($"[IM] GetSymbolName: NIFTY Futures symbol '{symbol}' detected (current contract not yet resolved)");
+                return symbol;
+            }
+
+            // Handle BANKNIFTY****FUT pattern (e.g., BANKNIFTY26JANFUT)
+            if (symbol.StartsWith("BANKNIFTY") && symbol.EndsWith("FUT"))
+            {
+                marketType = MarketType.Futures;
+                Logger.Debug($"[IM] GetSymbolName: BANKNIFTY Futures symbol '{symbol}' detected");
+                return symbol;
+            }
+
             // Detect market type from suffix
             if (symbol.Contains("_NSE")) marketType = MarketType.Spot;
             else if (symbol.Contains("_NFO")) marketType = MarketType.Futures;

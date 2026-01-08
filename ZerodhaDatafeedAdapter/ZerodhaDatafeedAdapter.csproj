@@ -205,6 +205,8 @@
     <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerWindow.cs" />
     <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerViewModel.cs" />
     <Compile Include="AddOns\MarketAnalyzer\MarketAnalyzerUIHelpers.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\OptionChainViewModel.cs" />
+    <Compile Include="AddOns\MarketAnalyzer\OptionChainUIHelpers.cs" />
     <Compile Include="AddOns\MarketAnalyzer\OptionChainWindow.cs" />
     <Compile Include="AddOns\TBSManager\TBSManagerWindow.cs" />
     <Compile Include="AddOns\TBSManager\Converters\PnLToColorConverter.cs" />

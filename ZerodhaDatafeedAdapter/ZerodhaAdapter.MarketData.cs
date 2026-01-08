@@ -1,6 +1,7 @@
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
 using ZerodhaAPI.Common.Enums;
@@ -146,6 +147,15 @@ namespace ZerodhaDatafeedAdapter
                 }
 
                 Logger.Debug($"[SUBSCRIBE] Initiating WebSocket for {name} (originalSymbol={originalSymbol}, marketType={mt})");
+
+                // If nativeSymbol differs from originalSymbol (e.g., NIFTY_I -> NIFTY26JANFUT),
+                // we need to add a symbol mapping so ticks for originalSymbol get forwarded to nativeSymbol subscribers
+                if (!string.Equals(nativeSymbolName, originalSymbol, StringComparison.OrdinalIgnoreCase))
+                {
+                    var mapping = new Dictionary<string, string> { { nativeSymbolName, originalSymbol } };
+                    MarketDataService.Instance.TickProcessor.UpdateSymbolMappingCache(mapping);
+                    Logger.Info($"[SUBSCRIBE] Added symbol mapping: ticks for '{originalSymbol}' will be forwarded to '{nativeSymbolName}' subscribers");
+                }
 
                 // Capture variables for closure
                 string capturedName = name;
