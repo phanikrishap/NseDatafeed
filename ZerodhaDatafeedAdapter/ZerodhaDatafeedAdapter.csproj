@@ -75,6 +75,10 @@
       <SpecificVersion>False</SpecificVersion>
       <HintPath>..\..\..\..\..\Program Files (x86)\NinjaTrader 8\bin64\NinjaTrader.Gui.dll</HintPath>
     </Reference>
+    <Reference Include="NinjaTrader.Custom">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\..\..\Documents\NinjaTrader 8\bin\Custom\NinjaTrader.Custom.dll</HintPath>
+    </Reference>
     <Reference Include="PresentationCore" />
     <Reference Include="PresentationFramework" />
     <Reference Include="System" />

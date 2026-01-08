@@ -281,6 +281,28 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         private TextBlock _lblHVNCount;
         private TextBlock _lblBarCount;
         private TextBlock _lblVPStatus;
+        // Session HVN Buy/Sell and Relative metrics labels
+        private TextBlock _lblHVNBuy;
+        private TextBlock _lblHVNSell;
+        private TextBlock _lblRelHVNBuy;
+        private TextBlock _lblRelHVNSell;
+        private TextBlock _lblCumHVNBuy;
+        private TextBlock _lblCumHVNSell;
+        // Session ValueWidth metrics labels
+        private TextBlock _lblValueWidth;
+        private TextBlock _lblRelValueWidth;
+        private TextBlock _lblCumValueWidth;
+
+        // Rolling VP metrics labels
+        private TextBlock _lblRollingHVNBuy;
+        private TextBlock _lblRollingHVNSell;
+        private TextBlock _lblRelHVNBuyRoll;
+        private TextBlock _lblRelHVNSellRoll;
+        private TextBlock _lblCumHVNBuyRoll;
+        private TextBlock _lblCumHVNSellRoll;
+        private TextBlock _lblRollingValueWidth;
+        private TextBlock _lblRelValueWidthRoll;
+        private TextBlock _lblCumValueWidthRoll;
 
         // NinjaTrader-style colors
         private static readonly SolidColorBrush _bgColor = new SolidColorBrush(Color.FromRgb(27, 27, 28));
@@ -477,7 +499,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 BorderThickness = new Thickness(0),
                 FontFamily = _ntFont,
                 FontSize = 12,
-                ItemsSource = _rows
+                ItemsSource = _rows,
+                MaxHeight = 120 // Compact height for 4 index rows
             };
 
             // Create GridView with resizable columns
@@ -575,7 +598,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
 
         /// <summary>
         /// Creates the Nifty Futures Volume Profile Metrics panel.
-        /// Displays POC, VAH, VAL, VWAP, HVN count, and bar count.
+        /// Displays POC, VAH, VAL, VWAP, HVN counts with Buy/Sell breakdown, and relative/cumulative metrics.
         /// </summary>
         private Border CreateNiftyFuturesMetricsPanel()
         {
@@ -613,13 +636,22 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             headerPanel.Children.Add(_lblVPStatus);
             mainPanel.Children.Add(headerPanel);
 
-            // Metrics grid (2 rows x 3 columns)
+            // Metrics grid (9 rows x 3 columns - Session VP rows 0-4, Rolling VP rows 5-8)
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            // Session VP rows (0-4)
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 0: POC, VAH, VAL
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 1: VWAP, HVNs, Bars
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 2: Session HVN Buy, Sell
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 3: Session Rel, Cum
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 4: Session ValueWidth
+            // Rolling VP rows (5-8)
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 5: Rolling header/separator
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 6: Rolling HVN Buy, Sell
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 7: Rolling Rel, Cum
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 8: Rolling ValueWidth
 
             // Row 1: POC, VAH, VAL
             var pocPanel = CreateMetricPanel("POC:", out _lblPOC);
@@ -637,7 +669,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             Grid.SetColumn(valPanel, 2);
             grid.Children.Add(valPanel);
 
-            // Row 2: VWAP, HVNs, Bars
+            // Row 2: VWAP, HVNs (total), Bars
             var vwapPanel = CreateMetricPanel("VWAP:", out _lblVWAP);
             Grid.SetRow(vwapPanel, 1);
             Grid.SetColumn(vwapPanel, 0);
@@ -653,6 +685,112 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             Grid.SetColumn(barPanel, 2);
             grid.Children.Add(barPanel);
 
+            // Row 3: HVN Buy, HVN Sell, (empty or future metric)
+            var hvnBuyPanel = CreateMetricPanel("HVN↑:", out _lblHVNBuy, _greenColor);
+            Grid.SetRow(hvnBuyPanel, 2);
+            Grid.SetColumn(hvnBuyPanel, 0);
+            grid.Children.Add(hvnBuyPanel);
+
+            var hvnSellPanel = CreateMetricPanel("HVN↓:", out _lblHVNSell, _redColor);
+            Grid.SetRow(hvnSellPanel, 2);
+            Grid.SetColumn(hvnSellPanel, 1);
+            grid.Children.Add(hvnSellPanel);
+
+            // Row 4: RelHVNBuy, RelHVNSell, CumHVN (Buy-Sell combined display)
+            var relBuyPanel = CreateMetricPanel("Rel↑:", out _lblRelHVNBuy, _greenColor);
+            Grid.SetRow(relBuyPanel, 3);
+            Grid.SetColumn(relBuyPanel, 0);
+            grid.Children.Add(relBuyPanel);
+
+            var relSellPanel = CreateMetricPanel("Rel↓:", out _lblRelHVNSell, _redColor);
+            Grid.SetRow(relSellPanel, 3);
+            Grid.SetColumn(relSellPanel, 1);
+            grid.Children.Add(relSellPanel);
+
+            // Cumulative rank panel shows both Buy/Sell in one cell
+            var cumPanel = CreateCumulativeMetricPanel("Cum:", out _lblCumHVNBuy, out _lblCumHVNSell);
+            Grid.SetRow(cumPanel, 3);
+            Grid.SetColumn(cumPanel, 2);
+            grid.Children.Add(cumPanel);
+
+            // Row 5 (Row 4 in grid): ValueWidth, RelValueWidth, CumValueWidth
+            var valWidthPanel = CreateMetricPanel("ValW:", out _lblValueWidth);
+            Grid.SetRow(valWidthPanel, 4);
+            Grid.SetColumn(valWidthPanel, 0);
+            grid.Children.Add(valWidthPanel);
+
+            var relValWidthPanel = CreateMetricPanel("RelW:", out _lblRelValueWidth);
+            Grid.SetRow(relValWidthPanel, 4);
+            Grid.SetColumn(relValWidthPanel, 1);
+            grid.Children.Add(relValWidthPanel);
+
+            var cumValWidthPanel = CreateMetricPanel("CumW:", out _lblCumValueWidth);
+            Grid.SetRow(cumValWidthPanel, 4);
+            Grid.SetColumn(cumValWidthPanel, 2);
+            grid.Children.Add(cumValWidthPanel);
+
+            // ═══════════════════════════════════════════════════════════════════
+            // ROLLING VP SECTION (60-minute window)
+            // ═══════════════════════════════════════════════════════════════════
+
+            // Row 6 (Row 5 in grid): Rolling header/separator
+            var rollHeaderPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 2) };
+            rollHeaderPanel.Children.Add(new TextBlock
+            {
+                Text = "Rolling VP (60m)",
+                FontFamily = _ntFont,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 200)),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            Grid.SetRow(rollHeaderPanel, 5);
+            Grid.SetColumnSpan(rollHeaderPanel, 3);
+            grid.Children.Add(rollHeaderPanel);
+
+            // Row 7 (Row 6 in grid): Rolling HVN Buy, HVN Sell
+            var rollHvnBuyPanel = CreateMetricPanel("HVN↑:", out _lblRollingHVNBuy, _greenColor);
+            Grid.SetRow(rollHvnBuyPanel, 6);
+            Grid.SetColumn(rollHvnBuyPanel, 0);
+            grid.Children.Add(rollHvnBuyPanel);
+
+            var rollHvnSellPanel = CreateMetricPanel("HVN↓:", out _lblRollingHVNSell, _redColor);
+            Grid.SetRow(rollHvnSellPanel, 6);
+            Grid.SetColumn(rollHvnSellPanel, 1);
+            grid.Children.Add(rollHvnSellPanel);
+
+            // Row 8 (Row 7 in grid): Rolling Rel↑, Rel↓, Cum
+            var relBuyRollPanel = CreateMetricPanel("Rel↑:", out _lblRelHVNBuyRoll, _greenColor);
+            Grid.SetRow(relBuyRollPanel, 7);
+            Grid.SetColumn(relBuyRollPanel, 0);
+            grid.Children.Add(relBuyRollPanel);
+
+            var relSellRollPanel = CreateMetricPanel("Rel↓:", out _lblRelHVNSellRoll, _redColor);
+            Grid.SetRow(relSellRollPanel, 7);
+            Grid.SetColumn(relSellRollPanel, 1);
+            grid.Children.Add(relSellRollPanel);
+
+            var cumRollPanel = CreateCumulativeMetricPanel("Cum:", out _lblCumHVNBuyRoll, out _lblCumHVNSellRoll);
+            Grid.SetRow(cumRollPanel, 7);
+            Grid.SetColumn(cumRollPanel, 2);
+            grid.Children.Add(cumRollPanel);
+
+            // Row 9 (Row 8 in grid): Rolling ValueWidth, RelValueWidth, CumValueWidth
+            var rollValWidthPanel = CreateMetricPanel("ValW:", out _lblRollingValueWidth);
+            Grid.SetRow(rollValWidthPanel, 8);
+            Grid.SetColumn(rollValWidthPanel, 0);
+            grid.Children.Add(rollValWidthPanel);
+
+            var relValWidthRollPanel = CreateMetricPanel("RelW:", out _lblRelValueWidthRoll);
+            Grid.SetRow(relValWidthRollPanel, 8);
+            Grid.SetColumn(relValWidthRollPanel, 1);
+            grid.Children.Add(relValWidthRollPanel);
+
+            var cumValWidthRollPanel = CreateMetricPanel("CumW:", out _lblCumValueWidthRoll);
+            Grid.SetRow(cumValWidthRollPanel, 8);
+            Grid.SetColumn(cumValWidthRollPanel, 2);
+            grid.Children.Add(cumValWidthRollPanel);
+
             mainPanel.Children.Add(grid);
             border.Child = mainPanel;
             return border;
@@ -662,6 +800,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         /// Creates a label + value panel for a VP metric.
         /// </summary>
         private StackPanel CreateMetricPanel(string label, out TextBlock valueLabel)
+        {
+            return CreateMetricPanel(label, out valueLabel, _fgColor);
+        }
+
+        /// <summary>
+        /// Creates a label + value panel for a VP metric with custom value color.
+        /// </summary>
+        private StackPanel CreateMetricPanel(string label, out TextBlock valueLabel, SolidColorBrush valueColor)
         {
             var panel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 10, 2) };
 
@@ -680,9 +826,57 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 FontFamily = _ntFont,
                 FontSize = 11,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = _fgColor
+                Foreground = valueColor
             };
             panel.Children.Add(valueLabel);
+
+            return panel;
+        }
+
+        /// <summary>
+        /// Creates a cumulative metric panel showing both Buy and Sell values (e.g., "Cum: 85↑ / 120↓").
+        /// </summary>
+        private StackPanel CreateCumulativeMetricPanel(string label, out TextBlock buyLabel, out TextBlock sellLabel)
+        {
+            var panel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 10, 2) };
+
+            panel.Children.Add(new TextBlock
+            {
+                Text = label,
+                FontFamily = _ntFont,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)),
+                Width = 35
+            });
+
+            buyLabel = new TextBlock
+            {
+                Text = "---",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = _greenColor
+            };
+            panel.Children.Add(buyLabel);
+
+            panel.Children.Add(new TextBlock
+            {
+                Text = "/",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(100, 100, 100)),
+                Margin = new Thickness(3, 0, 3, 0)
+            });
+
+            sellLabel = new TextBlock
+            {
+                Text = "---",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = _redColor
+            };
+            panel.Children.Add(sellLabel);
 
             return panel;
         }
@@ -752,12 +946,52 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                         return;
                     }
 
+                    // Row 1: POC, VAH, VAL
                     _lblPOC.Text = metrics.POC.ToString("F2");
                     _lblVAH.Text = metrics.VAH.ToString("F2");
                     _lblVAL.Text = metrics.VAL.ToString("F2");
+
+                    // Row 2: VWAP, HVNs (total), Bars
                     _lblVWAP.Text = metrics.VWAP.ToString("F2");
                     _lblHVNCount.Text = (metrics.HVNs?.Count ?? 0).ToString();
                     _lblBarCount.Text = metrics.BarCount.ToString();
+
+                    // Row 3: HVN Buy, HVN Sell
+                    _lblHVNBuy.Text = metrics.HVNBuyCount.ToString();
+                    _lblHVNSell.Text = metrics.HVNSellCount.ToString();
+
+                    // Row 4: Relative and Cumulative metrics
+                    _lblRelHVNBuy.Text = metrics.RelHVNBuy > 0 ? $"{metrics.RelHVNBuy:F0}" : "---";
+                    _lblRelHVNSell.Text = metrics.RelHVNSell > 0 ? $"{metrics.RelHVNSell:F0}" : "---";
+                    _lblCumHVNBuy.Text = metrics.CumHVNBuyRank > 0 ? $"{metrics.CumHVNBuyRank:F0}" : "---";
+                    _lblCumHVNSell.Text = metrics.CumHVNSellRank > 0 ? $"{metrics.CumHVNSellRank:F0}" : "---";
+
+                    // Row 5: Session ValueWidth metrics
+                    double valueWidth = metrics.VAH - metrics.VAL;
+                    _lblValueWidth.Text = $"{valueWidth:F0}";
+                    _lblRelValueWidth.Text = metrics.RelValueWidth > 0 ? $"{metrics.RelValueWidth:F0}" : "---";
+                    _lblCumValueWidth.Text = metrics.CumValueWidthRank > 0 ? $"{metrics.CumValueWidthRank:F0}" : "---";
+
+                    // ═══════════════════════════════════════════════════════════════════
+                    // ROLLING VP METRICS
+                    // ═══════════════════════════════════════════════════════════════════
+
+                    // Row 7: Rolling HVN Buy, HVN Sell
+                    _lblRollingHVNBuy.Text = metrics.RollingHVNBuyCount.ToString();
+                    _lblRollingHVNSell.Text = metrics.RollingHVNSellCount.ToString();
+
+                    // Row 8: Rolling Relative and Cumulative metrics
+                    _lblRelHVNBuyRoll.Text = metrics.RelHVNBuyRolling > 0 ? $"{metrics.RelHVNBuyRolling:F0}" : "---";
+                    _lblRelHVNSellRoll.Text = metrics.RelHVNSellRolling > 0 ? $"{metrics.RelHVNSellRolling:F0}" : "---";
+                    _lblCumHVNBuyRoll.Text = metrics.CumHVNBuyRollingRank > 0 ? $"{metrics.CumHVNBuyRollingRank:F0}" : "---";
+                    _lblCumHVNSellRoll.Text = metrics.CumHVNSellRollingRank > 0 ? $"{metrics.CumHVNSellRollingRank:F0}" : "---";
+
+                    // Row 9: Rolling ValueWidth metrics
+                    double rollingValueWidth = metrics.RollingVAH - metrics.RollingVAL;
+                    _lblRollingValueWidth.Text = $"{rollingValueWidth:F0}";
+                    _lblRelValueWidthRoll.Text = metrics.RelValueWidthRolling > 0 ? $"{metrics.RelValueWidthRolling:F0}" : "---";
+                    _lblCumValueWidthRoll.Text = metrics.CumValueWidthRollingRank > 0 ? $"{metrics.CumValueWidthRollingRank:F0}" : "---";
+
                     _lblVPStatus.Text = $" - Updated {metrics.LastUpdate:HH:mm:ss}";
                 }
                 catch (Exception ex)
