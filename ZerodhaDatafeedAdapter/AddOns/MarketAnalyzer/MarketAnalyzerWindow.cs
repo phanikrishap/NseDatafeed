@@ -63,6 +63,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 DockPanel.SetDock(vpMetricsPanel, Dock.Bottom);
                 dockPanel.Children.Insert(dockPanel.Children.Count - 1, vpMetricsPanel);
 
+                // Composite Profile Metrics Panel (below Session VP)
+                var compositePanel = MarketAnalyzerUIHelpers.CreateCompositeProfileMetricsPanel();
+                DockPanel.SetDock(compositePanel, Dock.Bottom);
+                dockPanel.Children.Insert(dockPanel.Children.Count - 1, compositePanel);
+
                 // Events
                 Loaded += OnWindowLoaded;
                 Unloaded += OnWindowUnloaded;

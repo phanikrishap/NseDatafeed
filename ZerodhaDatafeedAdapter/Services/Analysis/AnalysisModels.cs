@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using ZerodhaDatafeedAdapter.Services.Analysis.Components;
 
 namespace ZerodhaDatafeedAdapter.Services.Analysis
 {
@@ -97,6 +98,16 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public double CumHVNBuyRollingRank { get; set; }     // CumHvnBuyRollingRank
         public double CumHVNSellRollingRank { get; set; }    // CumHvnSellRollingRank
         public double CumValueWidthRollingRank { get; set; } // CumValWidthRollingRank
+
+        // ═══════════════════════════════════════════════════════════════════
+        // COMPOSITE PROFILE METRICS (1D, 3D, 5D, 10D)
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Full composite profile metrics including POC, VAH, VAL, ADR, ranges.
+        /// Computed from daily bars (1440-min) and tick data.
+        /// </summary>
+        public CompositeProfileMetrics Composite { get; set; }
 
         // ═══════════════════════════════════════════════════════════════════
         // METADATA

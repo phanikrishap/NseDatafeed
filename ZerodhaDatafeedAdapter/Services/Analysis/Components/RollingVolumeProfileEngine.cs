@@ -118,9 +118,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             _lastClosePrice = closePrice;
         }
 
-        public InternalVPResult Calculate(double valueAreaPercent, double hvnRatio)
+        public VPResult Calculate(double valueAreaPercent, double hvnRatio)
         {
-            var result = new InternalVPResult();
+            var result = new VPResult();
 
             if (_volumeAtPrice.Count == 0 || _totalVolume <= 0)
             {

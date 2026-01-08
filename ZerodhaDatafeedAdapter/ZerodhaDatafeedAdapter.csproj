@@ -192,9 +192,11 @@
     <Compile Include="Services\Analysis\NiftyHistoricalDataLoader.cs" />
     <Compile Include="Services\Analysis\MetricsCalculator.cs" />
     <Compile Include="Services\Analysis\Components\InternalTickToBarMapper.cs" />
-    <Compile Include="Services\Analysis\Components\InternalVolumeProfileEngine.cs" />
+    <Compile Include="Services\Analysis\Components\VPEngine.cs" />
     <Compile Include="Services\Analysis\Components\RollingVolumeProfileEngine.cs" />
     <Compile Include="Services\Analysis\Components\VPRelativeMetricsEngine.cs" />
+    <Compile Include="Services\Analysis\Components\CompositeProfileModels.cs" />
+    <Compile Include="Services\Analysis\Components\CompositeProfileEngine.cs" />
     <Compile Include="Services\HolidayCalendarService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerService.cs" />
     <Compile Include="Services\Analysis\SubscriptionManager.cs" />

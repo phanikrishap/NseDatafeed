@@ -81,7 +81,27 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         private string _rollValWidth = "---";
         private string _relRollValWidth = "---";
         private string _cumRollValWidth = "---";
-        
+
+        // Composite Profile (1D, 3D, 5D, 10D)
+        private string _compPOC1D = "---", _compPOC3D = "---", _compPOC5D = "---", _compPOC10D = "---";
+        private string _compVAH1D = "---", _compVAH3D = "---", _compVAH5D = "---", _compVAH10D = "---";
+        private string _compVAL1D = "---", _compVAL3D = "---", _compVAL5D = "---", _compVAL10D = "---";
+        private string _compRng1D = "---", _compRng3D = "---", _compRng5D = "---", _compRng10D = "---";
+        private string _cVsAvg1D = "---", _cVsAvg3D = "---", _cVsAvg5D = "---", _cVsAvg10D = "---";
+        private string _rollRng1D = "---", _rollRng3D = "---", _rollRng5D = "---", _rollRng10D = "---";
+        private string _rVsAvg1D = "---", _rVsAvg3D = "---", _rVsAvg5D = "---", _rVsAvg10D = "---";
+        private string _yearlyHigh = "---", _yearlyLow = "---", _yearlyHighDate = "---", _yearlyLowDate = "---";
+        private string _control = "---", _migration = "---";
+        private string _dailyBarCount = "0";
+
+        // Prior EOD fields (D-2, D-3, D-4 ranges for each period)
+        private string _d2Rng1D = "---", _d2Rng3D = "---", _d2Rng5D = "---", _d2Rng10D = "---";
+        private string _d2Pct1D = "---", _d2Pct3D = "---", _d2Pct5D = "---", _d2Pct10D = "---";
+        private string _d3Rng1D = "---", _d3Rng3D = "---", _d3Rng5D = "---", _d3Rng10D = "---";
+        private string _d3Pct1D = "---", _d3Pct3D = "---", _d3Pct5D = "---", _d3Pct10D = "---";
+        private string _d4Rng1D = "---", _d4Rng3D = "---", _d4Rng5D = "---", _d4Rng10D = "---";
+        private string _d4Pct1D = "---", _d4Pct3D = "---", _d4Pct5D = "---", _d4Pct10D = "---";
+
         private string _status = " - Loading...";
 
         public string POC { get => _poc; set { _poc = value; OnPropertyChanged(nameof(POC)); } }
@@ -114,6 +134,79 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         public string CumRollingValueWidth { get => _cumRollValWidth; set { _cumRollValWidth = value; OnPropertyChanged(nameof(CumRollingValueWidth)); } }
 
         public string Status { get => _status; set { _status = value; OnPropertyChanged(nameof(Status)); } }
+
+        // Composite Profile Properties
+        public string CompPOC1D { get => _compPOC1D; set { _compPOC1D = value; OnPropertyChanged(nameof(CompPOC1D)); } }
+        public string CompPOC3D { get => _compPOC3D; set { _compPOC3D = value; OnPropertyChanged(nameof(CompPOC3D)); } }
+        public string CompPOC5D { get => _compPOC5D; set { _compPOC5D = value; OnPropertyChanged(nameof(CompPOC5D)); } }
+        public string CompPOC10D { get => _compPOC10D; set { _compPOC10D = value; OnPropertyChanged(nameof(CompPOC10D)); } }
+
+        public string CompVAH1D { get => _compVAH1D; set { _compVAH1D = value; OnPropertyChanged(nameof(CompVAH1D)); } }
+        public string CompVAH3D { get => _compVAH3D; set { _compVAH3D = value; OnPropertyChanged(nameof(CompVAH3D)); } }
+        public string CompVAH5D { get => _compVAH5D; set { _compVAH5D = value; OnPropertyChanged(nameof(CompVAH5D)); } }
+        public string CompVAH10D { get => _compVAH10D; set { _compVAH10D = value; OnPropertyChanged(nameof(CompVAH10D)); } }
+
+        public string CompVAL1D { get => _compVAL1D; set { _compVAL1D = value; OnPropertyChanged(nameof(CompVAL1D)); } }
+        public string CompVAL3D { get => _compVAL3D; set { _compVAL3D = value; OnPropertyChanged(nameof(CompVAL3D)); } }
+        public string CompVAL5D { get => _compVAL5D; set { _compVAL5D = value; OnPropertyChanged(nameof(CompVAL5D)); } }
+        public string CompVAL10D { get => _compVAL10D; set { _compVAL10D = value; OnPropertyChanged(nameof(CompVAL10D)); } }
+
+        public string CompRng1D { get => _compRng1D; set { _compRng1D = value; OnPropertyChanged(nameof(CompRng1D)); } }
+        public string CompRng3D { get => _compRng3D; set { _compRng3D = value; OnPropertyChanged(nameof(CompRng3D)); } }
+        public string CompRng5D { get => _compRng5D; set { _compRng5D = value; OnPropertyChanged(nameof(CompRng5D)); } }
+        public string CompRng10D { get => _compRng10D; set { _compRng10D = value; OnPropertyChanged(nameof(CompRng10D)); } }
+
+        public string CVsAvg1D { get => _cVsAvg1D; set { _cVsAvg1D = value; OnPropertyChanged(nameof(CVsAvg1D)); } }
+        public string CVsAvg3D { get => _cVsAvg3D; set { _cVsAvg3D = value; OnPropertyChanged(nameof(CVsAvg3D)); } }
+        public string CVsAvg5D { get => _cVsAvg5D; set { _cVsAvg5D = value; OnPropertyChanged(nameof(CVsAvg5D)); } }
+        public string CVsAvg10D { get => _cVsAvg10D; set { _cVsAvg10D = value; OnPropertyChanged(nameof(CVsAvg10D)); } }
+
+        public string RollRng1D { get => _rollRng1D; set { _rollRng1D = value; OnPropertyChanged(nameof(RollRng1D)); } }
+        public string RollRng3D { get => _rollRng3D; set { _rollRng3D = value; OnPropertyChanged(nameof(RollRng3D)); } }
+        public string RollRng5D { get => _rollRng5D; set { _rollRng5D = value; OnPropertyChanged(nameof(RollRng5D)); } }
+        public string RollRng10D { get => _rollRng10D; set { _rollRng10D = value; OnPropertyChanged(nameof(RollRng10D)); } }
+
+        public string RVsAvg1D { get => _rVsAvg1D; set { _rVsAvg1D = value; OnPropertyChanged(nameof(RVsAvg1D)); } }
+        public string RVsAvg3D { get => _rVsAvg3D; set { _rVsAvg3D = value; OnPropertyChanged(nameof(RVsAvg3D)); } }
+        public string RVsAvg5D { get => _rVsAvg5D; set { _rVsAvg5D = value; OnPropertyChanged(nameof(RVsAvg5D)); } }
+        public string RVsAvg10D { get => _rVsAvg10D; set { _rVsAvg10D = value; OnPropertyChanged(nameof(RVsAvg10D)); } }
+
+        public string YearlyHigh { get => _yearlyHigh; set { _yearlyHigh = value; OnPropertyChanged(nameof(YearlyHigh)); } }
+        public string YearlyLow { get => _yearlyLow; set { _yearlyLow = value; OnPropertyChanged(nameof(YearlyLow)); } }
+        public string YearlyHighDate { get => _yearlyHighDate; set { _yearlyHighDate = value; OnPropertyChanged(nameof(YearlyHighDate)); } }
+        public string YearlyLowDate { get => _yearlyLowDate; set { _yearlyLowDate = value; OnPropertyChanged(nameof(YearlyLowDate)); } }
+
+        public string Control { get => _control; set { _control = value; OnPropertyChanged(nameof(Control)); } }
+        public string Migration { get => _migration; set { _migration = value; OnPropertyChanged(nameof(Migration)); } }
+        public string DailyBarCount { get => _dailyBarCount; set { _dailyBarCount = value; OnPropertyChanged(nameof(DailyBarCount)); } }
+
+        // Prior EOD Properties (D-2, D-3, D-4)
+        public string D2Rng1D { get => _d2Rng1D; set { _d2Rng1D = value; OnPropertyChanged(nameof(D2Rng1D)); } }
+        public string D2Rng3D { get => _d2Rng3D; set { _d2Rng3D = value; OnPropertyChanged(nameof(D2Rng3D)); } }
+        public string D2Rng5D { get => _d2Rng5D; set { _d2Rng5D = value; OnPropertyChanged(nameof(D2Rng5D)); } }
+        public string D2Rng10D { get => _d2Rng10D; set { _d2Rng10D = value; OnPropertyChanged(nameof(D2Rng10D)); } }
+        public string D2Pct1D { get => _d2Pct1D; set { _d2Pct1D = value; OnPropertyChanged(nameof(D2Pct1D)); } }
+        public string D2Pct3D { get => _d2Pct3D; set { _d2Pct3D = value; OnPropertyChanged(nameof(D2Pct3D)); } }
+        public string D2Pct5D { get => _d2Pct5D; set { _d2Pct5D = value; OnPropertyChanged(nameof(D2Pct5D)); } }
+        public string D2Pct10D { get => _d2Pct10D; set { _d2Pct10D = value; OnPropertyChanged(nameof(D2Pct10D)); } }
+
+        public string D3Rng1D { get => _d3Rng1D; set { _d3Rng1D = value; OnPropertyChanged(nameof(D3Rng1D)); } }
+        public string D3Rng3D { get => _d3Rng3D; set { _d3Rng3D = value; OnPropertyChanged(nameof(D3Rng3D)); } }
+        public string D3Rng5D { get => _d3Rng5D; set { _d3Rng5D = value; OnPropertyChanged(nameof(D3Rng5D)); } }
+        public string D3Rng10D { get => _d3Rng10D; set { _d3Rng10D = value; OnPropertyChanged(nameof(D3Rng10D)); } }
+        public string D3Pct1D { get => _d3Pct1D; set { _d3Pct1D = value; OnPropertyChanged(nameof(D3Pct1D)); } }
+        public string D3Pct3D { get => _d3Pct3D; set { _d3Pct3D = value; OnPropertyChanged(nameof(D3Pct3D)); } }
+        public string D3Pct5D { get => _d3Pct5D; set { _d3Pct5D = value; OnPropertyChanged(nameof(D3Pct5D)); } }
+        public string D3Pct10D { get => _d3Pct10D; set { _d3Pct10D = value; OnPropertyChanged(nameof(D3Pct10D)); } }
+
+        public string D4Rng1D { get => _d4Rng1D; set { _d4Rng1D = value; OnPropertyChanged(nameof(D4Rng1D)); } }
+        public string D4Rng3D { get => _d4Rng3D; set { _d4Rng3D = value; OnPropertyChanged(nameof(D4Rng3D)); } }
+        public string D4Rng5D { get => _d4Rng5D; set { _d4Rng5D = value; OnPropertyChanged(nameof(D4Rng5D)); } }
+        public string D4Rng10D { get => _d4Rng10D; set { _d4Rng10D = value; OnPropertyChanged(nameof(D4Rng10D)); } }
+        public string D4Pct1D { get => _d4Pct1D; set { _d4Pct1D = value; OnPropertyChanged(nameof(D4Pct1D)); } }
+        public string D4Pct3D { get => _d4Pct3D; set { _d4Pct3D = value; OnPropertyChanged(nameof(D4Pct3D)); } }
+        public string D4Pct5D { get => _d4Pct5D; set { _d4Pct5D = value; OnPropertyChanged(nameof(D4Pct5D)); } }
+        public string D4Pct10D { get => _d4Pct10D; set { _d4Pct10D = value; OnPropertyChanged(nameof(D4Pct10D)); } }
 
         public event PropertyChangedEventHandler PropertyChanged;
         protected void OnPropertyChanged(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
@@ -267,7 +360,86 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             vm.RollingValueWidth = $"{rw:F0}";
             vm.RelRollingValueWidth = metrics.RelValueWidthRolling > 0 ? $"{metrics.RelValueWidthRolling:F0}" : "---";
             vm.CumRollingValueWidth = metrics.CumValueWidthRollingRank > 0 ? $"{metrics.CumValueWidthRollingRank:F0}" : "---";
-            
+
+            // Composite Profile Metrics
+            var comp = metrics.Composite;
+            if (comp != null && comp.IsValid)
+            {
+                vm.CompPOC1D = comp.POC_1D > 0 ? $"{comp.POC_1D:F0}" : "---";
+                vm.CompPOC3D = comp.POC_3D > 0 ? $"{comp.POC_3D:F0}" : "---";
+                vm.CompPOC5D = comp.POC_5D > 0 ? $"{comp.POC_5D:F0}" : "---";
+                vm.CompPOC10D = comp.POC_10D > 0 ? $"{comp.POC_10D:F0}" : "---";
+
+                vm.CompVAH1D = comp.VAH_1D > 0 ? $"{comp.VAH_1D:F0}" : "---";
+                vm.CompVAH3D = comp.VAH_3D > 0 ? $"{comp.VAH_3D:F0}" : "---";
+                vm.CompVAH5D = comp.VAH_5D > 0 ? $"{comp.VAH_5D:F0}" : "---";
+                vm.CompVAH10D = comp.VAH_10D > 0 ? $"{comp.VAH_10D:F0}" : "---";
+
+                vm.CompVAL1D = comp.VAL_1D > 0 ? $"{comp.VAL_1D:F0}" : "---";
+                vm.CompVAL3D = comp.VAL_3D > 0 ? $"{comp.VAL_3D:F0}" : "---";
+                vm.CompVAL5D = comp.VAL_5D > 0 ? $"{comp.VAL_5D:F0}" : "---";
+                vm.CompVAL10D = comp.VAL_10D > 0 ? $"{comp.VAL_10D:F0}" : "---";
+
+                vm.CompRng1D = comp.CompRange_1D > 0 ? $"{comp.CompRange_1D:F0}" : "---";
+                vm.CompRng3D = comp.CompRange_3D > 0 ? $"{comp.CompRange_3D:F0}" : "---";
+                vm.CompRng5D = comp.CompRange_5D > 0 ? $"{comp.CompRange_5D:F0}" : "---";
+                vm.CompRng10D = comp.CompRange_10D > 0 ? $"{comp.CompRange_10D:F0}" : "---";
+
+                vm.CVsAvg1D = comp.CVsAvg_1D > 0 ? $"{comp.CVsAvg_1D:F0}%" : "---";
+                vm.CVsAvg3D = comp.CVsAvg_3D > 0 ? $"{comp.CVsAvg_3D:F0}%" : "---";
+                vm.CVsAvg5D = comp.CVsAvg_5D > 0 ? $"{comp.CVsAvg_5D:F0}%" : "---";
+                vm.CVsAvg10D = comp.CVsAvg_10D > 0 ? $"{comp.CVsAvg_10D:F0}%" : "---";
+
+                vm.RollRng1D = comp.RollRange_1D > 0 ? $"{comp.RollRange_1D:F0}" : "---";
+                vm.RollRng3D = comp.RollRange_3D > 0 ? $"{comp.RollRange_3D:F0}" : "---";
+                vm.RollRng5D = comp.RollRange_5D > 0 ? $"{comp.RollRange_5D:F0}" : "---";
+                vm.RollRng10D = comp.RollRange_10D > 0 ? $"{comp.RollRange_10D:F0}" : "---";
+
+                vm.RVsAvg1D = comp.RVsAvg_1D > 0 ? $"{comp.RVsAvg_1D:F0}%" : "---";
+                vm.RVsAvg3D = comp.RVsAvg_3D > 0 ? $"{comp.RVsAvg_3D:F0}%" : "---";
+                vm.RVsAvg5D = comp.RVsAvg_5D > 0 ? $"{comp.RVsAvg_5D:F0}%" : "---";
+                vm.RVsAvg10D = comp.RVsAvg_10D > 0 ? $"{comp.RVsAvg_10D:F0}%" : "---";
+
+                vm.YearlyHigh = comp.YearlyExtremes?.YearlyHigh > 0 ? $"{comp.YearlyExtremes.YearlyHigh:F0}" : "---";
+                vm.YearlyLow = comp.YearlyExtremes?.YearlyLow > 0 ? $"{comp.YearlyExtremes.YearlyLow:F0}" : "---";
+                vm.YearlyHighDate = comp.YearlyExtremes?.YearlyHighDate != default ? comp.YearlyExtremes.YearlyHighDate.ToString("dd-MMM") : "---";
+                vm.YearlyLowDate = comp.YearlyExtremes?.YearlyLowDate != default ? comp.YearlyExtremes.YearlyLowDate.ToString("dd-MMM") : "---";
+
+                vm.Control = comp.Control ?? "---";
+                vm.Migration = comp.Migration ?? "---";
+                vm.DailyBarCount = comp.DailyBarCount.ToString();
+
+                // Prior EOD D-2
+                vm.D2Rng1D = comp.D2_1DRange > 0 ? $"{comp.D2_1DRange:F0}" : "---";
+                vm.D2Rng3D = comp.D2_3DRange > 0 ? $"{comp.D2_3DRange:F0}" : "---";
+                vm.D2Rng5D = comp.D2_5DRange > 0 ? $"{comp.D2_5DRange:F0}" : "---";
+                vm.D2Rng10D = comp.D2_10DRange > 0 ? $"{comp.D2_10DRange:F0}" : "---";
+                vm.D2Pct1D = comp.D2_1DVsAvg > 0 ? $"{comp.D2_1DVsAvg:F0}%" : "---";
+                vm.D2Pct3D = comp.D2_3DVsAvg > 0 ? $"{comp.D2_3DVsAvg:F0}%" : "---";
+                vm.D2Pct5D = comp.D2_5DVsAvg > 0 ? $"{comp.D2_5DVsAvg:F0}%" : "---";
+                vm.D2Pct10D = comp.D2_10DVsAvg > 0 ? $"{comp.D2_10DVsAvg:F0}%" : "---";
+
+                // Prior EOD D-3
+                vm.D3Rng1D = comp.D3_1DRange > 0 ? $"{comp.D3_1DRange:F0}" : "---";
+                vm.D3Rng3D = comp.D3_3DRange > 0 ? $"{comp.D3_3DRange:F0}" : "---";
+                vm.D3Rng5D = comp.D3_5DRange > 0 ? $"{comp.D3_5DRange:F0}" : "---";
+                vm.D3Rng10D = comp.D3_10DRange > 0 ? $"{comp.D3_10DRange:F0}" : "---";
+                vm.D3Pct1D = comp.D3_1DVsAvg > 0 ? $"{comp.D3_1DVsAvg:F0}%" : "---";
+                vm.D3Pct3D = comp.D3_3DVsAvg > 0 ? $"{comp.D3_3DVsAvg:F0}%" : "---";
+                vm.D3Pct5D = comp.D3_5DVsAvg > 0 ? $"{comp.D3_5DVsAvg:F0}%" : "---";
+                vm.D3Pct10D = comp.D3_10DVsAvg > 0 ? $"{comp.D3_10DVsAvg:F0}%" : "---";
+
+                // Prior EOD D-4
+                vm.D4Rng1D = comp.D4_1DRange > 0 ? $"{comp.D4_1DRange:F0}" : "---";
+                vm.D4Rng3D = comp.D4_3DRange > 0 ? $"{comp.D4_3DRange:F0}" : "---";
+                vm.D4Rng5D = comp.D4_5DRange > 0 ? $"{comp.D4_5DRange:F0}" : "---";
+                vm.D4Rng10D = comp.D4_10DRange > 0 ? $"{comp.D4_10DRange:F0}" : "---";
+                vm.D4Pct1D = comp.D4_1DVsAvg > 0 ? $"{comp.D4_1DVsAvg:F0}%" : "---";
+                vm.D4Pct3D = comp.D4_3DVsAvg > 0 ? $"{comp.D4_3DVsAvg:F0}%" : "---";
+                vm.D4Pct5D = comp.D4_5DVsAvg > 0 ? $"{comp.D4_5DVsAvg:F0}%" : "---";
+                vm.D4Pct10D = comp.D4_10DVsAvg > 0 ? $"{comp.D4_10DVsAvg:F0}%" : "---";
+            }
+
             vm.Status = $" - Updated {metrics.LastUpdate:HH:mm:ss}";
         }
         

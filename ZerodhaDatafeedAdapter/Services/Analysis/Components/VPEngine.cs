@@ -18,7 +18,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
     /// <summary>
     /// Result of VP calculation including HVN Buy/Sell breakdown.
     /// </summary>
-    public class InternalVPResult
+    public class VPResult
     {
         public double POC { get; set; }
         public double VAH { get; set; }
@@ -39,11 +39,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
     }
 
     /// <summary>
-    /// Internal simplified Volume Profile Engine.
-    /// Computes POC, VAH, VAL, VWAP, HVNs from tick data.
+    /// Volume Profile Engine - Computes POC, VAH, VAL, VWAP, HVNs from tick data.
     /// Uses configurable price interval for price bucketing (1 rupee for NIFTY, not tick size).
+    /// Value Area calculation uses 2-level expansion algorithm matching NinjaTrader/Gom.
     /// </summary>
-    public class InternalVolumeProfileEngine
+    public class VPEngine
     {
         private readonly Dictionary<double, VolumePriceLevel> _volumeAtPrice = new Dictionary<double, VolumePriceLevel>();
         private double _priceInterval = 1.0;  // Price interval for VP buckets (1 rupee for NIFTY)
@@ -88,9 +88,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             _lastClosePrice = closePrice;
         }
 
-        public InternalVPResult Calculate(double valueAreaPercent, double hvnRatio)
+        public VPResult Calculate(double valueAreaPercent, double hvnRatio)
         {
-            var result = new InternalVPResult();
+            var result = new VPResult();
 
             if (_volumeAtPrice.Count == 0 || _totalVolume == 0)
             {
@@ -112,41 +112,96 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             // Calculate VWAP
             result.VWAP = _sumPriceVolume / _totalVolume;
 
-            // Bidirectional expansion for Value Area
+            // Bidirectional expansion for Value Area using 2-level lookahead (matches NinjaTrader/Gom algorithm)
             var sortedLevels = _volumeAtPrice.OrderBy(l => l.Key).ToList();
             int pocIndex = sortedLevels.FindIndex(l => l.Key == result.POC);
+            if (pocIndex < 0) pocIndex = sortedLevels.Count / 2;
 
             double targetVolume = _totalVolume * valueAreaPercent;
             double accumulatedVolume = maxVolume;
 
-            int upperIndex = pocIndex;
-            int lowerIndex = pocIndex;
+            int vahIndex = pocIndex;
+            int valIndex = pocIndex;
 
-            while (accumulatedVolume < targetVolume && (upperIndex < sortedLevels.Count - 1 || lowerIndex > 0))
+            // Helper to get volume at index safely
+            Func<int, double> getVol = (idx) =>
             {
-                double upperVolume = (upperIndex < sortedLevels.Count - 1) ?
-                    sortedLevels[upperIndex + 1].Value.Volume : 0;
-                double lowerVolume = (lowerIndex > 0) ?
-                    sortedLevels[lowerIndex - 1].Value.Volume : 0;
+                if (idx < 0 || idx >= sortedLevels.Count) return 0;
+                return sortedLevels[idx].Value.Volume;
+            };
 
-                if (upperVolume >= lowerVolume && upperIndex < sortedLevels.Count - 1)
+            // Expand outward from POC, comparing 2 levels at a time (matches NinjaTrader/Gom algorithm)
+            while (accumulatedVolume < targetVolume)
+            {
+                double upVolume = 0;
+                double downVolume = 0;
+
+                // Check 2 levels up
+                if (vahIndex < sortedLevels.Count - 2)
                 {
-                    upperIndex++;
-                    accumulatedVolume += upperVolume;
+                    upVolume = getVol(vahIndex + 1) + getVol(vahIndex + 2);
                 }
-                else if (lowerIndex > 0)
+                else if (vahIndex < sortedLevels.Count - 1)
                 {
-                    lowerIndex--;
-                    accumulatedVolume += lowerVolume;
+                    upVolume = getVol(vahIndex + 1);
                 }
-                else
+
+                // Check 2 levels down
+                if (valIndex > 1)
                 {
+                    downVolume = getVol(valIndex - 1) + getVol(valIndex - 2);
+                }
+                else if (valIndex > 0)
+                {
+                    downVolume = getVol(valIndex - 1);
+                }
+
+                if (upVolume == 0 && downVolume == 0)
                     break;
+
+                if (upVolume >= downVolume && upVolume > 0)
+                {
+                    if (vahIndex < sortedLevels.Count - 2)
+                    {
+                        vahIndex += 2;
+                        accumulatedVolume += upVolume;
+                    }
+                    else if (vahIndex < sortedLevels.Count - 1)
+                    {
+                        vahIndex += 1;
+                        accumulatedVolume += upVolume;
+                    }
+                    else if (downVolume > 0)
+                    {
+                        if (valIndex > 1) { valIndex -= 2; accumulatedVolume += downVolume; }
+                        else if (valIndex > 0) { valIndex -= 1; accumulatedVolume += downVolume; }
+                    }
+                    else break;
                 }
+                else if (downVolume > 0)
+                {
+                    if (valIndex > 1)
+                    {
+                        valIndex -= 2;
+                        accumulatedVolume += downVolume;
+                    }
+                    else if (valIndex > 0)
+                    {
+                        valIndex -= 1;
+                        accumulatedVolume += downVolume;
+                    }
+                    else if (upVolume > 0)
+                    {
+                        if (vahIndex < sortedLevels.Count - 2) { vahIndex += 2; accumulatedVolume += upVolume; }
+                        else if (vahIndex < sortedLevels.Count - 1) { vahIndex += 1; accumulatedVolume += upVolume; }
+                    }
+                    else break;
+                }
+                else break;
             }
 
-            result.VAH = sortedLevels[upperIndex].Key;
-            result.VAL = sortedLevels[lowerIndex].Key;
+            result.VAH = sortedLevels[vahIndex].Key;
+            result.VAL = sortedLevels[valIndex].Key;
 
             // Find HVNs (High Volume Nodes) and compute Buy/Sell breakdown
             // HVN classification uses price position relative to close price (like NinjaTrader):

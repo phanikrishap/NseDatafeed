@@ -178,7 +178,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         {
             var border = new Border
             {
-                Background = _headerBg,
+                Background = _bgColor,  // Black background like ticker section
                 BorderBrush = _borderColor,
                 BorderThickness = new Thickness(0, 1, 0, 0),
                 Padding = new Thickness(8, 6, 8, 6)
@@ -343,5 +343,272 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             grid.Children.Add(panel);
         }
 
+        /// <summary>
+        /// Creates the Composite Profile Metrics panel with 1D, 3D, 5D, 10D columns.
+        /// Mirrors the FutBias "COMPOSITE PROFILE METRICS" table.
+        /// </summary>
+        public static Border CreateCompositeProfileMetricsPanel()
+        {
+            var border = new Border
+            {
+                Background = _bgColor,  // Black background like ticker section
+                BorderBrush = _borderColor,
+                BorderThickness = new Thickness(0, 1, 0, 0),
+                Padding = new Thickness(8, 6, 8, 6)
+            };
+
+            var mainPanel = new StackPanel();
+
+            // Header
+            var headerPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
+            headerPanel.Children.Add(new TextBlock
+            {
+                Text = "Composite Profile Metrics",
+                FontFamily = _ntFont,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(255, 180, 100)),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            var lblBarCount = new TextBlock
+            {
+                FontFamily = _ntFont,
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(10, 0, 0, 0)
+            };
+            lblBarCount.SetBinding(TextBlock.TextProperty, new Binding("VPMetrics.DailyBarCount") { StringFormat = "({0} daily bars)" });
+            headerPanel.Children.Add(lblBarCount);
+            mainPanel.Children.Add(headerPanel);
+
+            // Grid with row headers + 4 columns (1D, 3D, 5D, 10D)
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) }); // Row labels
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 1D
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 3D
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 5D
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 10D
+
+            // 0=header, 1=POC, 2=VAH, 3=VAL, 4=CompRng, 5=CVsAvg, 6=RollRng, 7=RVsAvg,
+            // 8=PriorEOD header, 9=D2Rng, 10=D2%, 11=D3Rng, 12=D3%, 13=D4Rng, 14=D4%, 15=yearly
+            for (int i = 0; i < 16; i++) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            // Column headers
+            AddCompHeaderCell(grid, 0, 1, "1D");
+            AddCompHeaderCell(grid, 0, 2, "3D");
+            AddCompHeaderCell(grid, 0, 3, "5D");
+            AddCompHeaderCell(grid, 0, 4, "10D");
+
+            // POC row
+            AddCompRowLabel(grid, 1, "POC");
+            AddCompValueCell(grid, 1, 1, "VPMetrics.CompPOC1D");
+            AddCompValueCell(grid, 1, 2, "VPMetrics.CompPOC3D");
+            AddCompValueCell(grid, 1, 3, "VPMetrics.CompPOC5D");
+            AddCompValueCell(grid, 1, 4, "VPMetrics.CompPOC10D");
+
+            // VAH row
+            AddCompRowLabel(grid, 2, "VAH");
+            AddCompValueCell(grid, 2, 1, "VPMetrics.CompVAH1D");
+            AddCompValueCell(grid, 2, 2, "VPMetrics.CompVAH3D");
+            AddCompValueCell(grid, 2, 3, "VPMetrics.CompVAH5D");
+            AddCompValueCell(grid, 2, 4, "VPMetrics.CompVAH10D");
+
+            // VAL row
+            AddCompRowLabel(grid, 3, "VAL");
+            AddCompValueCell(grid, 3, 1, "VPMetrics.CompVAL1D");
+            AddCompValueCell(grid, 3, 2, "VPMetrics.CompVAL3D");
+            AddCompValueCell(grid, 3, 3, "VPMetrics.CompVAL5D");
+            AddCompValueCell(grid, 3, 4, "VPMetrics.CompVAL10D");
+
+            // Comp Rng row
+            AddCompRowLabel(grid, 4, "Comp Rng");
+            AddCompValueCell(grid, 4, 1, "VPMetrics.CompRng1D");
+            AddCompValueCell(grid, 4, 2, "VPMetrics.CompRng3D");
+            AddCompValueCell(grid, 4, 3, "VPMetrics.CompRng5D");
+            AddCompValueCell(grid, 4, 4, "VPMetrics.CompRng10D");
+
+            // C vs Avg row
+            AddCompRowLabel(grid, 5, "C vs Avg");
+            AddCompValueCell(grid, 5, 1, "VPMetrics.CVsAvg1D");
+            AddCompValueCell(grid, 5, 2, "VPMetrics.CVsAvg3D");
+            AddCompValueCell(grid, 5, 3, "VPMetrics.CVsAvg5D");
+            AddCompValueCell(grid, 5, 4, "VPMetrics.CVsAvg10D");
+
+            // Roll Rng row
+            AddCompRowLabel(grid, 6, "Roll Rng");
+            AddCompValueCell(grid, 6, 1, "VPMetrics.RollRng1D");
+            AddCompValueCell(grid, 6, 2, "VPMetrics.RollRng3D");
+            AddCompValueCell(grid, 6, 3, "VPMetrics.RollRng5D");
+            AddCompValueCell(grid, 6, 4, "VPMetrics.RollRng10D");
+
+            // R vs Avg row
+            AddCompRowLabel(grid, 7, "R vs Avg");
+            AddCompValueCell(grid, 7, 1, "VPMetrics.RVsAvg1D");
+            AddCompValueCell(grid, 7, 2, "VPMetrics.RVsAvg3D");
+            AddCompValueCell(grid, 7, 3, "VPMetrics.RVsAvg5D");
+            AddCompValueCell(grid, 7, 4, "VPMetrics.RVsAvg10D");
+
+            // ═══════════════════════════════════════════════════════════════════
+            // PRIOR EOD SECTION
+            // ═══════════════════════════════════════════════════════════════════
+
+            // Prior EOD header
+            var priorEodHeader = new TextBlock
+            {
+                Text = "PRIOR EOD",
+                FontFamily = _ntFont,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 200)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 6, 0, 2)
+            };
+            Grid.SetRow(priorEodHeader, 8);
+            Grid.SetColumnSpan(priorEodHeader, 5);
+            grid.Children.Add(priorEodHeader);
+
+            // D-2 Rng row
+            AddCompRowLabel(grid, 9, "D-2 Rng");
+            AddCompValueCell(grid, 9, 1, "VPMetrics.D2Rng1D");
+            AddCompValueCell(grid, 9, 2, "VPMetrics.D2Rng3D");
+            AddCompValueCell(grid, 9, 3, "VPMetrics.D2Rng5D");
+            AddCompValueCell(grid, 9, 4, "VPMetrics.D2Rng10D");
+
+            // D-2 % row
+            AddCompRowLabel(grid, 10, "D-2 %");
+            AddCompValueCell(grid, 10, 1, "VPMetrics.D2Pct1D");
+            AddCompValueCell(grid, 10, 2, "VPMetrics.D2Pct3D");
+            AddCompValueCell(grid, 10, 3, "VPMetrics.D2Pct5D");
+            AddCompValueCell(grid, 10, 4, "VPMetrics.D2Pct10D");
+
+            // D-3 Rng row
+            AddCompRowLabel(grid, 11, "D-3 Rng");
+            AddCompValueCell(grid, 11, 1, "VPMetrics.D3Rng1D");
+            AddCompValueCell(grid, 11, 2, "VPMetrics.D3Rng3D");
+            AddCompValueCell(grid, 11, 3, "VPMetrics.D3Rng5D");
+            AddCompValueCell(grid, 11, 4, "VPMetrics.D3Rng10D");
+
+            // D-3 % row
+            AddCompRowLabel(grid, 12, "D-3 %");
+            AddCompValueCell(grid, 12, 1, "VPMetrics.D3Pct1D");
+            AddCompValueCell(grid, 12, 2, "VPMetrics.D3Pct3D");
+            AddCompValueCell(grid, 12, 3, "VPMetrics.D3Pct5D");
+            AddCompValueCell(grid, 12, 4, "VPMetrics.D3Pct10D");
+
+            // D-4 Rng row
+            AddCompRowLabel(grid, 13, "D-4 Rng");
+            AddCompValueCell(grid, 13, 1, "VPMetrics.D4Rng1D");
+            AddCompValueCell(grid, 13, 2, "VPMetrics.D4Rng3D");
+            AddCompValueCell(grid, 13, 3, "VPMetrics.D4Rng5D");
+            AddCompValueCell(grid, 13, 4, "VPMetrics.D4Rng10D");
+
+            // D-4 % row
+            AddCompRowLabel(grid, 14, "D-4 %");
+            AddCompValueCell(grid, 14, 1, "VPMetrics.D4Pct1D");
+            AddCompValueCell(grid, 14, 2, "VPMetrics.D4Pct3D");
+            AddCompValueCell(grid, 14, 3, "VPMetrics.D4Pct5D");
+            AddCompValueCell(grid, 14, 4, "VPMetrics.D4Pct10D");
+
+            // Yearly High/Low row
+            var yearlyPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+            yearlyPanel.Children.Add(CreateYearlyLabel("52W High:"));
+            yearlyPanel.Children.Add(CreateYearlyValue("VPMetrics.YearlyHigh", _greenColor));
+            yearlyPanel.Children.Add(CreateYearlyLabel(" ("));
+            yearlyPanel.Children.Add(CreateYearlyValue("VPMetrics.YearlyHighDate", null));
+            yearlyPanel.Children.Add(CreateYearlyLabel(")  |  52W Low:"));
+            yearlyPanel.Children.Add(CreateYearlyValue("VPMetrics.YearlyLow", _redColor));
+            yearlyPanel.Children.Add(CreateYearlyLabel(" ("));
+            yearlyPanel.Children.Add(CreateYearlyValue("VPMetrics.YearlyLowDate", null));
+            yearlyPanel.Children.Add(CreateYearlyLabel(")  |  Control: "));
+            yearlyPanel.Children.Add(CreateYearlyValue("VPMetrics.Control", null));
+            yearlyPanel.Children.Add(CreateYearlyLabel(" | Migration: "));
+            yearlyPanel.Children.Add(CreateYearlyValue("VPMetrics.Migration", null));
+
+            Grid.SetRow(yearlyPanel, 15);
+            Grid.SetColumnSpan(yearlyPanel, 5);
+            grid.Children.Add(yearlyPanel);
+
+            mainPanel.Children.Add(grid);
+            border.Child = mainPanel;
+            return border;
+        }
+
+        private static void AddCompHeaderCell(Grid grid, int row, int col, string text)
+        {
+            var tb = new TextBlock
+            {
+                Text = text,
+                FontFamily = _ntFont,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(180, 180, 180)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 2, 0, 2)
+            };
+            Grid.SetRow(tb, row);
+            Grid.SetColumn(tb, col);
+            grid.Children.Add(tb);
+        }
+
+        private static void AddCompRowLabel(Grid grid, int row, string label)
+        {
+            var tb = new TextBlock
+            {
+                Text = label,
+                FontFamily = _ntFont,
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 2, 5, 2)
+            };
+            Grid.SetRow(tb, row);
+            Grid.SetColumn(tb, 0);
+            grid.Children.Add(tb);
+        }
+
+        private static void AddCompValueCell(Grid grid, int row, int col, string bindingPath)
+        {
+            var tb = new TextBlock
+            {
+                FontFamily = _ntFont,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = _fgColor,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 2, 0, 2)
+            };
+            tb.SetBinding(TextBlock.TextProperty, new Binding(bindingPath));
+            Grid.SetRow(tb, row);
+            Grid.SetColumn(tb, col);
+            grid.Children.Add(tb);
+        }
+
+        private static TextBlock CreateYearlyLabel(string text)
+        {
+            return new TextBlock
+            {
+                Text = text,
+                FontFamily = _ntFont,
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+        }
+
+        private static TextBlock CreateYearlyValue(string bindingPath, SolidColorBrush color)
+        {
+            var tb = new TextBlock
+            {
+                FontFamily = _ntFont,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = color ?? _fgColor,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            tb.SetBinding(TextBlock.TextProperty, new Binding(bindingPath));
+            return tb;
+        }
     }
 }

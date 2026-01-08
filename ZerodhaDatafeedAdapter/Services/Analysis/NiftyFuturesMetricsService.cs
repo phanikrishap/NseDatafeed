@@ -32,6 +32,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         // Configuration
         private const int HISTORICAL_DAYS = 40;
+        private const int YEARLY_BARS = 252; // 1 year of daily bars for yearly high/low
         private const double VALUE_AREA_PERCENT = 0.70;
         private const double HVN_RATIO = 0.25;
         private const double VP_PRICE_INTERVAL = 1.0;
@@ -49,18 +50,23 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private BarsRequest _rangeATRBarsRequest;
         private BarsRequest _tickBarsRequest;
         private BarsRequest _minuteBarsRequest;
+        private BarsRequest _dailyBarsRequest; // 1440-minute bars for yearly high/low and ADR
         private Instrument _niftyFuturesInstrument;
         private Instrument _niftyIInstrument;
         private string _niftyFuturesSymbol;
         private double _tickSize = 0.05;
 
         // Components
-        private readonly InternalVolumeProfileEngine _vpEngine = new InternalVolumeProfileEngine();
+        private readonly VPEngine _vpEngine = new VPEngine();
         private readonly RollingVolumeProfileEngine _rollingVpEngine = new RollingVolumeProfileEngine(60);
         private readonly VPRelativeMetricsEngine _relMetrics = new VPRelativeMetricsEngine();
+        private readonly CompositeProfileEngine _compositeEngine = new CompositeProfileEngine();
         private InternalTickToBarMapper _tickMapper;
 
         private DateTime _lastMinuteBarTime = DateTime.MinValue;
+        private double _currentDayHigh = double.MinValue;
+        private double _currentDayLow = double.MaxValue;
+        private double _lastPrice = 0;
 
         // Data
         private List<RangeATRBar> _historicalRangeATRBars = new List<RangeATRBar>();
@@ -170,12 +176,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     _tickBarsRequest.Dispose();
                     _tickBarsRequest = null;
                 }
-                
+
                 if (_minuteBarsRequest != null)
                 {
                     _minuteBarsRequest.Update -= OnMinuteBarsUpdate;
                     _minuteBarsRequest.Dispose();
                     _minuteBarsRequest = null;
+                }
+
+                if (_dailyBarsRequest != null)
+                {
+                    _dailyBarsRequest.Update -= OnDailyBarsUpdate;
+                    _dailyBarsRequest.Dispose();
+                    _dailyBarsRequest = null;
                 }
             });
             Logger.Info("[NiftyFuturesMetricsService] Stop(): Service stopped");
@@ -183,7 +196,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         private async Task RequestHistoricalData()
         {
-            var (bars, ticks, success) = await _historicalDataLoader.LoadHistoricalDataAsync(_niftyIInstrument); // Or _RangeATRBarsRequest? No, it uses internal requests.
+            // Request daily bars FIRST (for ADR, yearly, prior EOD) - these take time
+            await RequestDailyBarsAsync();
+
+            var (bars, ticks, success) = await _historicalDataLoader.LoadHistoricalDataAsync(_niftyIInstrument);
 
             if (!success)
             {
@@ -209,6 +225,53 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             _isLivePhaseActive = true;
 
             await SetupLiveUpdateHandler();
+        }
+
+        private Task RequestDailyBarsAsync()
+        {
+            var tcs = new TaskCompletionSource<bool>();
+
+            NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+            {
+                _dailyBarsRequest = new BarsRequest(_niftyIInstrument, YEARLY_BARS);
+                _dailyBarsRequest.BarsPeriod = new BarsPeriod
+                {
+                    BarsPeriodType = BarsPeriodType.Minute,
+                    Value = 1440
+                };
+                _dailyBarsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                _dailyBarsRequest.Update += OnDailyBarsUpdate;
+
+                _dailyBarsRequest.Request((request, errorCode, errorMessage) =>
+                {
+                    if (errorCode == ErrorCode.NoError)
+                    {
+                        // Process all historical daily bars
+                        var bars = request.Bars;
+                        for (int i = 0; i < bars.Count; i++)
+                        {
+                            _compositeEngine.AddDailyBar(
+                                bars.GetTime(i),
+                                bars.GetOpen(i),
+                                bars.GetHigh(i),
+                                bars.GetLow(i),
+                                bars.GetClose(i),
+                                bars.GetVolume(i)
+                            );
+                        }
+                        RangeBarLogger.Info($"[NiftyFuturesMetricsService] Daily bars loaded: {bars.Count} bars for ADR/yearly calculations");
+                        RangeBarLogger.Info($"[DAILY_BARS] Loaded {bars.Count} bars for composite profiles");
+                        tcs.TrySetResult(true);
+                    }
+                    else
+                    {
+                        Logger.Warn($"[NiftyFuturesMetricsService] Daily bars request failed: {errorCode} - {errorMessage}");
+                        tcs.TrySetResult(false);
+                    }
+                });
+            });
+
+            return tcs.Task;
         }
 
         private void ProcessHistoricalVolumeProfile()
@@ -281,6 +344,49 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfile(): Built RelMetrics reference from {totalMinuteSamples} minute samples");
 
+            // ═══════════════════════════════════════════════════════════════════
+            // COMPOSITE PROFILE: Feed historical ticks to composite engine
+            // Use the same tick data we already have (last 10 sessions for composite)
+            // ═══════════════════════════════════════════════════════════════════
+            // Get last 10 sessions, excluding today (today's session stays open for live ticks)
+            var recentSessions = sessionGroups
+                .Where(g => g.Key.Date < DateTime.Today)  // Exclude today
+                .OrderByDescending(g => g.Key)
+                .Take(10)  // Last 10 completed trading days
+                .OrderBy(g => g.Key)  // Process in chronological order
+                .ToList();
+
+            Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfile(): Building composite profiles from {recentSessions.Count} prior sessions");
+
+            foreach (var sessionGroup in recentSessions)
+            {
+                var sessionBars = sessionGroup.OrderBy(b => b.Time).ToList();
+                DateTime sessionDate = sessionGroup.Key;
+
+                // Start session in composite engine
+                _compositeEngine.StartSession(sessionDate);
+
+                int ticksProcessed = 0;
+                foreach (var bar in sessionBars)
+                {
+                    var ticksForBar = _tickMapper.GetTicksForBar(bar.Index);
+                    foreach (var tick in ticksForBar)
+                    {
+                        _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+                        ticksProcessed++;
+                    }
+                }
+
+                // Finalize the session (stores the profile for composite aggregation)
+                _compositeEngine.FinalizeCurrentSession();
+                Logger.Debug($"[NiftyFuturesMetricsService] Composite: Finalized session {sessionDate:yyyy-MM-dd} with {ticksProcessed} ticks");
+            }
+
+            RangeBarLogger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfile(): Composite profiles built, {_compositeEngine.DailyProfileCount} session profiles stored");
+
+            // Start today's session in composite engine (will receive live ticks)
+            _compositeEngine.StartSession(DateTime.Today);
+
             // Set _lastSessionDate for live session detection
             _lastSessionDate = sessionGroups.Last().Key;
 
@@ -318,6 +424,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 {
                     _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
                     _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+
+                    // Also feed to composite engine (for today's current session)
+                    _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+
+                    // Track current day high/low
+                    if (tick.Price > _currentDayHigh) _currentDayHigh = tick.Price;
+                    if (tick.Price < _currentDayLow) _currentDayLow = tick.Price;
+                    _lastPrice = tick.Price;
                 }
 
                 _rollingVpEngine.ExpireOldData(bar.Time);
@@ -426,6 +540,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         Logger.Warn($"[NiftyFuturesMetricsService] Minute bars request failed: {errorCode} - {errorMessage}");
                     }
                 });
+
+                // Note: Daily bars already loaded in RequestDailyBarsAsync() before historical data processing
             });
         }
 
@@ -481,7 +597,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private void OnMinuteBarsUpdate(object sender, BarsUpdateEventArgs e)
         {
              if (!_isLivePhaseActive) return;
-             // ... logic from original file ...
              try
             {
                 var bars = _minuteBarsRequest.Bars;
@@ -501,6 +616,35 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             catch (Exception ex)
             {
                 Logger.Error($"[NiftyFuturesMetricsService] OnMinuteBarsUpdate Error: {ex.Message}");
+            }
+        }
+
+        private void OnDailyBarsUpdate(object sender, BarsUpdateEventArgs e)
+        {
+            if (!_isLivePhaseActive) return;
+            try
+            {
+                var bars = _dailyBarsRequest.Bars;
+                if (bars == null || bars.Count == 0) return;
+
+                // Process new daily bar
+                for (int i = e.MinIndex; i <= e.MaxIndex; i++)
+                {
+                    _compositeEngine.AddDailyBar(
+                        bars.GetTime(i),
+                        bars.GetOpen(i),
+                        bars.GetHigh(i),
+                        bars.GetLow(i),
+                        bars.GetClose(i),
+                        bars.GetVolume(i)
+                    );
+                }
+
+                Logger.Debug($"[NiftyFuturesMetricsService] OnDailyBarsUpdate: Processed bars {e.MinIndex}-{e.MaxIndex}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[NiftyFuturesMetricsService] OnDailyBarsUpdate Error: {ex.Message}");
             }
         }
         
@@ -538,8 +682,16 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             {
                 _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
                 _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+
+                // Feed ticks to composite engine (uses 5 rupee interval)
+                _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+
+                // Track current day high/low and last price
+                if (tick.Price > _currentDayHigh) _currentDayHigh = tick.Price;
+                if (tick.Price < _currentDayLow) _currentDayLow = tick.Price;
+                _lastPrice = tick.Price;
             }
-            _rollingVpEngine.ExpireOldData(DateTime.Now); // Or bar time
+            _rollingVpEngine.ExpireOldData(DateTime.Now);
         }
 
         private void DetermineBuySellDirection(List<LiveTick> ticks)
@@ -588,6 +740,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 double cumHVNSellRollingRank = _relMetrics.CumHVNSellRollingRank.Count > 0 ? _relMetrics.CumHVNSellRollingRank[0] : 100;
                 double cumValueWidthRollingRank = _relMetrics.CumValueWidthRollingRank.Count > 0 ? _relMetrics.CumValueWidthRollingRank[0] : 100;
 
+                // Calculate composite profile metrics
+                double currentPrice = _lastPrice > 0 ? _lastPrice : vpMetrics.POC;
+                double dayHigh = _currentDayHigh > double.MinValue ? _currentDayHigh : vpMetrics.VAH;
+                double dayLow = _currentDayLow < double.MaxValue ? _currentDayLow : vpMetrics.VAL;
+                var compositeMetrics = _compositeEngine.Recalculate(currentPrice, dayHigh, dayLow);
+
                 var result = new NiftyFuturesVPMetrics
                 {
                     IsValid = vpMetrics.IsValid,
@@ -621,6 +779,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     CumHVNSellRollingRank = cumHVNSellRollingRank,
                     CumValueWidthRollingRank = cumValueWidthRollingRank,
 
+                    // Composite profile metrics
+                    Composite = compositeMetrics,
+
                     BarCount = _historicalRangeATRBars.Count(b => b.Time >= _sessionStart),
                     Symbol = _niftyFuturesSymbol,
                     LastUpdate = DateTime.Now,
@@ -648,9 +809,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
              _vpEngine.Reset(VP_PRICE_INTERVAL);
              _rollingVpEngine.Reset(VP_PRICE_INTERVAL);
              _relMetrics.StartSession(date ?? DateTime.Now);
+             _compositeEngine.StartSession(date ?? DateTime.Now);
              while (_pendingTicks.TryDequeue(out _)) { }
              _sessionStart = date ?? DateTime.Now;
-             
+
+             // Reset day high/low tracking
+             _currentDayHigh = double.MinValue;
+             _currentDayLow = double.MaxValue;
+             _lastPrice = 0;
+
              RecalculateAndPublishMetrics();
         }
 
