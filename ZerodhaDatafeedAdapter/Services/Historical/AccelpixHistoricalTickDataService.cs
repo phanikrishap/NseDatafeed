@@ -469,7 +469,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 var daysToFetch = GetDaysToFetch();
                 HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] {zerodhaSymbol} -> {accelpixSymbol}: Fetching {daysToFetch.Count} days");
 
-                // Check if all days are cached
+                // Check if all days are cached in SQLite
                 bool allDaysCached = daysToFetch.All(d => IciciTickCacheDb.Instance.HasCachedData(zerodhaSymbol, d));
 
                 if (allDaysCached)
@@ -481,7 +481,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         if (cached != null) totalTicks += cached.Count;
                     }
 
-                    HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] CACHE HIT: {zerodhaSymbol} has {totalTicks} ticks across {daysToFetch.Count} day(s)");
+                    HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] SQLITE CACHE HIT: {zerodhaSymbol} has {totalTicks} ticks across {daysToFetch.Count} day(s)");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
@@ -490,6 +490,26 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         TickCount = totalTicks
                     });
                     return;
+                }
+
+                // Check if NT8 already has tick data persisted (from previous session)
+                // This avoids re-downloading data that NT8 already has
+                // We check EACH day individually to ensure complete coverage
+                if (daysToFetch.Count > 0)
+                {
+                    bool nt8HasAllDays = await CheckNT8HasTickDataForDaysAsync(zerodhaSymbol, daysToFetch);
+                    if (nt8HasAllDays)
+                    {
+                        HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] NT8 DB HIT: {zerodhaSymbol} - skipping download (all {daysToFetch.Count} days already persisted)");
+                        statusSubject.OnNext(new InstrumentTickDataStatus
+                        {
+                            ZerodhaSymbol = zerodhaSymbol,
+                            State = TickDataState.Ready,
+                            TradeDate = daysToFetch.Last(),
+                            TickCount = -1 // Unknown count, but data exists
+                        });
+                        return;
+                    }
                 }
 
                 // Update status
@@ -634,6 +654,25 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 var daysToFetch = GetDaysToFetch();
                 HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol} -> {accelpixSymbol}: Fetching {daysToFetch.Count} days");
 
+                // Check if NT8 already has tick data persisted (from previous session)
+                // We check EACH day individually to ensure complete coverage
+                if (daysToFetch.Count > 0)
+                {
+                    bool nt8HasAllDays = await CheckNT8HasTickDataForDaysAsync(zerodhaSymbol, daysToFetch);
+                    if (nt8HasAllDays)
+                    {
+                        HistoricalTickLogger.Info($"[INST-QUEUE] NT8 DB HIT: {zerodhaSymbol} - skipping download (all {daysToFetch.Count} days already persisted)");
+                        statusSubject.OnNext(new InstrumentTickDataStatus
+                        {
+                            ZerodhaSymbol = zerodhaSymbol,
+                            State = TickDataState.Ready,
+                            TradeDate = daysToFetch.Last(),
+                            TickCount = -1
+                        });
+                        return;
+                    }
+                }
+
                 // Update status to downloading
                 statusSubject.OnNext(new InstrumentTickDataStatus
                 {
@@ -777,6 +816,88 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             TimeZoneInfo istZone = TimeZoneInfo.FindSystemTimeZoneById(Classes.Constants.IndianTimeZoneId);
             return TimeZoneInfo.ConvertTime(DateTime.Now, istZone);
+        }
+
+        /// <summary>
+        /// Check if NT8 already has tick data for the most recent day.
+        /// If the most recent day has >500 ticks, consider the instrument up-to-date.
+        /// This is a quick check to avoid unnecessary API downloads.
+        /// </summary>
+        private async Task<bool> CheckNT8HasTickDataForDaysAsync(string zerodhaSymbol, List<DateTime> daysToCheck)
+        {
+            if (daysToCheck == null || daysToCheck.Count == 0)
+                return false;
+
+            try
+            {
+                // Only check the most recent day - if it has data, skip backfill
+                var mostRecentDay = daysToCheck.Last();
+                var tcs = new TaskCompletionSource<int>();
+
+                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        var ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
+                        if (ntInstrument == null)
+                        {
+                            tcs.TrySetResult(0);
+                            return;
+                        }
+
+                        DateTime fromDate = mostRecentDay.Date.AddHours(9).AddMinutes(15);  // 09:15 IST
+                        DateTime toDate = mostRecentDay.Date.AddHours(15).AddMinutes(30);   // 15:30 IST
+
+                        // Create a BarsRequest to probe NT8's database
+                        var barsRequest = new BarsRequest(ntInstrument, 500);
+                        barsRequest.BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Tick, Value = 1 };
+                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                        barsRequest.FromLocal = fromDate.ToLocalTime();
+                        barsRequest.ToLocal = toDate.ToLocalTime();
+
+                        barsRequest.Request((barsResult, errorCode, errorMessage) =>
+                        {
+                            if (errorCode == ErrorCode.NoError && barsResult?.Bars != null)
+                            {
+                                tcs.TrySetResult(barsResult.Bars.Count);
+                            }
+                            else
+                            {
+                                tcs.TrySetResult(0);
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        HistoricalTickLogger.Debug($"[NT8-CHECK] {zerodhaSymbol}: Exception: {ex.Message}");
+                        tcs.TrySetResult(0);
+                    }
+                });
+
+                // Wait for the BarsRequest callback with timeout
+                var timeoutTask = Task.Delay(2000);
+                var completedTask = await Task.WhenAny(tcs.Task, timeoutTask);
+
+                int tickCount = 0;
+                if (completedTask == tcs.Task)
+                {
+                    tickCount = tcs.Task.Result;
+                }
+
+                // If most recent day has >500 ticks, consider up-to-date
+                bool hasData = tickCount >= 500;
+                if (hasData)
+                {
+                    HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: NT8 has {tickCount} ticks for {mostRecentDay:MM-dd} - skipping download");
+                }
+
+                return hasData;
+            }
+            catch (Exception ex)
+            {
+                HistoricalTickLogger.Debug($"[NT8-CHECK] {zerodhaSymbol}: Error: {ex.Message}");
+                return false;
+            }
         }
 
         #endregion

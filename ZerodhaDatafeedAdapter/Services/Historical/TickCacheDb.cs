@@ -520,6 +520,8 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     return 0;
                 }
 
+                int deletedTicks = 0;
+
                 lock (_dbLock)
                 {
                     using (var connection = new SQLiteConnection(_connectionString))
@@ -528,8 +530,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                         using (var transaction = connection.BeginTransaction())
                         {
-                            int deletedTicks = 0;
-
                             // Delete ticks for this symbol
                             string deleteTicksSql = "DELETE FROM ticks WHERE symbol_id = @sid";
                             using (var cmd = new SQLiteCommand(deleteTicksSql, connection, transaction))
@@ -546,17 +546,54 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                                 cmd.ExecuteNonQuery();
                             }
 
-                            transaction.Commit();
-
-                            if (deletedTicks > 0)
+                            // Also delete the symbol from symbols table
+                            string deleteSymbolSql = "DELETE FROM symbols WHERE id = @sid";
+                            using (var cmd = new SQLiteCommand(deleteSymbolSql, connection, transaction))
                             {
-                                Logger.Info($"[TickCacheDb] Deleted {deletedTicks} cached ticks for {symbol}");
+                                cmd.Parameters.AddWithValue("@sid", symbolId);
+                                cmd.ExecuteNonQuery();
                             }
 
-                            return deletedTicks;
+                            transaction.Commit();
+                        }
+
+                        // Remove from in-memory cache
+                        _symbolIdCache.Remove(symbol);
+                        _idSymbolCache.Remove(symbolId);
+
+                        if (deletedTicks > 0)
+                        {
+                            Logger.Info($"[TickCacheDb] Deleted {deletedTicks} cached ticks for {symbol}");
+                        }
+
+                        // Check remaining ticks and vacuum if low (to reclaim disk space)
+                        int remainingTicks = 0;
+                        using (var cmd = new SQLiteCommand("SELECT COUNT(*) FROM ticks", connection))
+                        {
+                            remainingTicks = Convert.ToInt32(cmd.ExecuteScalar());
+                        }
+
+                        // Vacuum when database is empty or has very few remaining ticks
+                        // This reclaims disk space from deleted records
+                        if (remainingTicks < 1000)
+                        {
+                            try
+                            {
+                                using (var cmd = new SQLiteCommand("VACUUM", connection))
+                                {
+                                    cmd.ExecuteNonQuery();
+                                }
+                                Logger.Info($"[TickCacheDb] VACUUMed database (remaining ticks: {remainingTicks})");
+                            }
+                            catch (Exception vacuumEx)
+                            {
+                                Logger.Debug($"[TickCacheDb] VACUUM skipped: {vacuumEx.Message}");
+                            }
                         }
                     }
                 }
+
+                return deletedTicks;
             }
             catch (Exception ex)
             {

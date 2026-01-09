@@ -6,6 +6,7 @@ using NinjaTrader.NinjaScript;
 using ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer;
 using ZerodhaDatafeedAdapter.AddOns.TBSManager;
 using ZerodhaDatafeedAdapter.AddOns.SimulationEngine;
+using ZerodhaDatafeedAdapter.AddOns.OptionSignals;
 using Logger = ZerodhaDatafeedAdapter.Logger;
 
 namespace NinjaTrader.NinjaScript.AddOns
@@ -19,6 +20,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private NTMenuItem _menuItem;
         private NTMenuItem _tbsMenuItem;
         private NTMenuItem _simMenuItem;
+        private NTMenuItem _signalsMenuItem;
         private NTMenuItem _existingNewMenu;
         private static bool _autoOpened = false;
 
@@ -76,6 +78,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                         var tbsWin = new TBSManagerWindow();
                         tbsWin.Show();
                         Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): TBSManagerWindow shown successfully");
+
+                        // Open Option Signals window
+                        Logger.Debug("[MarketAnalyzerAddOn] OnWindowCreated(): Creating OptionSignalsWindow instance");
+                        var signalsWin = new OptionSignalsWindow();
+                        signalsWin.Show();
+                        Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): OptionSignalsWindow shown successfully");
                     }
                     catch (Exception ex)
                     {
@@ -123,6 +131,15 @@ namespace NinjaTrader.NinjaScript.AddOns
             _simMenuItem.Click += OnSimMenuItemClick;
             _existingNewMenu.Items.Add(_simMenuItem);
 
+            // Add Option Signals menu item
+            _signalsMenuItem = new NTMenuItem
+            {
+                Header = "Option Signals",
+                Style = Application.Current.TryFindResource("MainMenuItem") as Style
+            };
+            _signalsMenuItem.Click += OnSignalsMenuItemClick;
+            _existingNewMenu.Items.Add(_signalsMenuItem);
+
             Logger.Info("[MarketAnalyzerAddOn] OnWindowCreated(): Menu items added successfully");
         }
 
@@ -153,6 +170,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                         _existingNewMenu.Items.Remove(_simMenuItem);
                         _simMenuItem.Click -= OnSimMenuItemClick;
                         _simMenuItem = null;
+                    }
+
+                    if (_signalsMenuItem != null && _existingNewMenu.Items.Contains(_signalsMenuItem))
+                    {
+                        _existingNewMenu.Items.Remove(_signalsMenuItem);
+                        _signalsMenuItem.Click -= OnSignalsMenuItemClick;
+                        _signalsMenuItem = null;
                     }
                 }
 
@@ -213,6 +237,25 @@ namespace NinjaTrader.NinjaScript.AddOns
                 catch (Exception ex)
                 {
                     Logger.Error($"[MarketAnalyzerAddOn] OnSimMenuItemClick(): Failed to create window - {ex.Message}", ex);
+                }
+            }));
+        }
+
+        private void OnSignalsMenuItemClick(object sender, RoutedEventArgs e)
+        {
+            Logger.Info("[MarketAnalyzerAddOn] OnSignalsMenuItemClick(): User clicked Option Signals menu item");
+
+            Core.Globals.RandomDispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    var win = new OptionSignalsWindow();
+                    win.Show();
+                    Logger.Info("[MarketAnalyzerAddOn] OnSignalsMenuItemClick(): New OptionSignalsWindow opened");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerAddOn] OnSignalsMenuItemClick(): Failed to create window - {ex.Message}", ex);
                 }
             }));
         }
