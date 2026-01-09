@@ -270,6 +270,11 @@ namespace ZerodhaDatafeedAdapter.Logging
         public static ILoggerService HistoricalTick => GetLogger(LogDomain.HistoricalTick);
 
         /// <summary>
+        /// Gets the Option Signals logger for HVN and trend analysis.
+        /// </summary>
+        public static ILoggerService OpSignals => GetLogger(LogDomain.OpSignals);
+
+        /// <summary>
         /// Gets the ICICI API logger for Breeze API operations.
         /// [Deprecated] Use HistoricalTick instead - kept for backward compatibility.
         /// </summary>
@@ -546,7 +551,10 @@ namespace ZerodhaDatafeedAdapter.Logging
         RangeBar,
 
         /// <summary>Historical Tick Data log - unified for ICICI and Accelpix (HistoricalTick.log)</summary>
-        HistoricalTick
+        HistoricalTick,
+
+        /// <summary>Option Signals log - HVN and trend analysis (OpSignals.log)</summary>
+        OpSignals
     }
 
     /// <summary>
@@ -606,6 +614,7 @@ namespace ZerodhaDatafeedAdapter.Logging
                 LogDomain.MarketData => "MarketData.log",
                 LogDomain.RangeBar => "RangeBar.log",
                 LogDomain.HistoricalTick => "HistoricalTick.log",
+                LogDomain.OpSignals => "OpSignals.log",
                 _ => "ZerodhaAdapter.log"
             };
         }

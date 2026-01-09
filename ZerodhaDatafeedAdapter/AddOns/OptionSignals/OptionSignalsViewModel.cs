@@ -17,20 +17,85 @@ using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.Reactive;
+using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
+using ZerodhaDatafeedAdapter.Services.Analysis.Components;
 using ZerodhaDatafeedAdapter.Services.Historical;
 using ZerodhaDatafeedAdapter.ViewModels;
 
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 {
+    /// <summary>
+    /// Tracks VP state for a single option symbol (CE or PE at a strike)
+    /// VP is computed at RangeATR bar close using ticks from that bar's time range.
+    /// </summary>
+    internal class OptionVPState
+    {
+        public string Symbol { get; set; }
+        public string Type { get; set; } // "CE" or "PE"
+        public OptionSignalsRow Row { get; set; }
+
+        // Session VP - accumulates all day, never expires
+        public VPEngine SessionVPEngine { get; set; }
+
+        // Rolling VP - 60-minute rolling window
+        public RollingVolumeProfileEngine RollingVPEngine { get; set; }
+
+        public BarsRequest RangeBarsRequest { get; set; }
+        public BarsRequest TickBarsRequest { get; set; }
+        public double LastClosePrice { get; set; }
+        public int LastVPTickIndex { get; set; } = -1;
+        public int LastRangeBarIndex { get; set; } = -1;
+        public DateTime LastBarCloseTime { get; set; } = DateTime.MinValue;
+
+        // Rx subjects for coordinating data readiness
+        public BehaviorSubject<bool> TickDataReady { get; } = new BehaviorSubject<bool>(false);
+        public BehaviorSubject<bool> RangeBarsReady { get; } = new BehaviorSubject<bool>(false);
+        public Subject<BarsUpdateEventArgs> RangeBarUpdates { get; } = new Subject<BarsUpdateEventArgs>();
+        public CompositeDisposable Subscriptions { get; } = new CompositeDisposable();
+
+        // Trend tracking
+        public HvnTrend LastSessionTrend { get; set; } = HvnTrend.Neutral;
+        public HvnTrend LastRollingTrend { get; set; } = HvnTrend.Neutral;
+        public DateTime? SessionTrendOnsetTime { get; set; }
+        public DateTime? RollingTrendOnsetTime { get; set; }
+
+        public OptionVPState()
+        {
+            SessionVPEngine = new VPEngine();
+            RollingVPEngine = new RollingVolumeProfileEngine(60); // 60-min rolling window
+
+            // Initialize with dynamic tick intervals for options
+            SessionVPEngine.Reset(0.50);
+            RollingVPEngine.ResetWithDynamicInterval();
+        }
+
+        public void Dispose()
+        {
+            Subscriptions?.Dispose();
+            TickDataReady?.Dispose();
+            RangeBarsReady?.Dispose();
+            RangeBarUpdates?.Dispose();
+            RangeBarsRequest?.Dispose();
+            TickBarsRequest?.Dispose();
+        }
+    }
+
     public class OptionSignalsViewModel : ViewModelBase, IDisposable
     {
         private CompositeDisposable _subscriptions;
-        private readonly Dictionary<string, BarsRequest> _barsRequests = new Dictionary<string, BarsRequest>();
+        private readonly Dictionary<string, OptionVPState> _vpStates = new Dictionary<string, OptionVPState>();
         private readonly Dictionary<string, (OptionSignalsRow row, string type)> _symbolToRowMap = new Dictionary<string, (OptionSignalsRow, string)>();
         private readonly Subject<OptionsGeneratedEvent> _strikeGenerationTrigger = new Subject<OptionsGeneratedEvent>();
         private readonly Dispatcher _dispatcher;
         private readonly object _rowsLock = new object();
+
+        // Dedicated logger
+        private static readonly ILoggerService _log = LoggerFactory.OpSignals;
+
+        // VP Configuration
+        private const double VALUE_AREA_PERCENT = 0.70;
+        private const double HVN_RATIO = 0.25;
 
         // Data Collections
         public ObservableCollection<OptionSignalsRow> Rows { get; } = new ObservableCollection<OptionSignalsRow>();
@@ -60,7 +125,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             set { if (_statusText != value) { _statusText = value; OnPropertyChanged(); } }
         }
 
-        public bool IsBusy
+        public new bool IsBusy
         {
             get => _isBusy;
             set { if (_isBusy != value) { _isBusy = value; OnPropertyChanged(); } }
@@ -70,22 +135,20 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         {
             _dispatcher = Dispatcher.CurrentDispatcher;
             BindingOperations.EnableCollectionSynchronization(Rows, _rowsLock);
-            Logger.Info("[OptionSignalsViewModel] Initialized");
+            _log.Info("[OptionSignalsViewModel] Initialized");
             SetupInternalPipelines();
         }
 
         private void SetupInternalPipelines()
         {
-            // Use Switch() to ensure that if a new OptionsGeneratedEvent arrives,
-            // we immediately stop/cancel any previous synchronization and strike population.
             _subscriptions = new CompositeDisposable();
-            
+
             var strikePipeline = _strikeGenerationTrigger
                 .Select(evt => Observable.FromAsync(ct => SyncAndPopulateStrikes(evt, ct)))
-                .Switch() // The magic sauce: cancels previous task if new event arrives
+                .Switch()
                 .Subscribe(
-                    _ => Logger.Debug("[OptionSignalsViewModel] Strike generation pipeline iteration completed"),
-                    ex => Logger.Error($"[OptionSignalsViewModel] Strike pipeline error: {ex.Message}")
+                    _ => _log.Debug("[OptionSignalsViewModel] Strike generation pipeline iteration completed"),
+                    ex => _log.Error($"[OptionSignalsViewModel] Strike pipeline error: {ex.Message}")
                 );
 
             _subscriptions.Add(strikePipeline);
@@ -93,21 +156,18 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         public void StartServices()
         {
-            Logger.Info("[OptionSignalsViewModel] Starting services");
+            _log.Info("[OptionSignalsViewModel] Starting services");
             var hub = MarketDataReactiveHub.Instance;
 
-            // 1. Monitor Initial Strikes (Projected Open or Spot)
             _subscriptions.Add(hub.ProjectedOpenStream
                 .Where(s => s.IsComplete)
                 .Take(1)
                 .ObserveOnDispatcher()
                 .Subscribe(OnProjectedOpenReady));
 
-            // 2. Monitor Options Generated - this drives the row population
             _subscriptions.Add(hub.OptionsGeneratedStream
                 .Subscribe(evt => _strikeGenerationTrigger.OnNext(evt)));
 
-            // 3. Monitor Real-time LTP for current rows
             _subscriptions.Add(hub.OptionPriceBatchStream
                 .ObserveOnDispatcher()
                 .Subscribe(OnOptionPriceBatch));
@@ -115,22 +175,21 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         public void StopServices()
         {
-            Logger.Info("[OptionSignalsViewModel] Stopping services");
-            _subscriptions?.Clear(); // Clear but keep instance to avoid null refs in async callbacks
-            ClearBarsRequests();
+            _log.Info("[OptionSignalsViewModel] Stopping services");
+            _subscriptions?.Clear();
+            ClearAllVPStates();
         }
 
         private void OnProjectedOpenReady(ProjectedOpenState state)
         {
-            Logger.Info($"[OptionSignalsViewModel] Projected Open Ready: {state.NiftyProjectedOpen:F2}");
+            _log.Info($"[OptionSignalsViewModel] Projected Open Ready: {state.NiftyProjectedOpen:F2}");
         }
 
         private async Task SyncAndPopulateStrikes(OptionsGeneratedEvent evt, System.Threading.CancellationToken ct)
         {
             if (evt?.Options == null || evt.Options.Count == 0) return;
-            Logger.Info($"[OptionSignalsViewModel] SyncAndPopulateStrikes started for {evt.SelectedUnderlying} ATM={evt.ATMStrike}");
+            _log.Info($"[OptionSignalsViewModel] SyncAndPopulateStrikes started for {evt.SelectedUnderlying} ATM={evt.ATMStrike}");
 
-            // Update UI Properties (via UI dispatcher)
             await _dispatcher.InvokeAsync(() => {
                 Underlying = evt.SelectedUnderlying;
                 _selectedExpiry = evt.SelectedExpiry;
@@ -139,7 +198,6 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 StatusText = "Synchronizing Historical Tick Data...";
             });
 
-            // Calculate Strikes (ATM +/- 10)
             int atmStrike = (int)evt.ATMStrike;
             int step = 50;
             var uniqueStrikes = evt.Options.Where(o => o.strike.HasValue)
@@ -173,63 +231,66 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 return;
             }
 
-            // Wait for all symbols in batch to be Ready in NT DB (with timeout and cancellation)
+            // OPTIMIZATION: Reduced timeout and parallel sync with fast-fail
             var coordinator = HistoricalTickDataCoordinator.Instance;
-            var syncTaskList = symbolsToSync.Select(async sym => 
+            const int SYNC_TIMEOUT_SECONDS = 15; // Reduced from 60s
+
+            var syncTaskList = symbolsToSync.Select(async sym =>
             {
                 try {
                     await coordinator.GetInstrumentTickStatusStream(sym)
                         .Where(s => s.State == TickDataState.Ready || s.State == TickDataState.Failed || s.State == TickDataState.NoData)
                         .Take(1)
-                        .Timeout(TimeSpan.FromSeconds(60)) // Give it a minute per symbol
+                        .Timeout(TimeSpan.FromSeconds(SYNC_TIMEOUT_SECONDS))
                         .ToTask(ct);
                 } catch (OperationCanceledException) {
                     throw;
+                } catch (TimeoutException) {
+                    // Don't log individual timeouts - just continue
                 } catch (Exception ex) {
-                    Logger.Warn($"[OptionSignalsViewModel] Sync timeout/error for {sym}: {ex.Message}");
+                    _log.Warn($"[OptionSignalsViewModel] Sync error for {sym}: {ex.Message}");
                 }
             }).ToList();
 
             try
             {
                 await Task.WhenAll(syncTaskList);
-                Logger.Info($"[OptionSignalsViewModel] Historical sync finished for {evt.SelectedUnderlying}");
+                _log.Info($"[OptionSignalsViewModel] Historical sync finished for {evt.SelectedUnderlying}");
             }
             catch (OperationCanceledException)
             {
-                Logger.Debug($"[OptionSignalsViewModel] SyncAndPopulateStrikes cancelled");
+                _log.Debug($"[OptionSignalsViewModel] SyncAndPopulateStrikes cancelled");
                 return;
             }
             catch (Exception ex)
             {
-                Logger.Error($"[OptionSignalsViewModel] Sync wait failed: {ex.Message}");
+                _log.Error($"[OptionSignalsViewModel] Sync wait failed: {ex.Message}");
             }
 
-            // Populate Rows on UI thread
             await _dispatcher.InvokeAsync(() =>
             {
                 lock (_rowsLock)
                 {
                     Rows.Clear();
                     _symbolToRowMap.Clear();
-                    ClearBarsRequests();
+                    ClearAllVPStates();
 
                     foreach (var strike in strikesToLoad)
                     {
                         var row = new OptionSignalsRow { Strike = strike, IsATM = (strike == (int)evt.ATMStrike) };
-                        
+
                         if (strikeToSymbolMap.TryGetValue((strike, "CE"), out var ceSym))
                         {
                             row.CESymbol = ceSym;
                             _symbolToRowMap[ceSym] = (row, "CE");
-                            CreateBarsRequest(ceSym, (int)strike, "CE", row);
+                            CreateVPState(ceSym, strike, "CE", row);
                         }
 
                         if (strikeToSymbolMap.TryGetValue((strike, "PE"), out var peSym))
                         {
                             row.PESymbol = peSym;
                             _symbolToRowMap[peSym] = (row, "PE");
-                            CreateBarsRequest(peSym, (int)strike, "PE", row);
+                            CreateVPState(peSym, strike, "PE", row);
                         }
 
                         Rows.Add(row);
@@ -241,65 +302,407 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             });
         }
 
-        private void CreateBarsRequest(string symbol, int strike, string type, OptionSignalsRow row)
+        private void CreateVPState(string symbol, int strike, string type, OptionSignalsRow row)
         {
             var instrument = Instrument.GetInstrument(symbol);
             if (instrument == null)
             {
-                Logger.Warn($"[OptionSignalsViewModel] Instrument not found for {symbol}");
+                _log.Warn($"[OptionSignalsViewModel] Instrument not found for {symbol}");
                 return;
             }
 
-            // Use NT's specialized dispatcher for NT core objects
+            var state = new OptionVPState
+            {
+                Symbol = symbol,
+                Type = type,
+                Row = row
+            };
+
+            // Setup Rx pipeline: wait for both tick and range data, then process
+            var bothReadyPipeline = Observable.CombineLatest(
+                state.TickDataReady.Where(r => r),
+                state.RangeBarsReady.Where(r => r),
+                (tickReady, rangeReady) => true
+            )
+            .Take(1)
+            .Subscribe(_ =>
+            {
+                _log.Debug($"[VP] {symbol} both tick and range data ready, processing historical");
+                ProcessHistoricalData(state);
+            });
+
+            state.Subscriptions.Add(bothReadyPipeline);
+
+            // Setup real-time bar update pipeline (only processes after initial data is ready)
+            var realTimeUpdatePipeline = state.RangeBarUpdates
+                .Where(_ => state.LastRangeBarIndex >= 0) // Only after initial processing
+                .Subscribe(e => OnRealTimeBarUpdate(state, e));
+
+            state.Subscriptions.Add(realTimeUpdatePipeline);
+
             NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
             {
-                var request = new BarsRequest(instrument, 10); // Small buffer for ATR signals
-                request.BarsPeriod = new BarsPeriod
+                // Create Tick BarsRequest for Volume Profile (request first)
+                var tickRequest = new BarsRequest(instrument, 10000);
+                tickRequest.BarsPeriod = new BarsPeriod
                 {
-                    BarsPeriodType = (BarsPeriodType)7015, // RangeATR
-                    Value = 1, // Traditional value
-                    Value2 = 3, // Min Seconds
-                    BaseBarsPeriodValue = 1 // Min Ticks
+                    BarsPeriodType = BarsPeriodType.Tick,
+                    Value = 1
                 };
-                request.TradingHours = TradingHours.Get("Default 24 x 7");
-                request.Update += (s, e) => OnBarsUpdate(request, e, row, type);
-                
-                request.Request((r, code, msg) => {
-                   if (code == ErrorCode.NoError)
-                   {
-                       Logger.Debug($"[OptionSignalsViewModel] BarsRequest Success: {symbol}");
-                   }
-                   else
-                   {
-                       Logger.Warn($"[OptionSignalsViewModel] BarsRequest Failed: {symbol} - {msg}");
-                   }
+                tickRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+
+                tickRequest.Request((r, code, msg) => {
+                    if (code == ErrorCode.NoError)
+                    {
+                        _log.Debug($"[OptionSignalsViewModel] TickBars Success: {symbol}, count={r.Bars.Count}");
+                        state.TickDataReady.OnNext(true);
+                    }
+                    else
+                    {
+                        _log.Warn($"[OptionSignalsViewModel] TickBars Failed: {symbol} - {msg}");
+                        state.TickDataReady.OnNext(true); // Signal anyway so we don't block
+                    }
                 });
 
-                _barsRequests[symbol] = request;
+                state.TickBarsRequest = tickRequest;
+
+                // Create RangeATR BarsRequest
+                var rangeRequest = new BarsRequest(instrument, 100);
+                rangeRequest.BarsPeriod = new BarsPeriod
+                {
+                    BarsPeriodType = (BarsPeriodType)7015, // RangeATR
+                    Value = 1,
+                    Value2 = 3,
+                    BaseBarsPeriodValue = 1
+                };
+                rangeRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                rangeRequest.Update += (s, e) => state.RangeBarUpdates.OnNext(e);
+
+                rangeRequest.Request((r, code, msg) => {
+                    if (code == ErrorCode.NoError)
+                    {
+                        _log.Debug($"[OptionSignalsViewModel] RangeBars Success: {symbol}, count={r.Bars.Count}");
+                        state.RangeBarsReady.OnNext(true);
+                    }
+                    else
+                    {
+                        _log.Warn($"[OptionSignalsViewModel] RangeBars Failed: {symbol} - {msg}");
+                        state.RangeBarsReady.OnNext(true); // Signal anyway
+                    }
+                });
+
+                state.RangeBarsRequest = rangeRequest;
             });
+
+            _vpStates[symbol] = state;
         }
 
-        private void OnBarsUpdate(BarsRequest request, BarsUpdateEventArgs e, OptionSignalsRow row, string type)
+        /// <summary>
+        /// Process all historical data once both tick and range bars are ready.
+        /// Context-aware: Uses prior working day data if pre-market, today's data otherwise.
+        /// </summary>
+        private void ProcessHistoricalData(OptionVPState state)
         {
-            // We want the LAST COMPLETED bar (e.MaxIndex - 1) for stable signals.
-            // e.MaxIndex is the currently developing bar which moves every tick.
-            int closedBarIndex = e.MaxIndex - 1;
-            if (closedBarIndex < 0) return;
+            var rangeBars = state.RangeBarsRequest?.Bars;
+            var tickBars = state.TickBarsRequest?.Bars;
 
-            var bars = request.Bars;
-            double close = bars.GetClose(closedBarIndex);
-            string timeStr = bars.GetTime(closedBarIndex).ToString("HH:mm:ss");
-
-            if (type == "CE")
+            if (rangeBars == null || rangeBars.Count == 0)
             {
-                row.CEAtrLTP = close.ToString("F2");
-                row.CEAtrTime = timeStr;
+                _log.Warn($"[VP] {state.Symbol} no range bars available");
+                return;
+            }
+
+            if (tickBars == null || tickBars.Count == 0)
+            {
+                _log.Warn($"[VP] {state.Symbol} no tick bars available, updating ATR only");
+                // Still update ATR display
+                int lastBarIdx = rangeBars.Count - 1;
+                UpdateAtrDisplay(state, rangeBars.GetClose(lastBarIdx), rangeBars.GetTime(lastBarIdx));
+                state.LastRangeBarIndex = lastBarIdx;
+                state.LastBarCloseTime = rangeBars.GetTime(lastBarIdx);
+                return;
+            }
+
+            // Determine target date based on market phase:
+            // - PreMarket (before 9:15 on trading day): use prior working day
+            // - MarketHours/PostMarket: use today
+            // - Non-trading day (weekend/holiday): use prior working day
+            DateTime targetDate = GetTargetDataDate();
+            _log.Debug($"[VP] {state.Symbol} target date for VP: {targetDate:yyyy-MM-dd} (IsPreMarket={DateTimeHelper.IsPreMarket()}, IsTradingDay={!DateTimeHelper.IsNonTradingDay(DateTime.Today)})");
+
+            // Build sorted tick time index for target date
+            var tickTimes = new List<(DateTime time, int index)>(tickBars.Count);
+            for (int i = 0; i < tickBars.Count; i++)
+            {
+                var t = tickBars.GetTime(i);
+                if (t.Date == targetDate)
+                    tickTimes.Add((t, i));
+            }
+
+            if (tickTimes.Count == 0)
+            {
+                _log.Warn($"[VP] {state.Symbol} no ticks for {targetDate:yyyy-MM-dd}");
+                int lastBarIdx = rangeBars.Count - 1;
+                UpdateAtrDisplay(state, rangeBars.GetClose(lastBarIdx), rangeBars.GetTime(lastBarIdx));
+                state.LastRangeBarIndex = lastBarIdx;
+                state.LastBarCloseTime = rangeBars.GetTime(lastBarIdx);
+                return;
+            }
+
+            DateTime prevBarTime = DateTime.MinValue;
+            int barsProcessed = 0;
+            double lastPrice = 0;
+            int tickSearchStart = 0;
+
+            // Process each historical bar with its ticks
+            for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
+            {
+                DateTime barTime = rangeBars.GetTime(barIdx);
+
+                // Skip bars not from target date
+                if (barTime.Date != targetDate)
+                {
+                    prevBarTime = barTime;
+                    continue;
+                }
+
+                double closePrice = rangeBars.GetClose(barIdx);
+
+                // Use pre-built index and track position for O(n) total instead of O(n²)
+                lastPrice = ProcessTicksOptimized(state, tickBars, tickTimes, ref tickSearchStart, prevBarTime, barTime, lastPrice);
+
+                // Update VP close price and expire old rolling data
+                state.SessionVPEngine.SetClosePrice(closePrice);
+                state.RollingVPEngine.SetClosePrice(closePrice);
+                state.RollingVPEngine.ExpireOldData(barTime);
+
+                // Recalculate VP and check for trend changes on every bar (accuracy is critical)
+                RecalculateVP(state, barTime);
+
+                prevBarTime = barTime;
+                barsProcessed++;
+            }
+
+            state.LastBarCloseTime = prevBarTime;
+            state.LastRangeBarIndex = rangeBars.Count - 1;
+            state.LastClosePrice = lastPrice;
+
+            // Update ATR display with last bar
+            if (rangeBars.Count > 0)
+            {
+                int lastIdx = rangeBars.Count - 1;
+                UpdateAtrDisplay(state, rangeBars.GetClose(lastIdx), rangeBars.GetTime(lastIdx));
+            }
+
+            _log.Info($"[VP] {state.Symbol} historical processing complete: {barsProcessed} bars");
+        }
+
+        /// <summary>
+        /// Optimized tick processing using pre-built index and tracking search position.
+        /// </summary>
+        private double ProcessTicksOptimized(OptionVPState state, Bars tickBars,
+            List<(DateTime time, int index)> tickTimes, ref int searchStart,
+            DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
+        {
+            int tickCount = 0;
+
+            // Scan from last position (O(n) total across all bars instead of O(n²))
+            while (searchStart < tickTimes.Count)
+            {
+                var (tickTime, tickIdx) = tickTimes[searchStart];
+
+                // Skip ticks before or at previous bar close
+                if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime)
+                {
+                    searchStart++;
+                    continue;
+                }
+
+                // Stop if tick is after current bar close time
+                if (tickTime > currentBarTime) break;
+
+                double price = tickBars.GetClose(tickIdx);
+                long volume = tickBars.GetVolume(tickIdx);
+                bool isBuy = price >= lastPrice;
+
+                state.SessionVPEngine.AddTick(price, volume, isBuy);
+                state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+
+                lastPrice = price;
+                tickCount++;
+                searchStart++;
+            }
+
+            state.LastVPTickIndex = searchStart > 0 ? tickTimes[searchStart - 1].index : -1;
+            return lastPrice;
+        }
+
+        /// <summary>
+        /// Process ticks within a time window (between prevBarTime and currentBarTime).
+        /// Returns the last processed price.
+        /// </summary>
+        private double ProcessTicksInWindow(OptionVPState state, Bars tickBars, DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
+        {
+            DateTime today = DateTime.Today;
+            int tickCount = 0;
+            int startIdx = state.LastVPTickIndex + 1;
+            if (startIdx < 0) startIdx = 0;
+
+            for (int i = startIdx; i < tickBars.Count; i++)
+            {
+                var tickTime = tickBars.GetTime(i);
+
+                // Skip ticks before today
+                if (tickTime.Date < today) continue;
+
+                // Skip ticks before or at previous bar close (already processed)
+                if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime) continue;
+
+                // Stop if tick is after current bar close time
+                if (tickTime > currentBarTime) break;
+
+                double price = tickBars.GetClose(i);
+                long volume = tickBars.GetVolume(i);
+                bool isBuy = price >= lastPrice;
+
+                // Add to both VP engines (NO Reset here - that was the bug!)
+                state.SessionVPEngine.AddTick(price, volume, isBuy);
+                state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+
+                lastPrice = price;
+                tickCount++;
+                state.LastVPTickIndex = i;
+            }
+
+            if (tickCount > 0)
+            {
+                _log.Debug($"[VP] {state.Symbol} processed {tickCount} ticks for bar at {currentBarTime:HH:mm:ss}");
+            }
+
+            return lastPrice;
+        }
+
+        /// <summary>
+        /// Handle real-time bar updates (after initial historical processing).
+        /// </summary>
+        private void OnRealTimeBarUpdate(OptionVPState state, BarsUpdateEventArgs e)
+        {
+            var bars = state.RangeBarsRequest?.Bars;
+            if (bars == null) return;
+
+            int closedBarIndex = e.MaxIndex - 1;
+            if (closedBarIndex < 0 || closedBarIndex <= state.LastRangeBarIndex) return;
+
+            double close = bars.GetClose(closedBarIndex);
+            DateTime barTime = bars.GetTime(closedBarIndex);
+
+            // Update ATR display
+            UpdateAtrDisplay(state, close, barTime);
+
+            // Process ticks from previous bar close to current bar close
+            var tickBars = state.TickBarsRequest?.Bars;
+            if (tickBars != null && tickBars.Count > 0)
+            {
+                state.LastClosePrice = ProcessTicksInWindow(state, tickBars, state.LastBarCloseTime, barTime, state.LastClosePrice);
+            }
+
+            // Update VP and recalculate
+            state.SessionVPEngine.SetClosePrice(close);
+            state.RollingVPEngine.SetClosePrice(close);
+            state.RollingVPEngine.ExpireOldData(barTime);
+
+            RecalculateVP(state, barTime);
+
+            state.LastBarCloseTime = barTime;
+            state.LastRangeBarIndex = closedBarIndex;
+        }
+
+        private void UpdateAtrDisplay(OptionVPState state, double close, DateTime barTime)
+        {
+            string timeStr = barTime.ToString("HH:mm:ss");
+            if (state.Type == "CE")
+            {
+                state.Row.CEAtrLTP = close.ToString("F2");
+                state.Row.CEAtrTime = timeStr;
             }
             else
             {
-                row.PEAtrLTP = close.ToString("F2");
-                row.PEAtrTime = timeStr;
+                state.Row.PEAtrLTP = close.ToString("F2");
+                state.Row.PEAtrTime = timeStr;
             }
+        }
+
+        private void RecalculateVP(OptionVPState state, DateTime currentTime)
+        {
+            // Calculate Session VP
+            var sessResult = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+
+            // Calculate Rolling VP
+            var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+
+            // Determine trends
+            HvnTrend sessTrend = DetermineTrend(sessResult);
+            HvnTrend rollTrend = DetermineTrend(rollResult);
+
+            // Track trend onset times
+            string sessTrendTime = state.Type == "CE" ? state.Row.CETrendSessTime : state.Row.PETrendSessTime;
+            string rollTrendTime = state.Type == "CE" ? state.Row.CETrendRollTime : state.Row.PETrendRollTime;
+
+            // Update session trend time if changed
+            if (sessTrend != state.LastSessionTrend && sessTrend != HvnTrend.Neutral)
+            {
+                state.SessionTrendOnsetTime = currentTime;
+                sessTrendTime = currentTime.ToString("HH:mm:ss");
+                _log.Info($"[Trend] {state.Symbol} Session trend changed to {sessTrend} at {sessTrendTime}");
+            }
+            state.LastSessionTrend = sessTrend;
+
+            // Update rolling trend time if changed
+            if (rollTrend != state.LastRollingTrend && rollTrend != HvnTrend.Neutral)
+            {
+                state.RollingTrendOnsetTime = currentTime;
+                rollTrendTime = currentTime.ToString("HH:mm:ss");
+                _log.Info($"[Trend] {state.Symbol} Rolling trend changed to {rollTrend} at {rollTrendTime}");
+            }
+            state.LastRollingTrend = rollTrend;
+
+            // Update row based on type
+            if (state.Type == "CE")
+            {
+                state.Row.CEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
+                state.Row.CEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
+                state.Row.CETrendSess = sessTrend;
+                state.Row.CETrendSessTime = sessTrendTime;
+
+                state.Row.CEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
+                state.Row.CEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
+                state.Row.CETrendRoll = rollTrend;
+                state.Row.CETrendRollTime = rollTrendTime;
+            }
+            else
+            {
+                state.Row.PEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
+                state.Row.PEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
+                state.Row.PETrendSess = sessTrend;
+                state.Row.PETrendSessTime = sessTrendTime;
+
+                state.Row.PEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
+                state.Row.PEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
+                state.Row.PETrendRoll = rollTrend;
+                state.Row.PETrendRollTime = rollTrendTime;
+            }
+        }
+
+        private HvnTrend DetermineTrend(VPResult result)
+        {
+            if (!result.IsValid) return HvnTrend.Neutral;
+
+            if (result.HVNBuyCount > result.HVNSellCount)
+                return HvnTrend.Bullish;
+            else if (result.HVNSellCount > result.HVNBuyCount)
+                return HvnTrend.Bearish;
+            else
+                return HvnTrend.Neutral;
         }
 
         private void OnOptionPriceBatch(IList<OptionPriceUpdate> batch)
@@ -323,13 +726,43 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             }
         }
 
-        private void ClearBarsRequests()
+        /// <summary>
+        /// Determines which date's data to process based on current market phase:
+        /// - PreMarket (before 9:15 on a trading day): use prior working day
+        /// - MarketHours/PostMarket on a trading day: use today
+        /// - Non-trading day (weekend/holiday): use prior working day
+        /// </summary>
+        private DateTime GetTargetDataDate()
         {
-            foreach (var req in _barsRequests.Values)
+            DateTime today = DateTime.Today;
+
+            // If today is not a trading day (weekend or holiday), use prior working day
+            if (DateTimeHelper.IsNonTradingDay(today))
             {
-                req.Dispose();
+                return HolidayCalendarService.Instance.GetPriorWorkingDay(today);
             }
-            _barsRequests.Clear();
+
+            // If pre-market (before 9:15 AM), use prior working day
+            if (DateTimeHelper.IsPreMarket())
+            {
+                return HolidayCalendarService.Instance.GetPriorWorkingDay(today);
+            }
+
+            // During market hours or post-market on a trading day, use today
+            return today;
+        }
+
+        private void ClearAllVPStates()
+        {
+            foreach (var state in _vpStates.Values)
+            {
+                try
+                {
+                    state.Dispose();
+                }
+                catch { }
+            }
+            _vpStates.Clear();
         }
 
         public void Dispose()

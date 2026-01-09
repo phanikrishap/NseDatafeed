@@ -5,11 +5,46 @@ using System.Linq;
 namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 {
     /// <summary>
+    /// Utility class for computing dynamic tick intervals based on price bands.
+    /// Matches CustomOFVP.cs logic from NinjaTrader.
+    /// </summary>
+    public static class TickIntervalHelper
+    {
+        /// <summary>
+        /// Gets the tick interval for volume profile bucketing based on current price.
+        /// For futures (NIFTY_I, BANKNIFTY_I), uses fixed 1.0.
+        /// For options, uses dynamic intervals based on price bands.
+        /// </summary>
+        /// <param name="price">Current price of the instrument</param>
+        /// <param name="isFuture">True if instrument is a futures contract (ends with _I)</param>
+        /// <returns>Tick interval for VP price bucketing</returns>
+        public static double GetTickInterval(double price, bool isFuture)
+        {
+            if (isFuture)
+                return 1.0;
+
+            // Dynamic tick interval for options based on price bands
+            // Matches CustomOFVP.cs GetTickInterval() logic
+            if (price < 75)
+                return 0.50;
+            else if (price >= 75 && price < 125)
+                return 0.75;
+            else if (price >= 125 && price < 200)
+                return 1.00;
+            else if (price >= 200 && price < 300)
+                return 2.00;
+            else // price >= 300
+                return 3.00;
+        }
+    }
+
+    /// <summary>
     /// Stores a volume update for rolling window expiration.
     /// </summary>
     public class RollingVolumeUpdate
     {
         public double Price { get; set; }
+        public double RoundedPrice { get; set; }
         public long Volume { get; set; }
         public bool IsBuy { get; set; }
         public DateTime Time { get; set; }
@@ -18,6 +53,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
     /// <summary>
     /// Rolling Volume Profile Engine - maintains a time-windowed VP (60 minutes by default).
     /// Supports incremental updates with automatic expiration of old data.
+    /// Supports both fixed and dynamic tick intervals for options.
     /// </summary>
     public class RollingVolumeProfileEngine
     {
@@ -28,15 +64,34 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         private double _totalVolume = 0;
         private double _sumPriceVolume = 0;
         private double _lastClosePrice = 0;
+        private bool _useDynamicInterval = false;
 
         public RollingVolumeProfileEngine(int rollingWindowMinutes = 60)
         {
             _rollingWindowMinutes = rollingWindowMinutes;
         }
 
+        /// <summary>
+        /// Reset with fixed price interval (for futures like NIFTY_I).
+        /// </summary>
         public void Reset(double priceInterval)
         {
             _priceInterval = priceInterval > 0 ? priceInterval : 1.0;
+            _useDynamicInterval = false;
+            _volumeAtPrice.Clear();
+            _updates.Clear();
+            _totalVolume = 0;
+            _sumPriceVolume = 0;
+        }
+
+        /// <summary>
+        /// Reset with dynamic tick interval mode (for options).
+        /// Tick interval will be computed dynamically based on each tick's price band.
+        /// </summary>
+        public void ResetWithDynamicInterval()
+        {
+            _useDynamicInterval = true;
+            _priceInterval = 0.50; // Default starting interval
             _volumeAtPrice.Clear();
             _updates.Clear();
             _totalVolume = 0;
@@ -45,17 +100,24 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
         /// <summary>
         /// Adds a tick to the rolling VP with timestamp for expiration tracking.
+        /// Uses dynamic tick interval if enabled.
         /// </summary>
         public void AddTick(double price, long volume, bool isBuy, DateTime tickTime)
         {
             if (price <= 0 || volume <= 0) return;
 
-            double roundedPrice = Math.Round(price / _priceInterval) * _priceInterval;
+            // Get tick interval - dynamic for options, fixed for futures
+            double interval = _useDynamicInterval
+                ? TickIntervalHelper.GetTickInterval(price, false)
+                : _priceInterval;
+
+            double roundedPrice = Math.Round(price / interval) * interval;
 
             // Store update for rolling window management
             _updates.Enqueue(new RollingVolumeUpdate
             {
-                Price = roundedPrice,
+                Price = price,
+                RoundedPrice = roundedPrice,
                 Volume = volume,
                 IsBuy = isBuy,
                 Time = tickTime
@@ -94,9 +156,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
         private void RemoveVolume(RollingVolumeUpdate update)
         {
-            if (!_volumeAtPrice.ContainsKey(update.Price)) return;
+            // Use the rounded price that was stored when the tick was added
+            if (!_volumeAtPrice.ContainsKey(update.RoundedPrice)) return;
 
-            var level = _volumeAtPrice[update.Price];
+            var level = _volumeAtPrice[update.RoundedPrice];
             level.Volume -= update.Volume;
             if (update.IsBuy)
                 level.BuyVolume -= update.Volume;
@@ -104,12 +167,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                 level.SellVolume -= update.Volume;
 
             _totalVolume -= update.Volume;
-            _sumPriceVolume -= update.Price * update.Volume;
+            _sumPriceVolume -= update.Price * update.Volume; // Use original price for VWAP
 
             // Remove price level if empty
             if (level.Volume <= 0)
             {
-                _volumeAtPrice.Remove(update.Price);
+                _volumeAtPrice.Remove(update.RoundedPrice);
             }
         }
 
