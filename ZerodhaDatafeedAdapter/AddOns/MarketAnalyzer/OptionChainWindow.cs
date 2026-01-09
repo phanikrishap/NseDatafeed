@@ -29,6 +29,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
 
             OptionChainTabPage tabPage = new OptionChainTabPage();
             tabControl.Items.Add(tabPage);
+            tabControl.SelectedIndex = 0;
 
             Content = tabControl;
 

@@ -285,6 +285,13 @@
     <!-- Phase 7: Modular components for SharedWebSocketService -->
     <Compile Include="Services\WebSocket\WebSocketPacketParser.cs" />
     <Compile Include="Services\WebSocket\WebSocketStateController.cs" />
+    <!-- Option Signals Module -->
+    <Compile Include="AddOns\OptionSignals\Models\OptionSignalsRow.cs" />
+    <Compile Include="AddOns\OptionSignals\Controls\OptionSignalsHeaderControl.cs" />
+    <Compile Include="AddOns\OptionSignals\Controls\OptionSignalsStatusBar.cs" />
+    <Compile Include="AddOns\OptionSignals\Controls\OptionSignalsListView.cs" />
+    <Compile Include="AddOns\OptionSignals\OptionSignalsViewModel.cs" />
+    <Compile Include="AddOns\OptionSignals\OptionSignalsWindow.cs" />
   </ItemGroup>
   <ItemGroup>
     <Page Include="Controls\CircularProgressBar.xaml">
