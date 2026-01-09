@@ -47,8 +47,9 @@ namespace TokenGeneratorTest
             Console.WriteLine("  1. Zerodha Token Generator & Instruments");
             Console.WriteLine("  2. ICICI Breeze Historical Data Test");
             Console.WriteLine("  3. ICICI Breeze Token Generation Test (HTTP-based)");
+            Console.WriteLine("  4. Accelpix Historical Data Test");
             Console.WriteLine();
-            Console.Write("Enter choice (1, 2, or 3): ");
+            Console.Write("Enter choice (1, 2, 3, or 4): ");
 
             string choice = Console.ReadLine()?.Trim();
 
@@ -62,6 +63,13 @@ namespace TokenGeneratorTest
             if (choice == "3")
             {
                 await RunBreezeTokenGenerationTest();
+                WaitForExit();
+                return;
+            }
+
+            if (choice == "4")
+            {
+                await AccelpixHistoricalDataTest.RunTestAsync();
                 WaitForExit();
                 return;
             }

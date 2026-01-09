@@ -58,6 +58,8 @@
     <Compile Include="BreezeHistoricalDataTest.cs" />
     <Compile Include="BreezeTokenGenerator.cs" />
     <Compile Include="TotpGenerator.cs" />
+    <Compile Include="AccelpixApiClient.cs" />
+    <Compile Include="AccelpixHistoricalDataTest.cs" />
     <!-- Include the ZerodhaTokenGenerator from the main project -->
     <Compile Include="..\ZerodhaDatafeedAdapter\Services\Auth\ZerodhaTokenGenerator.cs">
       <Link>ZerodhaTokenGenerator.cs</Link>

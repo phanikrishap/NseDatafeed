@@ -242,21 +242,28 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                     zerodhaSymbolMap[(strike, "PE")] = row.PESymbol;
             }
 
-            // Trigger ICICI historical tick data download (non-blocking)
-            TriggerIciciHistoricalDataDownload(first.underlying, first.expiry, strikeGroups.Select(g => (int)g.Key).ToList(), zerodhaSymbolMap);
+            // Trigger historical tick data download via coordinator (routes to Accelpix or ICICI based on config)
+            TriggerHistoricalTickDataDownload(first.underlying, first.expiry, strikeGroups.Select(g => (int)g.Key).ToList(), zerodhaSymbolMap);
         }
 
         /// <summary>
-        /// Triggers ICICI historical tick data download using the queue-based API.
-        /// The queue handles race conditions automatically - if service is not ready,
-        /// the request is buffered and processed when it becomes ready.
+        /// Triggers historical tick data download via the coordinator.
+        /// The coordinator routes to the configured source (Accelpix or ICICI)
+        /// and handles race conditions automatically.
         /// </summary>
-        private void TriggerIciciHistoricalDataDownload(string underlying, DateTime? expiry, List<int> strikes,
+        private void TriggerHistoricalTickDataDownload(string underlying, DateTime? expiry, List<int> strikes,
             Dictionary<(int strike, string optionType), string> zerodhaSymbolMap)
         {
             if (!expiry.HasValue || strikes == null || strikes.Count == 0)
             {
-                Logger.Debug("[OptionChainViewModel] Skipping ICICI historical download - missing expiry or strikes");
+                Logger.Debug("[OptionChainViewModel] Skipping historical download - missing expiry or strikes");
+                return;
+            }
+
+            // Check if coordinator is enabled
+            if (!HistoricalTickDataCoordinator.Instance.IsEnabled)
+            {
+                Logger.Debug("[OptionChainViewModel] Historical tick data is disabled in config");
                 return;
             }
 
@@ -270,15 +277,18 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 projectedAtm = (int)atmRow.Strike;
             }
 
-            Logger.Info($"[OptionChainViewModel] Queueing ICICI historical download: {underlying} {expiry.Value:dd-MMM-yy} ATM={projectedAtm} Strikes={strikes.Count} SymbolMappings={zerodhaSymbolMap?.Count ?? 0}");
+            // Get isMonthlyExpiry from MarketAnalyzerLogic (already computed)
+            bool isMonthlyExpiry = MarketAnalyzerLogic.Instance.SelectedIsMonthlyExpiry;
 
-            // Use the queue-based API - handles race conditions automatically
-            // If service is ready, processes immediately; if not, buffers until ready
-            IciciHistoricalTickDataService.Instance.QueueDownloadRequest(
+            Logger.Info($"[OptionChainViewModel] Queueing historical download via {HistoricalTickDataCoordinator.Instance.PreferredSource}: {underlying} {expiry.Value:dd-MMM-yy} ATM={projectedAtm} Strikes={strikes.Count} Monthly={isMonthlyExpiry}");
+
+            // Use the coordinator - routes to appropriate source (Accelpix or ICICI)
+            HistoricalTickDataCoordinator.Instance.QueueDownloadRequest(
                 underlying,
                 expiry.Value,
                 projectedAtm,
                 strikes,
+                isMonthlyExpiry,
                 zerodhaSymbolMap,
                 null  // Use prior working day
             );

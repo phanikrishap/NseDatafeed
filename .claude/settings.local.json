@@ -119,7 +119,31 @@
       "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"ZerodhaDatafeedAdapter\\\\ZerodhaDatafeedAdapter.csproj\" -t:Rebuild -p:Configuration=Debug -verbosity:minimal)",
       "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\TokenGeneratorTest\\\\TokenGeneratorTest.csproj\" -t:Build -p:Configuration=Debug -verbosity:minimal)",
       "Bash(TokenGeneratorTest.exe)",
-      "Bash(TokenGeneratorTest.exe:*)"
+      "Bash(TokenGeneratorTest.exe:*)",
+      "Bash(del \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\Logging\\\\IciciApiLogger.cs\")",
+      "Bash(del \"d:\\\\CascadeProjects\\\\NseDatafeed_new\\\\ZerodhaDatafeedAdapter\\\\Logging\\\\AccelpixApiLogger.cs\")",
+      "Bash(powershell: Get-Item \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\bin\\\\Custom\\\\ZerodhaDatafeedAdapter.dll\")",
+      "Bash(Select-Object Name, LastWriteTime, Length)",
+      "Bash(Write-Host '')",
+      "Bash(Write-Host 'First 5 ticks \\(raw JSON\\):')",
+      "Bash(__NEW_LINE__ $first5 = $response)",
+      "Bash(Select-Object -First 5)",
+      "Bash($first5)",
+      "Bash(ForEach-Object {)",
+      "Bash($json = $_)",
+      "Bash(ConvertTo-Json -Compress)",
+      "Bash(Write-Host $json)",
+      "Bash(})",
+      "Bash(__NEW_LINE__ Write-Host '')",
+      "Bash(Write-Host 'Analyzing tm \\(time\\) field:')",
+      "Bash($epoch1980 = [datetime]'1980-01-01')",
+      "Bash($epoch1970 = [datetime]'1970-01-01')",
+      "Bash(__NEW_LINE__ $first5)",
+      "Bash($first3 = $response)",
+      "Bash(powershell: Get-ChildItem \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\Logs\" -Directory)",
+      "Bash(Sort-Object Name -Descending)",
+      "Bash(Select-Object -First 1)",
+      "Bash(ForEach-Object { $_FullName })"
     ]
   }
 }

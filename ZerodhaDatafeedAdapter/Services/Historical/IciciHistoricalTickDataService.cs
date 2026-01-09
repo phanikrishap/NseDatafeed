@@ -27,13 +27,14 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
     /// Service for fetching historical tick data from ICICI Direct Breeze API.
     /// Triggers when ICICI broker becomes available via Rx signal.
     /// Implements center-out strike propagation and parallel fetching.
+    /// Implements IHistoricalTickDataSource for unified tick data access.
     /// </summary>
-    public class IciciHistoricalTickDataService : IDisposable
+    public class HistoricalTickDataService : IHistoricalTickDataSource, IDisposable
     {
-        private static readonly Lazy<IciciHistoricalTickDataService> _instance =
-            new Lazy<IciciHistoricalTickDataService>(() => new IciciHistoricalTickDataService());
+        private static readonly Lazy<HistoricalTickDataService> _instance =
+            new Lazy<HistoricalTickDataService>(() => new HistoricalTickDataService());
 
-        public static IciciHistoricalTickDataService Instance => _instance.Value;
+        public static HistoricalTickDataService Instance => _instance.Value;
 
         #region Constants
 
@@ -165,7 +166,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #region Constructor
 
-        private IciciHistoricalTickDataService()
+        private HistoricalTickDataService()
         {
             _serviceStatusSubject = new BehaviorSubject<HistoricalDataServiceStatus>(
                 new HistoricalDataServiceStatus { State = HistoricalDataState.NotInitialized });
@@ -177,7 +178,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             // Per-instrument request queue - uses ReplaySubject to buffer requests until ICICI is ready
             _instrumentRequestQueue = new ReplaySubject<InstrumentTickDataRequest>(bufferSize: 200);
 
-            IciciApiLogger.Info("[IciciHistoricalTickDataService] Singleton instance created");
+            HistoricalTickLogger.Info("[HistoricalTickDataService] Singleton instance created");
         }
 
         #endregion
@@ -191,11 +192,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             if (_isInitialized)
             {
-                IciciApiLogger.Info("[IciciHistoricalTickDataService] Already initialized, skipping");
+                HistoricalTickLogger.Info("[HistoricalTickDataService] Already initialized, skipping");
                 return;
             }
 
-            IciciApiLogger.Info("[IciciHistoricalTickDataService] Initializing - subscribing to ICICI broker status");
+            HistoricalTickLogger.Info("[HistoricalTickDataService] Initializing - subscribing to ICICI broker status");
 
             // Subscribe to ICICI broker availability
             _iciciStatusSubscription = IciciDirectTokenService.Instance.BrokerStatus
@@ -213,14 +214,14 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         private void OnIciciBrokerAvailable(IciciBrokerStatus status)
         {
-            IciciApiLogger.Info($"[IciciHistoricalTickDataService] ICICI broker available - SessionKey present: {!string.IsNullOrEmpty(status.SessionKey)}");
+            HistoricalTickLogger.Info($"[HistoricalTickDataService] ICICI broker available - SessionKey present: {!string.IsNullOrEmpty(status.SessionKey)}");
 
             // Load API credentials from config
             LoadCredentials();
 
             if (string.IsNullOrEmpty(_apiKey) || string.IsNullOrEmpty(_apiSecret))
             {
-                IciciApiLogger.Error("[IciciHistoricalTickDataService] Missing API credentials");
+                HistoricalTickLogger.Error("[HistoricalTickDataService] Missing API credentials");
                 _serviceStatusSubject.OnNext(new HistoricalDataServiceStatus
                 {
                     State = HistoricalDataState.Error,
@@ -245,7 +246,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         State = HistoricalDataState.Ready,
                         Message = "ICICI Historical Data Service is ready"
                     });
-                    IciciApiLogger.Info("[IciciHistoricalTickDataService] Service is READY for historical data requests");
+                    HistoricalTickLogger.Info("[HistoricalTickDataService] Service is READY for historical data requests");
 
                     // Subscribe to the request queue now that we're ready
                     // This will replay any buffered requests
@@ -263,7 +264,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Error($"[IciciHistoricalTickDataService] Session generation error: {ex.Message}");
+                HistoricalTickLogger.Error($"[HistoricalTickDataService] Session generation error: {ex.Message}");
                 _serviceStatusSubject.OnNext(new HistoricalDataServiceStatus
                 {
                     State = HistoricalDataState.Error,
@@ -282,11 +283,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             {
                 if (_requestQueueSubscription != null)
                 {
-                    IciciApiLogger.Debug("[IciciHistoricalTickDataService] Already subscribed to request queue");
+                    HistoricalTickLogger.Debug("[HistoricalTickDataService] Already subscribed to request queue");
                     return;
                 }
 
-                IciciApiLogger.Info("[IciciHistoricalTickDataService] Subscribing to request queue - processing any pending requests");
+                HistoricalTickLogger.Info("[HistoricalTickDataService] Subscribing to request queue - processing any pending requests");
 
                 _requestQueueSubscription = _requestQueue
                     .Subscribe(
@@ -297,17 +298,17 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                             {
                                 try
                                 {
-                                    IciciApiLogger.Info($"[IciciHistoricalTickDataService] Processing queued request: {request}");
+                                    HistoricalTickLogger.Info($"[HistoricalTickDataService] Processing queued request: {request}");
                                     await ProcessDownloadRequestAsync(request);
                                 }
                                 catch (Exception ex)
                                 {
-                                    IciciApiLogger.Error($"[IciciHistoricalTickDataService] Error processing queued request: {ex.Message}");
+                                    HistoricalTickLogger.Error($"[HistoricalTickDataService] Error processing queued request: {ex.Message}");
                                 }
                             });
                         },
-                        ex => IciciApiLogger.Error($"[IciciHistoricalTickDataService] Request queue error: {ex.Message}"),
-                        () => IciciApiLogger.Info("[IciciHistoricalTickDataService] Request queue completed")
+                        ex => HistoricalTickLogger.Error($"[HistoricalTickDataService] Request queue error: {ex.Message}"),
+                        () => HistoricalTickLogger.Info("[HistoricalTickDataService] Request queue completed")
                     );
             }
         }
@@ -323,11 +324,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             {
                 if (_instrumentQueueSubscription != null)
                 {
-                    IciciApiLogger.Debug("[IciciHistoricalTickDataService] Already subscribed to instrument queue");
+                    HistoricalTickLogger.Debug("[HistoricalTickDataService] Already subscribed to instrument queue");
                     return;
                 }
 
-                IciciApiLogger.Info("[IciciHistoricalTickDataService] Subscribing to instrument queue - processing 4 at a time");
+                HistoricalTickLogger.Info("[HistoricalTickDataService] Subscribing to instrument queue - processing 4 at a time");
 
                 // Use Buffer with count=PARALLEL_STRIKES to process instruments in parallel batches
                 // Then use SelectMany to process each batch
@@ -342,7 +343,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                             {
                                 try
                                 {
-                                    IciciApiLogger.Info($"[INST-QUEUE] Processing batch of {batch.Count} instruments");
+                                    HistoricalTickLogger.Info($"[INST-QUEUE] Processing batch of {batch.Count} instruments");
                                     var tasks = batch.Select(req => ProcessInstrumentRequestAsync(req)).ToList();
                                     await Task.WhenAll(tasks);
 
@@ -351,19 +352,19 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                                 }
                                 catch (Exception ex)
                                 {
-                                    IciciApiLogger.Error($"[INST-QUEUE] Batch processing error: {ex.Message}");
+                                    HistoricalTickLogger.Error($"[INST-QUEUE] Batch processing error: {ex.Message}");
                                 }
                             });
                         },
-                        ex => IciciApiLogger.Error($"[INST-QUEUE] Queue error: {ex.Message}"),
-                        () => IciciApiLogger.Info("[INST-QUEUE] Queue completed")
+                        ex => HistoricalTickLogger.Error($"[INST-QUEUE] Queue error: {ex.Message}"),
+                        () => HistoricalTickLogger.Info("[INST-QUEUE] Queue completed")
                     );
             }
         }
 
         private void OnSubscriptionError(Exception ex)
         {
-            IciciApiLogger.Error($"[IciciHistoricalTickDataService] ICICI status subscription error: {ex.Message}");
+            HistoricalTickLogger.Error($"[HistoricalTickDataService] ICICI status subscription error: {ex.Message}");
             _serviceStatusSubject.OnNext(new HistoricalDataServiceStatus
             {
                 State = HistoricalDataState.Error,
@@ -380,7 +381,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                 if (!File.Exists(configPath))
                 {
-                    IciciApiLogger.Error($"[IciciHistoricalTickDataService] Config file not found: {configPath}");
+                    HistoricalTickLogger.Error($"[HistoricalTickDataService] Config file not found: {configPath}");
                     return;
                 }
 
@@ -392,12 +393,12 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 {
                     _apiKey = iciciConfig["ApiKey"]?.ToString();
                     _apiSecret = iciciConfig["ApiSecret"]?.ToString();
-                    IciciApiLogger.Info($"[IciciHistoricalTickDataService] Loaded API credentials (key={_apiKey?.Substring(0, Math.Min(8, _apiKey?.Length ?? 0))}...)");
+                    HistoricalTickLogger.Info($"[HistoricalTickDataService] Loaded API credentials (key={_apiKey?.Substring(0, Math.Min(8, _apiKey?.Length ?? 0))}...)");
                 }
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Error($"[IciciHistoricalTickDataService] Error loading credentials: {ex.Message}");
+                HistoricalTickLogger.Error($"[HistoricalTickDataService] Error loading credentials: {ex.Message}");
             }
         }
 
@@ -453,7 +454,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 if (jsonResponse["Status"]?.Value<int>() != 200)
                 {
                     var error = jsonResponse["Error"]?.ToString() ?? "Unknown error";
-                    IciciApiLogger.LogSessionGeneration(false, error);
+                    HistoricalTickLogger.LogSessionGeneration(false, error);
                     return false;
                 }
 
@@ -461,16 +462,16 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                 if (string.IsNullOrEmpty(_base64SessionToken))
                 {
-                    IciciApiLogger.LogSessionGeneration(false, "No session token in response");
+                    HistoricalTickLogger.LogSessionGeneration(false, "No session token in response");
                     return false;
                 }
 
-                IciciApiLogger.LogSessionGeneration(true, "Session generated successfully");
+                HistoricalTickLogger.LogSessionGeneration(true, "Session generated successfully");
                 return true;
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Error($"[IciciHistoricalTickDataService] Error generating session: {ex.Message}");
+                HistoricalTickLogger.Error($"[HistoricalTickDataService] Error generating session: {ex.Message}");
                 return false;
             }
         }
@@ -508,7 +509,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 HistoricalDate = historicalDate
             };
 
-            IciciApiLogger.Info($"[IciciHistoricalTickDataService] Queueing download request: {request} (IsReady={IsReady})");
+            HistoricalTickLogger.Info($"[HistoricalTickDataService] Queueing download request: {request} (IsReady={IsReady})");
 
             // Push to the ReplaySubject
             // If service is ready and subscribed, it processes immediately
@@ -528,7 +529,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             if (string.IsNullOrEmpty(zerodhaSymbol))
             {
-                IciciApiLogger.Warn("[INST-QUEUE] Cannot queue null/empty symbol");
+                HistoricalTickLogger.Warn("[INST-QUEUE] Cannot queue null/empty symbol");
                 return Observable.Return(new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = zerodhaSymbol,
@@ -546,13 +547,13 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             var currentStatus = statusSubject.Value;
             if (currentStatus.State == TickDataState.Ready)
             {
-                IciciApiLogger.Debug($"[INST-QUEUE] {zerodhaSymbol} already ready, returning cached status");
+                HistoricalTickLogger.Debug($"[INST-QUEUE] {zerodhaSymbol} already ready, returning cached status");
                 return statusSubject.AsObservable();
             }
 
             if (currentStatus.State == TickDataState.Downloading)
             {
-                IciciApiLogger.Debug($"[INST-QUEUE] {zerodhaSymbol} already downloading, returning status stream");
+                HistoricalTickLogger.Debug($"[INST-QUEUE] {zerodhaSymbol} already downloading, returning status stream");
                 return statusSubject.AsObservable();
             }
 
@@ -564,7 +565,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 QueuedAt = DateTime.Now
             };
 
-            IciciApiLogger.Info($"[INST-QUEUE] Queueing {zerodhaSymbol} for {tradeDate:yyyy-MM-dd} (IsReady={IsReady})");
+            HistoricalTickLogger.Info($"[INST-QUEUE] Queueing {zerodhaSymbol} for {tradeDate:yyyy-MM-dd} (IsReady={IsReady})");
 
             // Update status to queued
             statusSubject.OnNext(new InstrumentTickDataStatus
@@ -606,7 +607,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 var age = DateTime.Now - request.QueuedAt;
                 if (age.TotalMinutes > 10)
                 {
-                    IciciApiLogger.Warn($"[INST-QUEUE] Skipping stale request for {symbol} (age={age.TotalMinutes:F1}min)");
+                    HistoricalTickLogger.Warn($"[INST-QUEUE] Skipping stale request for {symbol} (age={age.TotalMinutes:F1}min)");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
@@ -618,7 +619,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                 // Determine which days to fetch based on current IST time
                 var daysToFetch = GetDaysToFetch();
-                IciciApiLogger.Info($"[INST-QUEUE] {symbol}: Market phase={daysToFetch.Phase}, days to fetch: {string.Join(", ", daysToFetch.Dates.Select(d => d.ToString("yyyy-MM-dd")))}");
+                HistoricalTickLogger.Info($"[INST-QUEUE] {symbol}: Market phase={daysToFetch.Phase}, days to fetch: {string.Join(", ", daysToFetch.Dates.Select(d => d.ToString("yyyy-MM-dd")))}");
 
                 // Check if all required days are already in cache
                 bool allDaysCached = daysToFetch.Dates.All(d =>
@@ -634,7 +635,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         if (cached != null) totalTicks += cached.Count;
                     }
 
-                    IciciApiLogger.Info($"[INST-QUEUE] CACHE HIT: {symbol} has {totalTicks} ticks across {daysToFetch.Dates.Count} day(s)");
+                    HistoricalTickLogger.Info($"[INST-QUEUE] CACHE HIT: {symbol} has {totalTicks} ticks across {daysToFetch.Dates.Count} day(s)");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
@@ -660,7 +661,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 var parsedInfo = ParseZerodhaOptionSymbol(symbol);
                 if (parsedInfo == null)
                 {
-                    IciciApiLogger.Warn($"[INST-QUEUE] Cannot parse symbol: {symbol}");
+                    HistoricalTickLogger.Warn($"[INST-QUEUE] Cannot parse symbol: {symbol}");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
@@ -670,7 +671,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     return;
                 }
 
-                IciciApiLogger.Info($"[INST-QUEUE] Downloading {symbol}: {parsedInfo.Underlying} {parsedInfo.Strike}{parsedInfo.OptionType} exp={parsedInfo.Expiry:dd-MMM}");
+                HistoricalTickLogger.Info($"[INST-QUEUE] Downloading {symbol}: {parsedInfo.Underlying} {parsedInfo.Strike}{parsedInfo.OptionType} exp={parsedInfo.Expiry:dd-MMM}");
 
                 int totalDownloaded = 0;
                 int totalFiltered = 0;
@@ -682,7 +683,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     if (IciciTickCacheDb.Instance.HasCachedData(symbol, tradeDate))
                     {
                         var cached = IciciTickCacheDb.Instance.GetCachedTicks(symbol, tradeDate);
-                        IciciApiLogger.Debug($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Already cached ({cached?.Count ?? 0} ticks)");
+                        HistoricalTickLogger.Debug($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Already cached ({cached?.Count ?? 0} ticks)");
                         totalFiltered += cached?.Count ?? 0;
                         continue;
                     }
@@ -705,7 +706,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         toTime = tradeDate.Date.AddHours(15).AddMinutes(30); // 3:30 PM
                     }
 
-                    IciciApiLogger.Info($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Fetching {fromTime:HH:mm:ss} to {toTime:HH:mm:ss}");
+                    HistoricalTickLogger.Info($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Fetching {fromTime:HH:mm:ss} to {toTime:HH:mm:ss}");
 
                     // Download ALL 999-second chunks for this day
                     var candles = await DownloadSecondDataInChunksAsync(
@@ -724,7 +725,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         var filteredCandles = candles.Where(c => c.Volume > 0).ToList();
                         int dayFiltered = candles.Count - filteredCandles.Count;
 
-                        IciciApiLogger.Info($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Downloaded {candles.Count} ticks, removed {dayFiltered} zero-volume");
+                        HistoricalTickLogger.Info($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: Downloaded {candles.Count} ticks, removed {dayFiltered} zero-volume");
 
                         if (filteredCandles.Count > 0)
                         {
@@ -735,7 +736,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     }
                     else
                     {
-                        IciciApiLogger.Warn($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: No data from API");
+                        HistoricalTickLogger.Warn($"[INST-QUEUE] {symbol} {tradeDate:yyyy-MM-dd}: No data from API");
                     }
 
                     // Rate limit between days
@@ -748,7 +749,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 // Final status update
                 if (totalFiltered > 0)
                 {
-                    IciciApiLogger.Info($"[INST-QUEUE] {symbol}: COMPLETE - {totalFiltered} ticks across {daysToFetch.Dates.Count} day(s)");
+                    HistoricalTickLogger.Info($"[INST-QUEUE] {symbol}: COMPLETE - {totalFiltered} ticks across {daysToFetch.Dates.Count} day(s)");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
@@ -762,7 +763,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 }
                 else
                 {
-                    IciciApiLogger.Warn($"[INST-QUEUE] {symbol}: No data after filtering (downloaded {totalDownloaded})");
+                    HistoricalTickLogger.Warn($"[INST-QUEUE] {symbol}: No data after filtering (downloaded {totalDownloaded})");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
@@ -774,7 +775,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Error($"[INST-QUEUE] Error processing {symbol}: {ex.Message}");
+                HistoricalTickLogger.Error($"[INST-QUEUE] Error processing {symbol}: {ex.Message}");
                 statusSubject.OnNext(new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = symbol,
@@ -852,21 +853,21 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 case MarketPhase.PreMarket:
                     // Only fetch prior working day
                     result.Dates.Add(priorWorkingDay);
-                    IciciApiLogger.Debug($"[GetDaysToFetch] PreMarket ({istNow:HH:mm}): fetching prior day {priorWorkingDay:yyyy-MM-dd}");
+                    HistoricalTickLogger.Debug($"[GetDaysToFetch] PreMarket ({istNow:HH:mm}): fetching prior day {priorWorkingDay:yyyy-MM-dd}");
                     break;
 
                 case MarketPhase.MarketHours:
                     // Fetch prior day + current day (up to current time)
                     result.Dates.Add(priorWorkingDay);
                     result.Dates.Add(today);
-                    IciciApiLogger.Debug($"[GetDaysToFetch] MarketHours ({istNow:HH:mm}): fetching prior {priorWorkingDay:yyyy-MM-dd} + today {today:yyyy-MM-dd}");
+                    HistoricalTickLogger.Debug($"[GetDaysToFetch] MarketHours ({istNow:HH:mm}): fetching prior {priorWorkingDay:yyyy-MM-dd} + today {today:yyyy-MM-dd}");
                     break;
 
                 case MarketPhase.PostMarket:
                     // Fetch prior day + current day (full day)
                     result.Dates.Add(priorWorkingDay);
                     result.Dates.Add(today);
-                    IciciApiLogger.Debug($"[GetDaysToFetch] PostMarket ({istNow:HH:mm}): fetching prior {priorWorkingDay:yyyy-MM-dd} + today {today:yyyy-MM-dd}");
+                    HistoricalTickLogger.Debug($"[GetDaysToFetch] PostMarket ({istNow:HH:mm}): fetching prior {priorWorkingDay:yyyy-MM-dd} + today {today:yyyy-MM-dd}");
                     break;
             }
 
@@ -891,7 +892,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         var ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
                         if (ntInstrument == null)
                         {
-                            IciciApiLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Instrument not found, skipping refresh");
+                            HistoricalTickLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Instrument not found, skipping refresh");
                             return;
                         }
 
@@ -907,23 +908,34 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         {
                             if (error == ErrorCode.NoError)
                             {
-                                IciciApiLogger.Info($"[NT8-REFRESH] {zerodhaSymbol}: Bars refresh triggered successfully");
+                                int barsCount = result?.Bars?.Count ?? 0;
+                                HistoricalTickLogger.Info($"[NT8-REFRESH] {zerodhaSymbol}: Bars refresh triggered successfully ({barsCount} bars)");
+
+                                // Delete SQLite cache after NT8 has persisted the data
+                                if (barsCount > 0)
+                                {
+                                    Task.Run(() =>
+                                    {
+                                        int deleted = IciciTickCacheDb.Instance.DeleteCacheForSymbol(zerodhaSymbol);
+                                        HistoricalTickLogger.Info($"[NT8-REFRESH] {zerodhaSymbol}: Cleaned up SQLite cache ({deleted} ticks removed)");
+                                    });
+                                }
                             }
                             else
                             {
-                                IciciApiLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Refresh completed with {error}");
+                                HistoricalTickLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Refresh completed with {error}");
                             }
                         });
                     }
                     catch (Exception ex)
                     {
-                        IciciApiLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Exception: {ex.Message}");
+                        HistoricalTickLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Exception: {ex.Message}");
                     }
                 });
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Dispatcher exception: {ex.Message}");
+                HistoricalTickLogger.Debug($"[NT8-REFRESH] {zerodhaSymbol}: Dispatcher exception: {ex.Message}");
             }
         }
 
@@ -1010,7 +1022,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Debug($"[ParseSymbol] Error parsing {symbol}: {ex.Message}");
+                HistoricalTickLogger.Debug($"[ParseSymbol] Error parsing {symbol}: {ex.Message}");
                 return null;
             }
         }
@@ -1023,7 +1035,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             if (request == null)
             {
-                IciciApiLogger.Warn("[IciciHistoricalTickDataService] ProcessDownloadRequestAsync: null request");
+                HistoricalTickLogger.Warn("[HistoricalTickDataService] ProcessDownloadRequestAsync: null request");
                 return;
             }
 
@@ -1031,7 +1043,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             var age = DateTime.Now - request.QueuedAt;
             if (age.TotalMinutes > 5)
             {
-                IciciApiLogger.Warn($"[IciciHistoricalTickDataService] Skipping stale request (age={age.TotalMinutes:F1}min): {request}");
+                HistoricalTickLogger.Warn($"[HistoricalTickDataService] Skipping stale request (age={age.TotalMinutes:F1}min): {request}");
                 return;
             }
 
@@ -1077,13 +1089,13 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             if (!IsReady)
             {
-                IciciApiLogger.Warn("[IciciHistoricalTickDataService] Cannot download - not ready (use QueueDownloadRequest instead)");
+                HistoricalTickLogger.Warn("[HistoricalTickDataService] Cannot download - not ready (use QueueDownloadRequest instead)");
                 return;
             }
 
             if (_isDownloading)
             {
-                IciciApiLogger.Warn("[IciciHistoricalTickDataService] Download already in progress");
+                HistoricalTickLogger.Warn("[HistoricalTickDataService] Download already in progress");
                 return;
             }
 
@@ -1098,14 +1110,14 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             {
                 // Use prior working day if not specified
                 DateTime targetDate = historicalDate ?? HolidayCalendarService.Instance.GetPriorWorkingDay();
-                IciciApiLogger.LogBatchStart(underlying, expiry, strikes.Count, PARALLEL_STRIKES);
+                HistoricalTickLogger.LogBatchStart("ICICI", underlying, expiry, strikes.Count, PARALLEL_STRIKES);
 
                 // Build center-out propagation order
                 // Start from projected open strike and expand outward (up and down simultaneously)
                 var centerOutStrikes = BuildCenterOutStrikeOrder(strikes, projectedOpenStrike);
 
-                IciciApiLogger.Info($"[IciciHistoricalTickDataService] Projected Open Strike={projectedOpenStrike}, Total strikes={centerOutStrikes.Count}, TargetDate={targetDate:yyyy-MM-dd}");
-                IciciApiLogger.Debug($"[CENTER-OUT] First 10 strikes in order: {string.Join(", ", centerOutStrikes.Take(10))}");
+                HistoricalTickLogger.Info($"[HistoricalTickDataService] Projected Open Strike={projectedOpenStrike}, Total strikes={centerOutStrikes.Count}, TargetDate={targetDate:yyyy-MM-dd}");
+                HistoricalTickLogger.Debug($"[CENTER-OUT] First 10 strikes in order: {string.Join(", ", centerOutStrikes.Take(10))}");
 
                 // Store zerodha symbol map for use in DownloadStrikeDataAsync
                 _currentZerodhaSymbolMap = zerodhaSymbolMap;
@@ -1151,11 +1163,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     Message = $"Downloaded {completedOptions} strike options history"
                 });
 
-                IciciApiLogger.LogBatchComplete(underlying, expiry, completedOptions, 0, 0);
+                HistoricalTickLogger.LogBatchComplete("ICICI", underlying, expiry, completedOptions, 0, 0);
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Error($"[IciciHistoricalTickDataService] Download error: {ex.Message}");
+                HistoricalTickLogger.Error($"[HistoricalTickDataService] Download error: {ex.Message}");
                 _serviceStatusSubject.OnNext(new HistoricalDataServiceStatus
                 {
                     State = HistoricalDataState.Error,
@@ -1229,7 +1241,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             // Skip if already downloaded in this session
             if (_downloadedStrikes.ContainsKey(strikeKey))
             {
-                IciciApiLogger.Debug($"[IciciHistoricalTickDataService] Skipping {strikeKey} - already downloaded this session");
+                HistoricalTickLogger.Debug($"[HistoricalTickDataService] Skipping {strikeKey} - already downloaded this session");
                 return;
             }
 
@@ -1255,7 +1267,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 bool hasExistingData = await HasTickDataInNT8Async(zerodhaSymbol, targetDate);
                 if (hasExistingData)
                 {
-                    IciciApiLogger.Info($"[IciciHistoricalTickDataService] Skipping {strikeKey} - NT8 already has tick data for {targetDate:yyyy-MM-dd}");
+                    HistoricalTickLogger.Info($"[HistoricalTickDataService] Skipping {strikeKey} - NT8 already has tick data for {targetDate:yyyy-MM-dd}");
                     _downloadedStrikes[strikeKey] = true; // Mark as done
                     return;
                 }
@@ -1267,7 +1279,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 var cachedCandles = IciciTickCacheDb.Instance.GetCachedTicks(zerodhaSymbol, targetDate);
                 if (cachedCandles != null && cachedCandles.Count > 0)
                 {
-                    IciciApiLogger.Info($"[IciciHistoricalTickDataService] CACHE HIT: {strikeKey} - using {cachedCandles.Count} cached ticks for {targetDate:yyyy-MM-dd}");
+                    HistoricalTickLogger.Info($"[HistoricalTickDataService] CACHE HIT: {strikeKey} - using {cachedCandles.Count} cached ticks for {targetDate:yyyy-MM-dd}");
                     _tickDataCache[strikeKey] = cachedCandles;
                     _downloadedStrikes[strikeKey] = true;
 
@@ -1302,7 +1314,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // CACHE MISS - Call ICICI API
-                IciciApiLogger.Debug($"[IciciHistoricalTickDataService] CACHE MISS: {strikeKey} - calling ICICI API");
+                HistoricalTickLogger.Debug($"[HistoricalTickDataService] CACHE MISS: {strikeKey} - calling ICICI API");
                 var candles = await DownloadSecondDataInChunksAsync(
                     underlying, strike, optionType, expiry, fromTime, toTime);
 
@@ -1315,7 +1327,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     int removedCount = candles.Count - filteredCandles.Count;
                     if (removedCount > 0)
                     {
-                        IciciApiLogger.Info($"[IciciHistoricalTickDataService] Filtered {removedCount} zero-volume ticks for {strikeKey}");
+                        HistoricalTickLogger.Info($"[HistoricalTickDataService] Filtered {removedCount} zero-volume ticks for {strikeKey}");
                     }
 
                     if (filteredCandles.Count > 0)
@@ -1327,7 +1339,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         if (!string.IsNullOrEmpty(zerodhaSymbol))
                         {
                             IciciTickCacheDb.Instance.CacheTicks(zerodhaSymbol, targetDate, filteredCandles);
-                            IciciApiLogger.Info($"[IciciHistoricalTickDataService] Cached {filteredCandles.Count} ticks for {zerodhaSymbol} in SQLite");
+                            HistoricalTickLogger.Info($"[HistoricalTickDataService] Cached {filteredCandles.Count} ticks for {zerodhaSymbol} in SQLite");
                         }
 
                         // Emit status update for this strike
@@ -1345,23 +1357,23 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                             ZerodhaSymbol = zerodhaSymbol
                         });
 
-                        IciciApiLogger.LogStrikeComplete(underlying, strike, optionType, filteredCandles.Count, stopwatch.ElapsedMilliseconds);
+                        HistoricalTickLogger.LogStrikeComplete(underlying, strike, optionType, filteredCandles.Count, stopwatch.ElapsedMilliseconds);
                     }
                     else
                     {
-                        IciciApiLogger.Warn($"[IciciHistoricalTickDataService] {strikeKey}: All ticks filtered out (zero volume)");
+                        HistoricalTickLogger.Warn($"[HistoricalTickDataService] {strikeKey}: All ticks filtered out (zero volume)");
                         _downloadedStrikes[strikeKey] = true; // Mark as attempted
                     }
                 }
                 else
                 {
-                    IciciApiLogger.Warn($"[IciciHistoricalTickDataService] {strikeKey}: No data received from API");
+                    HistoricalTickLogger.Warn($"[HistoricalTickDataService] {strikeKey}: No data received from API");
                     _downloadedStrikes[strikeKey] = true; // Mark as attempted
                 }
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Error($"[IciciHistoricalTickDataService] Error downloading {strikeKey}: {ex.Message}");
+                HistoricalTickLogger.Error($"[HistoricalTickDataService] Error downloading {strikeKey}: {ex.Message}");
             }
         }
 
@@ -1388,7 +1400,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             int failedChunks = 0;
             var failedRanges = new List<string>();
 
-            IciciApiLogger.Info($"[CHUNK-DL] Starting download: {symbol} {strikePrice}{optionType}, {totalChunks} chunks from {fromDate:HH:mm:ss} to {toDate:HH:mm:ss}");
+            HistoricalTickLogger.Info($"[CHUNK-DL] Starting download: {symbol} {strikePrice}{optionType}, {totalChunks} chunks from {fromDate:HH:mm:ss} to {toDate:HH:mm:ss}");
 
             while (currentStart < toDate)
             {
@@ -1408,7 +1420,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         if (attempt > 0)
                         {
                             int backoffMs = INITIAL_BACKOFF_MS * (int)Math.Pow(2, attempt - 1);
-                            IciciApiLogger.Info($"[CHUNK-DL] Retry {attempt}/{MAX_RETRIES} for chunk {chunkNumber}/{totalChunks} after {backoffMs}ms backoff");
+                            HistoricalTickLogger.Info($"[CHUNK-DL] Retry {attempt}/{MAX_RETRIES} for chunk {chunkNumber}/{totalChunks} after {backoffMs}ms backoff");
                             await Task.Delay(backoffMs);
                         }
 
@@ -1423,26 +1435,26 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                             if (attempt > 0)
                             {
-                                IciciApiLogger.Info($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} succeeded on retry {attempt}: {response.Data.Count} records");
+                                HistoricalTickLogger.Info($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} succeeded on retry {attempt}: {response.Data.Count} records");
                             }
                             break; // Success, exit retry loop
                         }
                         else
                         {
                             string errorMsg = response?.Error ?? "Unknown error";
-                            IciciApiLogger.Warn($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} failed (attempt {attempt + 1}): {errorMsg}");
+                            HistoricalTickLogger.Warn($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} failed (attempt {attempt + 1}): {errorMsg}");
 
                             // Don't retry on certain errors
                             if (errorMsg.Contains("No data") || errorMsg.Contains("session"))
                             {
-                                IciciApiLogger.Debug($"[CHUNK-DL] Non-retryable error, skipping remaining retries");
+                                HistoricalTickLogger.Debug($"[CHUNK-DL] Non-retryable error, skipping remaining retries");
                                 break;
                             }
                         }
                     }
                     catch (Exception ex)
                     {
-                        IciciApiLogger.Error($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} exception (attempt {attempt + 1}): {ex.Message}");
+                        HistoricalTickLogger.Error($"[CHUNK-DL] Chunk {chunkNumber}/{totalChunks} exception (attempt {attempt + 1}): {ex.Message}");
 
                         // Continue to retry unless it's a fatal error
                         if (ex is OutOfMemoryException || ex is StackOverflowException)
@@ -1454,7 +1466,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 {
                     failedChunks++;
                     failedRanges.Add($"{currentStart:HH:mm:ss}-{chunkEnd:HH:mm:ss}");
-                    IciciApiLogger.Error($"[CHUNK-DL] FAILED chunk {chunkNumber}/{totalChunks} ({currentStart:HH:mm:ss}-{chunkEnd:HH:mm:ss}) after {MAX_RETRIES + 1} attempts");
+                    HistoricalTickLogger.Error($"[CHUNK-DL] FAILED chunk {chunkNumber}/{totalChunks} ({currentStart:HH:mm:ss}-{chunkEnd:HH:mm:ss}) after {MAX_RETRIES + 1} attempts");
                 }
 
                 currentStart = chunkEnd;
@@ -1467,11 +1479,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             // Log summary
             if (failedChunks > 0)
             {
-                IciciApiLogger.Warn($"[CHUNK-DL] Download complete with {failedChunks}/{totalChunks} failed chunks. Missing ranges: {string.Join(", ", failedRanges)}");
+                HistoricalTickLogger.Warn($"[CHUNK-DL] Download complete with {failedChunks}/{totalChunks} failed chunks. Missing ranges: {string.Join(", ", failedRanges)}");
             }
             else
             {
-                IciciApiLogger.Info($"[CHUNK-DL] Download complete: {allData.Count} total records from {totalChunks} chunks");
+                HistoricalTickLogger.Info($"[CHUNK-DL] Download complete: {allData.Count} total records from {totalChunks} chunks");
             }
 
             return allData;
@@ -1629,7 +1641,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             if (string.IsNullOrEmpty(zerodhaSymbol))
             {
-                IciciApiLogger.Info($"[NT8-CHECK] Symbol is null/empty, returning false");
+                HistoricalTickLogger.Info($"[NT8-CHECK] Symbol is null/empty, returning false");
                 return false;
             }
 
@@ -1637,7 +1649,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             bool requestCompleted = false;
             string diagnosticInfo = "";
 
-            IciciApiLogger.Info($"[NT8-CHECK] START checking {zerodhaSymbol} for {targetDate:yyyy-MM-dd}");
+            HistoricalTickLogger.Info($"[NT8-CHECK] START checking {zerodhaSymbol} for {targetDate:yyyy-MM-dd}");
 
             try
             {
@@ -1645,23 +1657,23 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 {
                     try
                     {
-                        IciciApiLogger.Info($"[NT8-CHECK] Inside dispatcher for {zerodhaSymbol}");
+                        HistoricalTickLogger.Info($"[NT8-CHECK] Inside dispatcher for {zerodhaSymbol}");
 
                         var ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
                         if (ntInstrument == null)
                         {
                             diagnosticInfo = "Instrument not found in NT8";
-                            IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
+                            HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
                             return;
                         }
 
-                        IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Instrument found, FullName={ntInstrument.FullName}, Exchange={ntInstrument.Exchange}");
+                        HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Instrument found, FullName={ntInstrument.FullName}, Exchange={ntInstrument.Exchange}");
 
                         // Create a BarsRequest to check for existing tick data
                         DateTime fromTime = targetDate.Date.AddHours(9).AddMinutes(15);  // 9:15 AM
                         DateTime toTime = targetDate.Date.AddHours(15).AddMinutes(30);   // 3:30 PM
 
-                        IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Requesting ticks from {fromTime:HH:mm} to {toTime:HH:mm}");
+                        HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Requesting ticks from {fromTime:HH:mm} to {toTime:HH:mm}");
 
                         var barsRequest = new BarsRequest(ntInstrument, 100); // Request up to 100 bars to check
                         barsRequest.BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Tick, Value = 1 };
@@ -1669,7 +1681,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         barsRequest.FromLocal = fromTime;
                         barsRequest.ToLocal = toTime;
 
-                        IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: BarsRequest created - BarsPeriodType={barsRequest.BarsPeriod.BarsPeriodType}, Value={barsRequest.BarsPeriod.Value}");
+                        HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: BarsRequest created - BarsPeriodType={barsRequest.BarsPeriod.BarsPeriodType}, Value={barsRequest.BarsPeriod.Value}");
 
                         var completionEvent = new ManualResetEventSlim(false);
 
@@ -1704,7 +1716,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                                 diagnosticInfo = $"ErrorCode={errorCode}, Message={errorMessage}";
                             }
 
-                            IciciApiLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Callback - {diagnosticInfo}");
+                            HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Callback - {diagnosticInfo}");
                             completionEvent.Set();
                         });
 
@@ -1713,22 +1725,22 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         if (!waitResult)
                         {
                             diagnosticInfo = "TIMEOUT - BarsRequest did not complete within 5 seconds";
-                            IciciApiLogger.Warn($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
+                            HistoricalTickLogger.Warn($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
                         }
                     }
                     catch (Exception ex)
                     {
                         diagnosticInfo = $"Exception: {ex.Message}";
-                        IciciApiLogger.Error($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
+                        HistoricalTickLogger.Error($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
                     }
                 });
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Error($"[NT8-CHECK] {zerodhaSymbol}: Dispatcher exception: {ex.Message}");
+                HistoricalTickLogger.Error($"[NT8-CHECK] {zerodhaSymbol}: Dispatcher exception: {ex.Message}");
             }
 
-            IciciApiLogger.Info($"[NT8-CHECK] END {zerodhaSymbol}: hasData={hasData}, requestCompleted={requestCompleted}, info={diagnosticInfo}");
+            HistoricalTickLogger.Info($"[NT8-CHECK] END {zerodhaSymbol}: hasData={hasData}, requestCompleted={requestCompleted}, info={diagnosticInfo}");
             return hasData;
         }
 
@@ -1745,7 +1757,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             {
                 var firstCandle = candles.First();
                 var lastCandle = candles.Last();
-                IciciApiLogger.Info($"[NT8-PERSIST] START {zerodhaSymbol}: {candles.Count} ticks, range={firstCandle.DateTime:yyyy-MM-dd HH:mm:ss} to {lastCandle.DateTime:HH:mm:ss}");
+                HistoricalTickLogger.Info($"[NT8-PERSIST] START {zerodhaSymbol}: {candles.Count} ticks, range={firstCandle.DateTime:yyyy-MM-dd HH:mm:ss} to {lastCandle.DateTime:HH:mm:ss}");
 
                 // Get or create the NT instrument on the UI thread
                 Instrument ntInstrument = null;
@@ -1754,7 +1766,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
                     if (ntInstrument == null)
                     {
-                        IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Instrument not found, attempting to create...");
+                        HistoricalTickLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Instrument not found, attempting to create...");
                         // Try to create it via InstrumentManager
                         var mapping = InstrumentManager.Instance.GetMappingByNtSymbol(zerodhaSymbol);
                         if (mapping != null)
@@ -1762,22 +1774,22 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                             string ntName;
                             NinjaTraderHelper.CreateNTInstrumentFromMapping(mapping, out ntName);
                             ntInstrument = Instrument.GetInstrument(ntName);
-                            IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Created instrument, ntName={ntName}");
+                            HistoricalTickLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Created instrument, ntName={ntName}");
                         }
                         else
                         {
-                            IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: No mapping found in InstrumentManager");
+                            HistoricalTickLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: No mapping found in InstrumentManager");
                         }
                     }
                     else
                     {
-                        IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Instrument found, FullName={ntInstrument.FullName}");
+                        HistoricalTickLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Instrument found, FullName={ntInstrument.FullName}");
                     }
                 });
 
                 if (ntInstrument == null)
                 {
-                    IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Cannot persist - instrument not available in NT");
+                    HistoricalTickLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Cannot persist - instrument not available in NT");
                     return;
                 }
 
@@ -1787,7 +1799,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 var adapter = Connector.Instance?.GetAdapter() as ZerodhaAdapter;
                 if (adapter == null)
                 {
-                    IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Cannot persist - adapter not available");
+                    HistoricalTickLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Cannot persist - adapter not available");
                     return;
                 }
 
@@ -1799,11 +1811,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     {
                         // Subscribe with empty callback - enables NT persistence
                         adapter.SubscribeMarketData(ntInstrument, (t, p, v, time, a5) => { });
-                        IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Subscribed to market data");
+                        HistoricalTickLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: Subscribed to market data");
                     }
                     catch (Exception ex)
                     {
-                        IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Subscription setup error: {ex.Message}");
+                        HistoricalTickLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: Subscription setup error: {ex.Message}");
                     }
                 });
 
@@ -1822,7 +1834,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         barsRequest.ToLocal = candles.Last().DateTime;
                         barsRequest.IsResetOnNewTradingDay = false;
 
-                        IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest created - Type=Tick, From={barsRequest.FromLocal:HH:mm:ss}, To={barsRequest.ToLocal:HH:mm:ss}");
+                        HistoricalTickLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest created - Type=Tick, From={barsRequest.FromLocal:HH:mm:ss}, To={barsRequest.ToLocal:HH:mm:ss}");
 
                         barsRequest.Request((barsResult, errorCode, errorMessage) =>
                         {
@@ -1845,30 +1857,30 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                                             double.MinValue);
                                     }
                                     int afterCount = barsResult.Bars.Count;
-                                    IciciApiLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback SUCCESS - added {candles.Count} bars (before={beforeCount}, after={afterCount})");
+                                    HistoricalTickLogger.Info($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback SUCCESS - added {candles.Count} bars (before={beforeCount}, after={afterCount})");
                                 }
                                 else
                                 {
-                                    IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback - barsResult or Bars is null");
+                                    HistoricalTickLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback - barsResult or Bars is null");
                                 }
                             }
                             else
                             {
-                                IciciApiLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback FAILED - ErrorCode={errorCode}, Message={errorMessage}");
+                                HistoricalTickLogger.Warn($"[NT8-PERSIST] {zerodhaSymbol}: BarsRequest callback FAILED - ErrorCode={errorCode}, Message={errorMessage}");
                             }
                         });
                     }
                     catch (Exception ex)
                     {
-                        IciciApiLogger.Error($"[NT8-PERSIST] {zerodhaSymbol}: Exception creating BarsRequest: {ex.Message}");
+                        HistoricalTickLogger.Error($"[NT8-PERSIST] {zerodhaSymbol}: Exception creating BarsRequest: {ex.Message}");
                     }
                 });
 
-                IciciApiLogger.Info($"[NT8-PERSIST] END {zerodhaSymbol}: Persistence initiated");
+                HistoricalTickLogger.Info($"[NT8-PERSIST] END {zerodhaSymbol}: Persistence initiated");
             }
             catch (Exception ex)
             {
-                IciciApiLogger.Error($"[IciciHistoricalTickDataService] PersistToNinjaTraderDatabaseAsync error: {ex.Message}");
+                HistoricalTickLogger.Error($"[HistoricalTickDataService] PersistToNinjaTraderDatabaseAsync error: {ex.Message}");
             }
         }
 
@@ -1901,7 +1913,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             _tickDataCache.Clear();
             _downloadedStrikes.Clear();
-            IciciApiLogger.Info("[IciciHistoricalTickDataService] Cache cleared");
+            HistoricalTickLogger.Info("[HistoricalTickDataService] Cache cleared");
         }
 
         #endregion
@@ -2013,7 +2025,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
             _instrumentStatusSubjects.Clear();
 
-            IciciApiLogger.Info("[IciciHistoricalTickDataService] Disposed");
+            HistoricalTickLogger.Info("[HistoricalTickDataService] Disposed");
         }
 
         #endregion

@@ -125,15 +125,22 @@ namespace ZerodhaDatafeedAdapter
                         }
                         else
                         {
-                            // Cache miss - queue background download from ICICI (non-blocking)
-                            // ICICI will download in background and trigger NT8 refresh when ready
+                            // Cache miss - queue background download via coordinator (non-blocking)
+                            // Coordinator routes to Accelpix or ICICI based on config
                             if (symbolName.Contains("CE") || symbolName.Contains("PE"))
                             {
-                                Logger.Info($"[BarsWorker] Cache miss for {symbolName} - queueing ICICI background download");
-                                IciciHistoricalTickDataService.Instance.QueueInstrumentTickRequest(symbolName, fromDateWithTime.Date);
+                                if (HistoricalTickDataCoordinator.Instance.IsEnabled)
+                                {
+                                    Logger.Info($"[BarsWorker] Cache miss for {symbolName} - queueing background download via {HistoricalTickDataCoordinator.Instance.PreferredSource}");
+                                    HistoricalTickDataCoordinator.Instance.QueueInstrumentTickRequest(symbolName, fromDateWithTime.Date);
+                                }
+                                else
+                                {
+                                    Logger.Debug($"[BarsWorker] Cache miss for {symbolName} - historical tick data is disabled");
+                                }
                             }
 
-                            // Return empty for now - realtime data will flow, ICICI will fill cache async
+                            // Return empty for now - realtime data will flow, background fill will cache async
                             source = new List<Record>();
                             Logger.Info($"[BarsWorker] {symbolName}: Returning empty history, background download queued.");
                         }

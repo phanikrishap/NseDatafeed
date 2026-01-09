@@ -168,7 +168,7 @@
     <Compile Include="Logging\LoggingLevel.cs" />
     <Compile Include="Logging\RangeBarLogger.cs" />
     <Compile Include="Logging\TBSLogger.cs" />
-    <Compile Include="Logging\IciciApiLogger.cs" />
+    <Compile Include="Logging\HistoricalTickLogger.cs" />
     <Compile Include="Logging\StartupLogger.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="ZerodhaLogger.cs" />
@@ -188,7 +188,12 @@
     <Compile Include="Services\Auth\IciciDirectTokenGenerator.cs" />
     <Compile Include="Services\Auth\IciciDirectTokenService.cs" />
     <Compile Include="Services\Historical\IciciHistoricalTickDataService.cs" />
-    <Compile Include="Services\Historical\IciciTickCacheDb.cs" />
+    <Compile Include="Services\Historical\TickCacheDb.cs" />
+    <Compile Include="Services\Historical\IHistoricalTickDataSource.cs" />
+    <Compile Include="Services\Historical\AccelpixApiClient.cs" />
+    <Compile Include="Services\Historical\AccelpixSymbolMapper.cs" />
+    <Compile Include="Services\Historical\AccelpixHistoricalTickDataService.cs" />
+    <Compile Include="Services\Historical\HistoricalTickDataCoordinator.cs" />
     <Compile Include="Services\Analysis\InstrumentBackfillService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerLogic.cs" />
     <Compile Include="Services\Analysis\NiftyFuturesMetricsService.cs" />

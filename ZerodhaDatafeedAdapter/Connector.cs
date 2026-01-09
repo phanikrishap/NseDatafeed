@@ -242,29 +242,37 @@ namespace ZerodhaDatafeedAdapter
                     // This awaits TokenReadyStream internally, but since we just published, it will proceed
                     await InstrumentManager.Instance.InitializeAsync();
 
-                    // Initialize ICICI Direct broker in background (non-blocking)
-                    // This is for historical data access, not live trading
+                    // Initialize Historical Tick Data Coordinator (non-blocking)
+                    // This coordinator routes to Accelpix or ICICI based on config
                     // Failures here don't affect Zerodha operations
                     try
                     {
-                        Logger.Info("[Connector] Starting ICICI Direct broker initialization (non-blocking)...");
-                        IciciDirectTokenService.Instance.Initialize();
+                        Logger.Info("[Connector] Starting Historical Tick Data Coordinator initialization...");
 
-                        // Subscribe to status updates (logging only)
-                        IciciDirectTokenService.Instance.BrokerStatus
-                            .Subscribe(status =>
-                            {
-                                Logger.Info($"[ICICI Broker] Status: {status.Message} (Available: {status.IsAvailable})");
-                            });
+                        // Initialize the coordinator which reads config and initializes the appropriate source
+                        // It will initialize Accelpix or ICICI based on HistoricalTickData.PreferredSource config
+                        HistoricalTickDataCoordinator.Instance.Initialize();
 
-                        // Initialize ICICI Historical Tick Data Service (for option chain backfill)
-                        // This service subscribes to ICICI availability and provides historical data when ready
-                        IciciHistoricalTickDataService.Instance.Initialize();
+                        // If ICICI is the active source, also initialize the token service
+                        if (HistoricalTickDataCoordinator.Instance.PreferredSource == HistoricalTickDataSource.IciciDirect)
+                        {
+                            Logger.Info("[Connector] ICICI selected as tick source - initializing broker token service...");
+                            IciciDirectTokenService.Instance.Initialize();
+
+                            // Subscribe to status updates (logging only)
+                            IciciDirectTokenService.Instance.BrokerStatus
+                                .Subscribe(status =>
+                                {
+                                    Logger.Info($"[ICICI Broker] Status: {status.Message} (Available: {status.IsAvailable})");
+                                });
+                        }
+
+                        Logger.Info($"[Connector] Historical Tick Data: Enabled={HistoricalTickDataCoordinator.Instance.IsEnabled}, Source={HistoricalTickDataCoordinator.Instance.PreferredSource}");
                     }
-                    catch (Exception iciciEx)
+                    catch (Exception tickDataEx)
                     {
-                        // ICICI failures are non-blocking
-                        Logger.Info($"[Connector] ICICI initialization skipped: {iciciEx.Message}");
+                        // Historical tick data failures are non-blocking
+                        Logger.Info($"[Connector] Historical tick data initialization skipped: {tickDataEx.Message}");
                     }
                 }
                 catch (Exception ex)

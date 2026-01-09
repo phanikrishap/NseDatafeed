@@ -265,9 +265,21 @@ namespace ZerodhaDatafeedAdapter.Logging
         public static ILoggerService RangeBar => GetLogger(LogDomain.RangeBar);
 
         /// <summary>
-        /// Gets the ICICI API logger for Breeze API operations.
+        /// Gets the Historical Tick Data logger for ICICI and Accelpix tick data operations.
         /// </summary>
-        public static ILoggerService IciciApi => GetLogger(LogDomain.IciciApi);
+        public static ILoggerService HistoricalTick => GetLogger(LogDomain.HistoricalTick);
+
+        /// <summary>
+        /// Gets the ICICI API logger for Breeze API operations.
+        /// [Deprecated] Use HistoricalTick instead - kept for backward compatibility.
+        /// </summary>
+        public static ILoggerService IciciApi => GetLogger(LogDomain.HistoricalTick);
+
+        /// <summary>
+        /// Gets the Accelpix API logger for Accelpix API operations.
+        /// [Deprecated] Use HistoricalTick instead - kept for backward compatibility.
+        /// </summary>
+        public static ILoggerService AccelpixApi => GetLogger(LogDomain.HistoricalTick);
 
         /// <summary>
         /// Gets today's log folder path where all logs are stored.
@@ -533,8 +545,8 @@ namespace ZerodhaDatafeedAdapter.Logging
         /// <summary>RangeATR bar processing log (RangeBar.log)</summary>
         RangeBar,
 
-        /// <summary>ICICI Breeze API log (IciciApi.log)</summary>
-        IciciApi
+        /// <summary>Historical Tick Data log - unified for ICICI and Accelpix (HistoricalTick.log)</summary>
+        HistoricalTick
     }
 
     /// <summary>
@@ -593,7 +605,7 @@ namespace ZerodhaDatafeedAdapter.Logging
                 LogDomain.WebSocket => "WebSocket.log",
                 LogDomain.MarketData => "MarketData.log",
                 LogDomain.RangeBar => "RangeBar.log",
-                LogDomain.IciciApi => "IciciApi.log",
+                LogDomain.HistoricalTick => "HistoricalTick.log",
                 _ => "ZerodhaAdapter.log"
             };
         }
