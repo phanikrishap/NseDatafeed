@@ -59,6 +59,32 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Controls
             => throw new NotImplementedException();
     }
 
+    /// <summary>
+    /// Converts VWAP Score (int -100 to +100) to color brush
+    /// Positive scores = Green gradient, Negative = Red gradient
+    /// </summary>
+    public class VwapScoreToColorConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is int score)
+            {
+                if (score > 50)
+                    return new SolidColorBrush(Color.FromRgb(38, 166, 91));  // Strong bull
+                else if (score > 0)
+                    return new SolidColorBrush(Color.FromRgb(100, 180, 100)); // Mild bull
+                else if (score < -50)
+                    return new SolidColorBrush(Color.FromRgb(207, 70, 71));  // Strong bear
+                else if (score < 0)
+                    return new SolidColorBrush(Color.FromRgb(180, 100, 100)); // Mild bear
+            }
+            return new SolidColorBrush(Color.FromRgb(150, 150, 150)); // Neutral
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+            => throw new NotImplementedException();
+    }
+
     public class OptionSignalsListView : UserControl
     {
         private DataGrid _dataGrid;
@@ -81,10 +107,13 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Controls
         private const double COL_TREND = 28;
         private const double COL_TREND_TIME = 52;
         private const double COL_STRIKE = 48;
+        private const double COL_MOMO = 38;
+        private const double COL_VWAP = 28;
 
         // Converters
         private static readonly HvnTrendToStringConverter _trendStringConverter = new HvnTrendToStringConverter();
         private static readonly HvnTrendToColorConverter _trendColorConverter = new HvnTrendToColorConverter();
+        private static readonly VwapScoreToColorConverter _vwapScoreColorConverter = new VwapScoreToColorConverter();
 
         public ObservableCollection<OptionSignalsRow> ItemsSource
         {
@@ -120,8 +149,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Controls
         {
             var grid = new Grid { Background = _groupHeaderBg };
 
-            // CE columns: LTP, Atr, AtrTm, Session(B,S,Tr,Tm), Rolling(B,S,Tr,Tm)
-            double ceWidth = COL_LTP + COL_ATR + COL_ATR_TIME + (COL_HVN * 2 + COL_TREND + COL_TREND_TIME) * 2;
+            // CE columns: LTP, Atr, AtrTm, Session(B,S,Tr,Tm), Rolling(B,S,Tr,Tm), CDMomo, CDSmooth, PriceMomo, PriceSmooth, VwapSess, VwapRoll
+            double ceWidth = COL_LTP + COL_ATR + COL_ATR_TIME + (COL_HVN * 2 + COL_TREND + COL_TREND_TIME) * 2
+                           + COL_MOMO * 4 + COL_VWAP * 2; // 4 momentum + 2 vwap columns
             double strikeWidth = COL_STRIKE;
             // PE columns mirror CE
             double peWidth = ceWidth;
@@ -203,11 +233,29 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Controls
             dataGrid.Columns.Add(CreateTextColumn("Rol S", "CEHvnSRoll", COL_HVN, headerStyle));
             dataGrid.Columns.Add(CreateTrendColumn("Rol Tr", "CETrendRoll", COL_TREND, headerStyle));
             dataGrid.Columns.Add(CreateTextColumn("Rol Tm", "CETrendRollTime", COL_TREND_TIME, headerStyle));
+            // CD Momentum (smaMomentum on Cumulative Delta)
+            dataGrid.Columns.Add(CreateTextColumn("CD M", "CECDMomo", COL_MOMO, headerStyle));
+            dataGrid.Columns.Add(CreateTextColumn("CD S", "CECDSmooth", COL_MOMO, headerStyle));
+            // Price Momentum (smaMomentum on Price)
+            dataGrid.Columns.Add(CreateTextColumn("Pr M", "CEPriceMomo", COL_MOMO, headerStyle));
+            dataGrid.Columns.Add(CreateTextColumn("Pr S", "CEPriceSmooth", COL_MOMO, headerStyle));
+            // VWAP Score
+            dataGrid.Columns.Add(CreateVwapScoreColumn("VW S", "CEVwapScoreSess", COL_VWAP, headerStyle));
+            dataGrid.Columns.Add(CreateVwapScoreColumn("VW R", "CEVwapScoreRoll", COL_VWAP, headerStyle));
 
             // Strike (center)
             dataGrid.Columns.Add(CreateStrikeColumn(headerStyle));
 
-            // PE Columns (right side): Rolling(Tm,Tr,S,B), Session(Tm,Tr,S,B), AtrTm, Atr, LTP
+            // PE Columns (right side - reversed): VwapRoll, VwapSess, PriceSmooth, PriceMomo, CDSmooth, CDMomo, Rolling(Tm,Tr,S,B), Session(Tm,Tr,S,B), AtrTm, Atr, LTP
+            // VWAP Score (reversed)
+            dataGrid.Columns.Add(CreateVwapScoreColumn("VW R", "PEVwapScoreRoll", COL_VWAP, headerStyle));
+            dataGrid.Columns.Add(CreateVwapScoreColumn("VW S", "PEVwapScoreSess", COL_VWAP, headerStyle));
+            // Price Momentum (reversed)
+            dataGrid.Columns.Add(CreateTextColumn("Pr S", "PEPriceSmooth", COL_MOMO, headerStyle));
+            dataGrid.Columns.Add(CreateTextColumn("Pr M", "PEPriceMomo", COL_MOMO, headerStyle));
+            // CD Momentum (reversed)
+            dataGrid.Columns.Add(CreateTextColumn("CD S", "PECDSmooth", COL_MOMO, headerStyle));
+            dataGrid.Columns.Add(CreateTextColumn("CD M", "PECDMomo", COL_MOMO, headerStyle));
             // Rolling
             dataGrid.Columns.Add(CreateTextColumn("Rol Tm", "PETrendRollTime", COL_TREND_TIME, headerStyle));
             dataGrid.Columns.Add(CreateTrendColumn("Rol Tr", "PETrendRoll", COL_TREND, headerStyle));
@@ -327,6 +375,28 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Controls
             text.SetValue(TextBlock.ForegroundProperty, Brushes.White);
 
             factory.AppendChild(text);
+            col.CellTemplate = new DataTemplate { VisualTree = factory };
+            return col;
+        }
+
+        private DataGridTemplateColumn CreateVwapScoreColumn(string header, string binding, double width, Style headerStyle)
+        {
+            var col = new DataGridTemplateColumn
+            {
+                Header = header,
+                Width = width,
+                HeaderStyle = headerStyle
+            };
+
+            // Create the cell template with TextBlock that uses converter for color
+            var factory = new FrameworkElementFactory(typeof(TextBlock));
+            factory.SetBinding(TextBlock.TextProperty, new Binding(binding));
+            factory.SetBinding(TextBlock.ForegroundProperty, new Binding(binding) { Converter = _vwapScoreColorConverter });
+            factory.SetValue(TextBlock.TextAlignmentProperty, TextAlignment.Center);
+            factory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            factory.SetValue(TextBlock.FontSizeProperty, 9.0);
+            factory.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
+
             col.CellTemplate = new DataTemplate { VisualTree = factory };
             return col;
         }

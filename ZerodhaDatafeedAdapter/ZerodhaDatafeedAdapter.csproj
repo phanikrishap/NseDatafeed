@@ -207,6 +207,8 @@
     <Compile Include="Services\Analysis\Components\VPRelativeMetricsEngine.cs" />
     <Compile Include="Services\Analysis\Components\CompositeProfileModels.cs" />
     <Compile Include="Services\Analysis\Components\CompositeProfileEngine.cs" />
+    <Compile Include="Services\Analysis\Components\CumulativeDeltaEngine.cs" />
+    <Compile Include="Services\Analysis\Components\MomentumEngine.cs" />
     <Compile Include="Services\HolidayCalendarService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerService.cs" />
     <Compile Include="Services\Analysis\SubscriptionManager.cs" />

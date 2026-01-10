@@ -16,7 +16,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
     }
 
     /// <summary>
-    /// Result of VP calculation including HVN Buy/Sell breakdown.
+    /// Result of VP calculation including HVN Buy/Sell breakdown and VWAP SD bands.
     /// </summary>
     public class VPResult
     {
@@ -35,13 +35,103 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public long HVNBuyVolume { get; set; }
         public long HVNSellVolume { get; set; }
 
+        // VWAP Standard Deviation Bands (matching OptionStratFinV1 granularity)
+        public double StdDev { get; set; }
+        public double Upper1SD { get; set; }    // VWAP + 1.0 * StdDev
+        public double Upper1_5SD { get; set; }  // VWAP + 1.5 * StdDev
+        public double Upper2SD { get; set; }    // VWAP + 2.0 * StdDev
+        public double Upper2_5SD { get; set; }  // VWAP + 2.5 * StdDev
+        public double Upper3SD { get; set; }    // VWAP + 3.0 * StdDev
+        public double Lower1SD { get; set; }    // VWAP - 1.0 * StdDev
+        public double Lower1_5SD { get; set; }  // VWAP - 1.5 * StdDev
+        public double Lower2SD { get; set; }    // VWAP - 2.0 * StdDev
+        public double Lower2_5SD { get; set; }  // VWAP - 2.5 * StdDev
+        public double Lower3SD { get; set; }    // VWAP - 3.0 * StdDev
+
         public bool IsValid { get; set; }
     }
 
     /// <summary>
-    /// Volume Profile Engine - Computes POC, VAH, VAL, VWAP, HVNs from tick data.
+    /// Static helper to calculate VWAP location score based on price position relative to SD bands.
+    /// Faithfully replicates OptionStratFinV1.CalculateVwapLocationScore() logic.
+    /// </summary>
+    public static class VWAPScoreCalculator
+    {
+        /// <summary>
+        /// Calculates VWAP location score from -100 to +100 based on price position relative to SD bands.
+        /// Matches OptionStratFinV1 scoring exactly:
+        /// - Above VWAP: +20 (0-1SD), +40 (1SD), +50 (1.5SD), +70 (2SD), +85 (2.5SD), +100 (3SD+)
+        /// - Below VWAP: -20 (0 to -1SD), -35 (-1SD), -65 (-1.5SD), -100 (-2SD and below)
+        /// </summary>
+        public static int CalculateScore(double currentPrice, VPResult vp)
+        {
+            if (vp == null || !vp.IsValid || double.IsNaN(currentPrice) || double.IsNaN(vp.VWAP) || vp.VWAP == 0)
+                return 0;
+
+            return CalculateScore(
+                currentPrice,
+                vp.VWAP,
+                vp.Upper1SD, vp.Upper1_5SD, vp.Upper2SD, vp.Upper2_5SD, vp.Upper3SD,
+                vp.Lower1SD, vp.Lower1_5SD, vp.Lower2SD, vp.Lower2_5SD, vp.Lower3SD);
+        }
+
+        /// <summary>
+        /// Calculates VWAP location score with explicit band values.
+        /// Faithfully replicates OptionStratFinV1.CalculateVwapLocationScore().
+        /// </summary>
+        public static int CalculateScore(
+            double currentPrice,
+            double vwap,
+            double upper1SD,
+            double upper1_5SD,
+            double upper2SD,
+            double upper2_5SD,
+            double upper3SD,
+            double lower1SD,
+            double lower1_5SD,
+            double lower2SD,
+            double lower2_5SD,
+            double lower3SD)
+        {
+            if (double.IsNaN(currentPrice) || double.IsNaN(vwap) || vwap == 0)
+                return 0;
+
+            if (currentPrice >= vwap)
+            {
+                // Upside scoring (matches OptionStratFinV1 exactly)
+                if (currentPrice >= upper3SD)
+                    return 100;
+                else if (currentPrice >= upper2_5SD)
+                    return 85;
+                else if (currentPrice >= upper2SD)
+                    return 70;
+                else if (currentPrice >= upper1_5SD)
+                    return 50;
+                else if (currentPrice >= upper1SD)
+                    return 40;
+                else  // > vwap and < 1SD
+                    return 20;
+            }
+            else
+            {
+                // Downside scoring (matches OptionStratFinV1 exactly)
+                if (currentPrice <= lower2SD)
+                    return -100;
+                else if (currentPrice <= lower1_5SD)
+                    return -65;
+                else if (currentPrice <= lower1SD)
+                    return -35;
+                else  // < vwap and > -1SD
+                    return -20;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Volume Profile Engine - Computes POC, VAH, VAL, VWAP, HVNs, and SD bands from tick data.
     /// Uses configurable price interval for price bucketing (1 rupee for NIFTY, not tick size).
     /// Value Area calculation uses 2-level expansion algorithm matching NinjaTrader/Gom.
+    /// SD bands match OptionStratFinV1 granularity (1.0, 1.5, 2.0, 2.5, 3.0).
     /// </summary>
     public class VPEngine
     {
@@ -49,6 +139,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         private double _priceInterval = 1.0;  // Price interval for VP buckets (1 rupee for NIFTY)
         private double _totalVolume = 0;
         private double _sumPriceVolume = 0;
+        private double _sumSquaredPriceVolume = 0;  // For StdDev calculation
 
         public void Reset(double priceInterval)
         {
@@ -56,6 +147,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             _volumeAtPrice.Clear();
             _totalVolume = 0;
             _sumPriceVolume = 0;
+            _sumSquaredPriceVolume = 0;
         }
 
         public void AddTick(double price, long volume, bool isBuy)
@@ -78,6 +170,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             _totalVolume += volume;
             _sumPriceVolume += price * volume;
+            _sumSquaredPriceVolume += price * price * volume;  // For StdDev
         }
 
         // Track last close price for HVN classification
@@ -111,6 +204,23 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             // Calculate VWAP
             result.VWAP = _sumPriceVolume / _totalVolume;
+
+            // Calculate Standard Deviation and SD bands (matching VWAPWithStdDevBands indicator)
+            // Variance = E[X²] - E[X]² = (sumSquaredPriceVolume/totalVolume) - VWAP²
+            double variance = (_sumSquaredPriceVolume / _totalVolume) - (result.VWAP * result.VWAP);
+            result.StdDev = variance > 0 ? Math.Sqrt(variance) : 0;
+
+            // Calculate all SD bands (matching OptionStratFinV1 granularity)
+            result.Upper1SD = result.VWAP + (1.0 * result.StdDev);
+            result.Upper1_5SD = result.VWAP + (1.5 * result.StdDev);
+            result.Upper2SD = result.VWAP + (2.0 * result.StdDev);
+            result.Upper2_5SD = result.VWAP + (2.5 * result.StdDev);
+            result.Upper3SD = result.VWAP + (3.0 * result.StdDev);
+            result.Lower1SD = result.VWAP - (1.0 * result.StdDev);
+            result.Lower1_5SD = result.VWAP - (1.5 * result.StdDev);
+            result.Lower2SD = result.VWAP - (2.0 * result.StdDev);
+            result.Lower2_5SD = result.VWAP - (2.5 * result.StdDev);
+            result.Lower3SD = result.VWAP - (3.0 * result.StdDev);
 
             // Bidirectional expansion for Value Area using 2-level lookahead (matches NinjaTrader/Gom algorithm)
             var sortedLevels = _volumeAtPrice.OrderBy(l => l.Key).ToList();

@@ -48,12 +48,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public long Volume { get; set; }
         public bool IsBuy { get; set; }
         public DateTime Time { get; set; }
+        public double PriceSquaredVolume { get; set; }  // For StdDev calculation on expiration
     }
 
     /// <summary>
     /// Rolling Volume Profile Engine - maintains a time-windowed VP (60 minutes by default).
     /// Supports incremental updates with automatic expiration of old data.
     /// Supports both fixed and dynamic tick intervals for options.
+    /// Computes SD bands matching OptionStratFinV1 granularity.
     /// </summary>
     public class RollingVolumeProfileEngine
     {
@@ -63,6 +65,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         private int _rollingWindowMinutes = 60;
         private double _totalVolume = 0;
         private double _sumPriceVolume = 0;
+        private double _sumSquaredPriceVolume = 0;  // For StdDev calculation
         private double _lastClosePrice = 0;
         private bool _useDynamicInterval = false;
 
@@ -82,6 +85,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             _updates.Clear();
             _totalVolume = 0;
             _sumPriceVolume = 0;
+            _sumSquaredPriceVolume = 0;
         }
 
         /// <summary>
@@ -96,6 +100,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             _updates.Clear();
             _totalVolume = 0;
             _sumPriceVolume = 0;
+            _sumSquaredPriceVolume = 0;
         }
 
         /// <summary>
@@ -112,6 +117,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                 : _priceInterval;
 
             double roundedPrice = Math.Round(price / interval) * interval;
+            double priceSquaredVol = price * price * volume;
 
             // Store update for rolling window management
             _updates.Enqueue(new RollingVolumeUpdate
@@ -120,7 +126,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                 RoundedPrice = roundedPrice,
                 Volume = volume,
                 IsBuy = isBuy,
-                Time = tickTime
+                Time = tickTime,
+                PriceSquaredVolume = priceSquaredVol
             });
 
             // Add to volume profile
@@ -138,6 +145,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             _totalVolume += volume;
             _sumPriceVolume += price * volume;
+            _sumSquaredPriceVolume += priceSquaredVol;
         }
 
         /// <summary>
@@ -168,6 +176,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             _totalVolume -= update.Volume;
             _sumPriceVolume -= update.Price * update.Volume; // Use original price for VWAP
+            _sumSquaredPriceVolume -= update.PriceSquaredVolume; // For StdDev
 
             // Remove price level if empty
             if (level.Volume <= 0)
@@ -204,6 +213,25 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             // Calculate VWAP
             result.VWAP = _totalVolume > 0 ? _sumPriceVolume / _totalVolume : 0;
+
+            // Calculate Standard Deviation and SD bands (matching VWAPWithStdDevBands indicator)
+            if (_totalVolume > 0 && result.VWAP > 0)
+            {
+                double variance = (_sumSquaredPriceVolume / _totalVolume) - (result.VWAP * result.VWAP);
+                result.StdDev = variance > 0 ? Math.Sqrt(variance) : 0;
+
+                // Calculate all SD bands (matching OptionStratFinV1 granularity)
+                result.Upper1SD = result.VWAP + (1.0 * result.StdDev);
+                result.Upper1_5SD = result.VWAP + (1.5 * result.StdDev);
+                result.Upper2SD = result.VWAP + (2.0 * result.StdDev);
+                result.Upper2_5SD = result.VWAP + (2.5 * result.StdDev);
+                result.Upper3SD = result.VWAP + (3.0 * result.StdDev);
+                result.Lower1SD = result.VWAP - (1.0 * result.StdDev);
+                result.Lower1_5SD = result.VWAP - (1.5 * result.StdDev);
+                result.Lower2SD = result.VWAP - (2.0 * result.StdDev);
+                result.Lower2_5SD = result.VWAP - (2.5 * result.StdDev);
+                result.Lower3SD = result.VWAP - (3.0 * result.StdDev);
+            }
 
             // Bidirectional expansion for Value Area
             var sortedLevels = _volumeAtPrice.Where(l => l.Value.Volume > 0).OrderBy(l => l.Key).ToList();

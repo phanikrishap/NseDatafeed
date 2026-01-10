@@ -52,6 +52,24 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
         private string _peTrendSessTime = "--:--:--";
         private string _peTrendRollTime = "--:--:--";
 
+        // CD Momentum fields (smaMomentum applied to Cumulative Delta)
+        private string _ceCDMomo = "0";
+        private string _ceCDSmooth = "0";
+        private string _peCDMomo = "0";
+        private string _peCDSmooth = "0";
+
+        // Price Momentum fields (smaMomentum applied to Price)
+        private string _cePriceMomo = "0";
+        private string _cePriceSmooth = "0";
+        private string _pePriceMomo = "0";
+        private string _pePriceSmooth = "0";
+
+        // VWAP Score fields (Session and Rolling) - Score range: -100 to +100
+        private int _ceVwapScoreSess = 0;
+        private int _ceVwapScoreRoll = 0;
+        private int _peVwapScoreSess = 0;
+        private int _peVwapScoreRoll = 0;
+
         public double Strike
         {
             get => _strike;
@@ -249,6 +267,82 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
         {
             get => _peHvnSSess;
             set => PEHvnSSess = value;
+        }
+
+        // CD Momentum Properties (smaMomentum applied to Cumulative Delta)
+        public string CECDMomo
+        {
+            get => _ceCDMomo;
+            set { if (_ceCDMomo != value) { _ceCDMomo = value; OnPropertyChanged(); } }
+        }
+
+        public string CECDSmooth
+        {
+            get => _ceCDSmooth;
+            set { if (_ceCDSmooth != value) { _ceCDSmooth = value; OnPropertyChanged(); } }
+        }
+
+        public string PECDMomo
+        {
+            get => _peCDMomo;
+            set { if (_peCDMomo != value) { _peCDMomo = value; OnPropertyChanged(); } }
+        }
+
+        public string PECDSmooth
+        {
+            get => _peCDSmooth;
+            set { if (_peCDSmooth != value) { _peCDSmooth = value; OnPropertyChanged(); } }
+        }
+
+        // Price Momentum Properties (smaMomentum applied to Price)
+        public string CEPriceMomo
+        {
+            get => _cePriceMomo;
+            set { if (_cePriceMomo != value) { _cePriceMomo = value; OnPropertyChanged(); } }
+        }
+
+        public string CEPriceSmooth
+        {
+            get => _cePriceSmooth;
+            set { if (_cePriceSmooth != value) { _cePriceSmooth = value; OnPropertyChanged(); } }
+        }
+
+        public string PEPriceMomo
+        {
+            get => _pePriceMomo;
+            set { if (_pePriceMomo != value) { _pePriceMomo = value; OnPropertyChanged(); } }
+        }
+
+        public string PEPriceSmooth
+        {
+            get => _pePriceSmooth;
+            set { if (_pePriceSmooth != value) { _pePriceSmooth = value; OnPropertyChanged(); } }
+        }
+
+        // VWAP Score Properties (Session)
+        public int CEVwapScoreSess
+        {
+            get => _ceVwapScoreSess;
+            set { if (_ceVwapScoreSess != value) { _ceVwapScoreSess = value; OnPropertyChanged(); } }
+        }
+
+        public int PEVwapScoreSess
+        {
+            get => _peVwapScoreSess;
+            set { if (_peVwapScoreSess != value) { _peVwapScoreSess = value; OnPropertyChanged(); } }
+        }
+
+        // VWAP Score Properties (Rolling)
+        public int CEVwapScoreRoll
+        {
+            get => _ceVwapScoreRoll;
+            set { if (_ceVwapScoreRoll != value) { _ceVwapScoreRoll = value; OnPropertyChanged(); } }
+        }
+
+        public int PEVwapScoreRoll
+        {
+            get => _peVwapScoreRoll;
+            set { if (_peVwapScoreRoll != value) { _peVwapScoreRoll = value; OnPropertyChanged(); } }
         }
     }
 }

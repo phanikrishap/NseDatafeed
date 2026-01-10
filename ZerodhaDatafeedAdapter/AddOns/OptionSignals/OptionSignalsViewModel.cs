@@ -41,6 +41,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         // Rolling VP - 60-minute rolling window
         public RollingVolumeProfileEngine RollingVPEngine { get; set; }
 
+        // CD Momentum Engine - smaMomentum applied to cumulative delta (Momentum + Smooth)
+        public CDMomentumEngine CDMomoEngine { get; set; }
+
+        // Price Momentum Engine - smaMomentum applied to price (Momentum + Smooth)
+        public MomentumEngine PriceMomoEngine { get; set; }
+
         public BarsRequest RangeBarsRequest { get; set; }
         public BarsRequest TickBarsRequest { get; set; }
         public double LastClosePrice { get; set; }
@@ -60,6 +66,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         public DateTime? SessionTrendOnsetTime { get; set; }
         public DateTime? RollingTrendOnsetTime { get; set; }
 
+
         public OptionVPState()
         {
             SessionVPEngine = new VPEngine();
@@ -68,6 +75,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             // Initialize with dynamic tick intervals for options
             SessionVPEngine.Reset(0.50);
             RollingVPEngine.ResetWithDynamicInterval();
+
+            // Initialize Momentum engines (smaMomentum style with Momentum + Smooth)
+            CDMomoEngine = new CDMomentumEngine(14, 7);      // CD Momentum (period=14, smooth=7)
+            PriceMomoEngine = new MomentumEngine(14, 7);    // Price Momentum (period=14, smooth=7)
         }
 
         public void Dispose()
@@ -476,6 +487,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 state.RollingVPEngine.SetClosePrice(closePrice);
                 state.RollingVPEngine.ExpireOldData(barTime);
 
+                // Update LastClosePrice BEFORE RecalculateVP so Price Momentum and VWAP Score use current price
+                state.LastClosePrice = closePrice;
+
                 // Recalculate VP and check for trend changes on every bar (accuracy is critical)
                 RecalculateVP(state, barTime);
 
@@ -499,12 +513,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         /// <summary>
         /// Optimized tick processing using pre-built index and tracking search position.
+        /// Feeds ticks to VP engines and CD Momentum engine.
         /// </summary>
         private double ProcessTicksOptimized(OptionVPState state, Bars tickBars,
             List<(DateTime time, int index)> tickTimes, ref int searchStart,
             DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
         {
             int tickCount = 0;
+
+            // Start new bar for CD momentum engine
+            state.CDMomoEngine.StartNewBar();
 
             // Scan from last position (O(n) total across all bars instead of O(n²))
             while (searchStart < tickTimes.Count)
@@ -525,8 +543,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 long volume = tickBars.GetVolume(tickIdx);
                 bool isBuy = price >= lastPrice;
 
+                // Feed to VP engines
                 state.SessionVPEngine.AddTick(price, volume, isBuy);
                 state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+
+                // Feed to CD Momentum engine
+                state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
 
                 lastPrice = price;
                 tickCount++;
@@ -540,6 +562,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         /// <summary>
         /// Process ticks within a time window (between prevBarTime and currentBarTime).
         /// Returns the last processed price.
+        /// Feeds ticks to VP engines and CD Momentum engine.
         /// </summary>
         private double ProcessTicksInWindow(OptionVPState state, Bars tickBars, DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
         {
@@ -547,6 +570,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             int tickCount = 0;
             int startIdx = state.LastVPTickIndex + 1;
             if (startIdx < 0) startIdx = 0;
+
+            // Start new bar for CD momentum engine
+            state.CDMomoEngine.StartNewBar();
 
             for (int i = startIdx; i < tickBars.Count; i++)
             {
@@ -565,9 +591,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 long volume = tickBars.GetVolume(i);
                 bool isBuy = price >= lastPrice;
 
-                // Add to both VP engines (NO Reset here - that was the bug!)
+                // Add to both VP engines
                 state.SessionVPEngine.AddTick(price, volume, isBuy);
                 state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+
+                // Feed to CD Momentum engine
+                state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
 
                 lastPrice = price;
                 tickCount++;
@@ -603,13 +632,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             var tickBars = state.TickBarsRequest?.Bars;
             if (tickBars != null && tickBars.Count > 0)
             {
-                state.LastClosePrice = ProcessTicksInWindow(state, tickBars, state.LastBarCloseTime, barTime, state.LastClosePrice);
+                ProcessTicksInWindow(state, tickBars, state.LastBarCloseTime, barTime, state.LastClosePrice);
             }
 
             // Update VP and recalculate
             state.SessionVPEngine.SetClosePrice(close);
             state.RollingVPEngine.SetClosePrice(close);
             state.RollingVPEngine.ExpireOldData(barTime);
+
+            // Update LastClosePrice with range bar close (used for Price Momentum and VWAP Score)
+            state.LastClosePrice = close;
 
             RecalculateVP(state, barTime);
 
@@ -640,11 +672,17 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             // Calculate Rolling VP
             var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
 
-            // Determine trends
+            // Close CD Momentum bar and get result (smaMomentum style: Momentum + Smooth)
+            var cdMomoResult = state.CDMomoEngine.CloseBar(currentTime);
+
+            // Process Price Momentum (using last close price)
+            var priceMomoResult = state.PriceMomoEngine.ProcessBar(state.LastClosePrice, currentTime);
+
+            // Determine HVN trends
             HvnTrend sessTrend = DetermineTrend(sessResult);
             HvnTrend rollTrend = DetermineTrend(rollResult);
 
-            // Track trend onset times
+            // Track HVN trend onset times
             string sessTrendTime = state.Type == "CE" ? state.Row.CETrendSessTime : state.Row.PETrendSessTime;
             string rollTrendTime = state.Type == "CE" ? state.Row.CETrendRollTime : state.Row.PETrendRollTime;
 
@@ -666,9 +704,24 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             }
             state.LastRollingTrend = rollTrend;
 
+            // Calculate VWAP scores based on current price position relative to SD bands
+            int sessVwapScore = VWAPScoreCalculator.CalculateScore(state.LastClosePrice, sessResult);
+            int rollVwapScore = VWAPScoreCalculator.CalculateScore(state.LastClosePrice, rollResult);
+
+            // Debug logging for first few calculations per symbol to diagnose VWAP score issue
+            if (state.Row.Strike == 23600 && state.Type == "CE")
+            {
+                _log.Debug($"[VWAP Debug] {state.Symbol} Price={state.LastClosePrice:F2}, " +
+                    $"SessVWAP={sessResult.VWAP:F2}, SessSD={sessResult.StdDev:F2}, " +
+                    $"Sess1SD={sessResult.Upper1SD:F2}/{sessResult.Lower1SD:F2}, " +
+                    $"Sess2SD={sessResult.Upper2SD:F2}/{sessResult.Lower2SD:F2}, " +
+                    $"SessScore={sessVwapScore}, RollScore={rollVwapScore}, IsValid={sessResult.IsValid}");
+            }
+
             // Update row based on type
             if (state.Type == "CE")
             {
+                // HVN metrics
                 state.Row.CEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
                 state.Row.CEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
                 state.Row.CETrendSess = sessTrend;
@@ -678,9 +731,22 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 state.Row.CEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
                 state.Row.CETrendRoll = rollTrend;
                 state.Row.CETrendRollTime = rollTrendTime;
+
+                // CD Momentum metrics (smaMomentum style)
+                state.Row.CECDMomo = FormatMomentum(cdMomoResult.Momentum);
+                state.Row.CECDSmooth = FormatMomentum(cdMomoResult.Smooth);
+
+                // Price Momentum metrics (smaMomentum style)
+                state.Row.CEPriceMomo = FormatMomentum(priceMomoResult.Momentum);
+                state.Row.CEPriceSmooth = FormatMomentum(priceMomoResult.Smooth);
+
+                // VWAP Score metrics
+                state.Row.CEVwapScoreSess = sessVwapScore;
+                state.Row.CEVwapScoreRoll = rollVwapScore;
             }
             else
             {
+                // HVN metrics
                 state.Row.PEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
                 state.Row.PEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
                 state.Row.PETrendSess = sessTrend;
@@ -690,7 +756,32 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 state.Row.PEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
                 state.Row.PETrendRoll = rollTrend;
                 state.Row.PETrendRollTime = rollTrendTime;
+
+                // CD Momentum metrics (smaMomentum style)
+                state.Row.PECDMomo = FormatMomentum(cdMomoResult.Momentum);
+                state.Row.PECDSmooth = FormatMomentum(cdMomoResult.Smooth);
+
+                // Price Momentum metrics (smaMomentum style)
+                state.Row.PEPriceMomo = FormatMomentum(priceMomoResult.Momentum);
+                state.Row.PEPriceSmooth = FormatMomentum(priceMomoResult.Smooth);
+
+                // VWAP Score metrics
+                state.Row.PEVwapScoreSess = sessVwapScore;
+                state.Row.PEVwapScoreRoll = rollVwapScore;
             }
+        }
+
+        /// <summary>
+        /// Formats momentum value for display (K for thousands, M for millions).
+        /// </summary>
+        private string FormatMomentum(double momentum)
+        {
+            if (Math.Abs(momentum) >= 1_000_000)
+                return (momentum / 1_000_000.0).ToString("F1") + "M";
+            else if (Math.Abs(momentum) >= 1_000)
+                return (momentum / 1_000.0).ToString("F1") + "K";
+            else
+                return momentum.ToString("F1");
         }
 
         private HvnTrend DetermineTrend(VPResult result)
