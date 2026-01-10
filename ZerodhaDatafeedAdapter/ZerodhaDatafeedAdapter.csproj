@@ -162,17 +162,14 @@
       <DependentUpon>Loadwindow.xaml</DependentUpon>
     </Compile>
     <Compile Include="LogLevel.cs" />
-    <Compile Include="Logging\AppLogger.cs" />
     <Compile Include="Logging\ILoggerService.cs" />
     <Compile Include="Logging\LoggerFactory.cs" />
-    <Compile Include="Logging\LoggingLevel.cs" />
     <Compile Include="Logging\RangeBarLogger.cs" />
     <Compile Include="Logging\TBSLogger.cs" />
     <Compile Include="Logging\HistoricalTickLogger.cs" />
     <Compile Include="Logging\StartupLogger.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="ZerodhaLogger.cs" />
-    <Compile Include="TickVolumeLogger.cs" />
     <Compile Include="Services\Configuration\ConfigurationManager.cs" />
     <Compile Include="Services\Zerodha\ZerodhaClient.cs" />
     <Compile Include="Services\Instruments\InstrumentManager.cs" />
@@ -182,7 +179,6 @@
     <Compile Include="Services\MarketData\MarketDataService.cs" />
     <Compile Include="Services\MarketData\OptimizedTickProcessor.cs" />
     <Compile Include="Services\MarketData\BackpressureManager.cs" />
-    <Compile Include="Services\MarketData\ProcessorHealthMonitor.cs" />
     <Compile Include="Services\MarketData\PerformanceMonitor.cs" />
     <Compile Include="Services\Auth\ZerodhaTokenGenerator.cs" />
     <Compile Include="Services\Auth\IciciDirectTokenGenerator.cs" />
@@ -289,9 +285,16 @@
     <Compile Include="Services\WebSocket\WebSocketStateController.cs" />
     <!-- Option Signals Module -->
     <Compile Include="AddOns\OptionSignals\Models\OptionSignalsRow.cs" />
+    <Compile Include="AddOns\OptionSignals\Models\SignalRow.cs" />
     <Compile Include="AddOns\OptionSignals\Controls\OptionSignalsHeaderControl.cs" />
     <Compile Include="AddOns\OptionSignals\Controls\OptionSignalsStatusBar.cs" />
     <Compile Include="AddOns\OptionSignals\Controls\OptionSignalsListView.cs" />
+    <Compile Include="AddOns\OptionSignals\Controls\SignalsListView.cs" />
+    <Compile Include="AddOns\OptionSignals\Services\SignalsOrchestrator.cs" />
+    <Compile Include="AddOns\OptionSignals\Services\SignalBridgeService.cs" />
+    <Compile Include="AddOns\OptionSignals\Services\TerminalService.cs" />
+    <Compile Include="AddOns\OptionSignals\Models\OptionBarHistory.cs" />
+    <Compile Include="AddOns\OptionSignals\Models\UnderlyingBarHistory.cs" />
     <Compile Include="AddOns\OptionSignals\OptionSignalsViewModel.cs" />
     <Compile Include="AddOns\OptionSignals\OptionSignalsWindow.cs" />
   </ItemGroup>

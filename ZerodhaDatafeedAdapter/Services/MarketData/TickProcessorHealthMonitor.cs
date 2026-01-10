@@ -72,4 +72,20 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             }
         }
     }
+
+    /// <summary>
+    /// Snapshot of metrics from the tick processor for health monitoring
+    /// </summary>
+    public class HealthMetricsSnapshot
+    {
+        public long TicksQueued { get; set; }
+        public long TicksProcessed { get; set; }
+        public long CallbacksExecuted { get; set; }
+        public long CallbackErrors { get; set; }
+        public long TotalCallbackTimeMs { get; set; }
+        public long SlowCallbacks { get; set; }
+        public long VerySlowCallbacks { get; set; }
+        public long TicksDroppedBackpressure { get; set; }
+        public BackpressureState BackpressureState { get; set; }
+    }
 }

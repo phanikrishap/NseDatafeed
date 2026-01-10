@@ -13,6 +13,7 @@ using System.Windows.Threading;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models;
+using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
@@ -66,6 +67,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         public DateTime? SessionTrendOnsetTime { get; set; }
         public DateTime? RollingTrendOnsetTime { get; set; }
 
+        // Bar history for signal orchestrator - stores 256 bar snapshots
+        public OptionBarHistory BarHistory { get; set; }
 
         public OptionVPState()
         {
@@ -110,6 +113,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         // Data Collections
         public ObservableCollection<OptionSignalsRow> Rows { get; } = new ObservableCollection<OptionSignalsRow>();
+        public ObservableCollection<SignalRow> Signals { get; } = new ObservableCollection<SignalRow>();
+
+        // Signals Orchestrator
+        private SignalsOrchestrator _signalsOrchestrator;
+        private readonly object _signalsLock = new object();
 
         // Properties
         private string _underlying = "NIFTY";
@@ -117,6 +125,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         private string _statusText = "Waiting for Data...";
         private bool _isBusy;
         private DateTime? _selectedExpiry;
+        private double _atmStrike;
+        private int _strikeStep = 50;
 
         public string Underlying
         {
@@ -142,11 +152,21 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             set { if (_isBusy != value) { _isBusy = value; OnPropertyChanged(); } }
         }
 
+        // Signals P&L properties for UI binding
+        public double TotalUnrealizedPnL => _signalsOrchestrator?.TotalUnrealizedPnL ?? 0;
+        public double TotalRealizedPnL => _signalsOrchestrator?.TotalRealizedPnL ?? 0;
+        public int ActiveSignalCount => _signalsOrchestrator?.ActiveSignalCount ?? 0;
+
         public OptionSignalsViewModel()
         {
             _dispatcher = Dispatcher.CurrentDispatcher;
             BindingOperations.EnableCollectionSynchronization(Rows, _rowsLock);
-            _log.Info("[OptionSignalsViewModel] Initialized");
+            BindingOperations.EnableCollectionSynchronization(Signals, _signalsLock);
+
+            // Initialize Signals Orchestrator
+            _signalsOrchestrator = new SignalsOrchestrator(Signals, _dispatcher);
+
+            _log.Info("[OptionSignalsViewModel] Initialized with SignalsOrchestrator");
             SetupInternalPipelines();
         }
 
@@ -182,6 +202,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             _subscriptions.Add(hub.OptionPriceBatchStream
                 .ObserveOnDispatcher()
                 .Subscribe(OnOptionPriceBatch));
+
+            // Subscribe to Nifty Futures VP metrics for underlying bias
+            _subscriptions.Add(NiftyFuturesMetricsService.Instance.MetricsStream
+                .Where(m => m.IsValid)
+                .Sample(TimeSpan.FromSeconds(1)) // Throttle to 1 update per second
+                .Subscribe(OnNiftyFuturesMetricsUpdate));
+
+            TerminalService.Instance.Info("OptionSignalsViewModel services started");
         }
 
         public void StopServices()
@@ -194,6 +222,65 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         private void OnProjectedOpenReady(ProjectedOpenState state)
         {
             _log.Info($"[OptionSignalsViewModel] Projected Open Ready: {state.NiftyProjectedOpen:F2}");
+        }
+
+        /// <summary>
+        /// Handles Nifty Futures VP metrics updates and forwards to SignalsOrchestrator.
+        /// </summary>
+        private void OnNiftyFuturesMetricsUpdate(NiftyFuturesVPMetrics metrics)
+        {
+            if (!metrics.IsValid || _signalsOrchestrator == null) return;
+
+            // Determine HVN trends
+            HvnTrend sessTrend = DetermineUnderlyingTrend(metrics.HVNBuyCount, metrics.HVNSellCount);
+            HvnTrend rollTrend = DetermineUnderlyingTrend(metrics.RollingHVNBuyCount, metrics.RollingHVNSellCount);
+
+            var snapshot = new UnderlyingStateSnapshot
+            {
+                Symbol = metrics.Symbol ?? "NIFTY_I",
+                Price = metrics.POC, // Using POC as representative price
+                Time = metrics.LastBarTime,
+
+                // Session VP metrics
+                POC = metrics.POC,
+                VAH = metrics.VAH,
+                VAL = metrics.VAL,
+                VWAP = metrics.VWAP,
+                SessHvnB = metrics.HVNBuyCount,
+                SessHvnS = metrics.HVNSellCount,
+                SessTrend = sessTrend,
+
+                // Rolling VP metrics
+                RollingPOC = metrics.RollingPOC,
+                RollingVAH = metrics.RollingVAH,
+                RollingVAL = metrics.RollingVAL,
+                RollHvnB = metrics.RollingHVNBuyCount,
+                RollHvnS = metrics.RollingHVNSellCount,
+                RollTrend = rollTrend,
+
+                // Relative metrics
+                RelHvnBuySess = metrics.RelHVNBuy,
+                RelHvnSellSess = metrics.RelHVNSell,
+                RelHvnBuyRoll = metrics.RelHVNBuyRolling,
+                RelHvnSellRoll = metrics.RelHVNSellRolling,
+
+                IsValid = true
+            };
+
+            _signalsOrchestrator.UpdateUnderlyingState(snapshot);
+        }
+
+        /// <summary>
+        /// Determines HVN trend for underlying based on buy/sell counts.
+        /// </summary>
+        private HvnTrend DetermineUnderlyingTrend(int hvnBuy, int hvnSell)
+        {
+            if (hvnBuy > hvnSell)
+                return HvnTrend.Bullish;
+            else if (hvnSell > hvnBuy)
+                return HvnTrend.Bearish;
+            else
+                return HvnTrend.Neutral;
         }
 
         private async Task SyncAndPopulateStrikes(OptionsGeneratedEvent evt, System.Threading.CancellationToken ct)
@@ -218,6 +305,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 .ToList();
 
             if (uniqueStrikes.Count >= 2) step = uniqueStrikes[1] - uniqueStrikes[0];
+
+            // Store for SignalsOrchestrator
+            _atmStrike = atmStrike;
+            _strikeStep = step;
 
             var strikesToLoad = new List<int>();
             for (int i = -10; i <= 10; i++) strikesToLoad.Add(atmStrike + (i * step));
@@ -309,6 +400,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
                     StatusText = $"Monitoring {Rows.Count} strikes. (Historical Sync OK)";
                     IsBusy = false;
+
+                    // Update SignalsOrchestrator with market context
+                    _signalsOrchestrator?.ClearStates();
+                    _signalsOrchestrator?.SetMarketContext(_atmStrike, _strikeStep, _selectedExpiry);
                 }
             });
         }
@@ -326,7 +421,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             {
                 Symbol = symbol,
                 Type = type,
-                Row = row
+                Row = row,
+                BarHistory = new OptionBarHistory(symbol, strike, type, 256) // 256-bar circular buffer
             };
 
             // Setup Rx pipeline: wait for both tick and range data, then process
@@ -769,6 +865,115 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 state.Row.PEVwapScoreSess = sessVwapScore;
                 state.Row.PEVwapScoreRoll = rollVwapScore;
             }
+
+            // Store bar snapshot in circular buffer for historical lookups
+            if (state.BarHistory != null)
+            {
+                var barSnapshot = new OptionBarSnapshot
+                {
+                    BarTime = currentTime,
+                    ClosePrice = state.LastClosePrice,
+                    SessHvnB = sessResult.IsValid ? sessResult.HVNBuyCount : 0,
+                    SessHvnS = sessResult.IsValid ? sessResult.HVNSellCount : 0,
+                    SessTrend = sessTrend,
+                    RollHvnB = rollResult.IsValid ? rollResult.HVNBuyCount : 0,
+                    RollHvnS = rollResult.IsValid ? rollResult.HVNSellCount : 0,
+                    RollTrend = rollTrend,
+                    CDMomentum = cdMomoResult.Momentum,
+                    CDSmooth = cdMomoResult.Smooth,
+                    CDBias = cdMomoResult.Bias,
+                    PriceMomentum = priceMomoResult.Momentum,
+                    PriceSmooth = priceMomoResult.Smooth,
+                    PriceBias = priceMomoResult.Bias,
+                    VwapScoreSess = sessVwapScore,
+                    VwapScoreRoll = rollVwapScore,
+                    SessionVWAP = sessResult.VWAP,
+                    RollingVWAP = rollResult.VWAP
+                };
+                state.BarHistory.AddBar(barSnapshot);
+            }
+
+            // Feed snapshot to SignalsOrchestrator for signal evaluation
+            if (_signalsOrchestrator != null)
+            {
+                // Calculate DTE
+                int dte = _selectedExpiry.HasValue ? (_selectedExpiry.Value.Date - DateTime.Today).Days : 0;
+
+                // Determine moneyness relative to ATM
+                Moneyness moneyness = DetermineMoneyness(state.Row.Strike, state.Type);
+
+                var snapshot = new OptionStateSnapshot
+                {
+                    Symbol = state.Symbol,
+                    Strike = state.Row.Strike,
+                    OptionType = state.Type,
+                    Moneyness = moneyness,
+                    DTE = dte,
+                    LastPrice = state.LastClosePrice,
+                    LastPriceTime = currentTime,
+                    RangeBarClosePrice = state.LastClosePrice,
+                    RangeBarCloseTime = currentTime,
+
+                    // VP Session metrics
+                    SessHvnB = sessResult.IsValid ? sessResult.HVNBuyCount : 0,
+                    SessHvnS = sessResult.IsValid ? sessResult.HVNSellCount : 0,
+                    SessTrend = sessTrend,
+                    SessTrendOnsetTime = state.SessionTrendOnsetTime,
+
+                    // VP Rolling metrics
+                    RollHvnB = rollResult.IsValid ? rollResult.HVNBuyCount : 0,
+                    RollHvnS = rollResult.IsValid ? rollResult.HVNSellCount : 0,
+                    RollTrend = rollTrend,
+                    RollTrendOnsetTime = state.RollingTrendOnsetTime,
+
+                    // Momentum metrics
+                    CDMomentum = cdMomoResult.Momentum,
+                    CDSmooth = cdMomoResult.Smooth,
+                    CDBias = cdMomoResult.Bias,
+                    PriceMomentum = priceMomoResult.Momentum,
+                    PriceSmooth = priceMomoResult.Smooth,
+                    PriceBias = priceMomoResult.Bias,
+
+                    // VWAP metrics
+                    VwapScoreSess = sessVwapScore,
+                    VwapScoreRoll = rollVwapScore,
+                    SessionVWAP = sessResult.VWAP,
+                    RollingVWAP = rollResult.VWAP
+                };
+
+                _signalsOrchestrator.UpdateOptionState(snapshot, state.BarHistory);
+            }
+        }
+
+        /// <summary>
+        /// Determines moneyness classification based on strike relative to ATM.
+        /// </summary>
+        private Moneyness DetermineMoneyness(double strike, string optionType)
+        {
+            int strikeDiff = (int)((strike - _atmStrike) / _strikeStep);
+
+            if (optionType == "CE")
+            {
+                // For CE: lower strike = ITM, higher strike = OTM
+                if (strikeDiff == 0) return Moneyness.ATM;
+                if (strikeDiff == -1) return Moneyness.ITM1;
+                if (strikeDiff <= -2 && strikeDiff >= -3) return Moneyness.ITM2;
+                if (strikeDiff < -3) return Moneyness.DeepITM;
+                if (strikeDiff == 1) return Moneyness.OTM1;
+                if (strikeDiff >= 2 && strikeDiff <= 3) return Moneyness.OTM2;
+                return Moneyness.DeepOTM;
+            }
+            else // PE
+            {
+                // For PE: higher strike = ITM, lower strike = OTM
+                if (strikeDiff == 0) return Moneyness.ATM;
+                if (strikeDiff == 1) return Moneyness.ITM1;
+                if (strikeDiff >= 2 && strikeDiff <= 3) return Moneyness.ITM2;
+                if (strikeDiff > 3) return Moneyness.DeepITM;
+                if (strikeDiff == -1) return Moneyness.OTM1;
+                if (strikeDiff <= -2 && strikeDiff >= -3) return Moneyness.OTM2;
+                return Moneyness.DeepOTM;
+            }
         }
 
         /// <summary>
@@ -859,6 +1064,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         public void Dispose()
         {
             StopServices();
+            _signalsOrchestrator?.Dispose();
         }
     }
 }
