@@ -9,8 +9,10 @@ using System.Windows.Media;
 using System.Xml.Linq;
 using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Tools;
+using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services;
+using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Helpers;
 
 namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
@@ -152,12 +154,62 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
                 BuildUI();
                 BindToService();
 
+                // Check if config was pre-loaded from config.json (simulation mode enabled at startup)
+                var preloadedConfig = SimulationService.Instance.GetPreloadedConfig();
+                if (preloadedConfig != null)
+                {
+                    Logger.Info("[SimulationEngineTabPage] Found pre-loaded config from config.json, populating UI...");
+                    PopulateUIFromConfig(preloadedConfig);
+                }
+
                 Logger.Info("[SimulationEngineTabPage] Initialized");
             }
             catch (Exception ex)
             {
                 Logger.Error($"[SimulationEngineTabPage] Constructor error: {ex.Message}\n{ex.StackTrace}", ex);
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Populates UI controls from a SimulationConfig (used when simulation mode is enabled in config.json)
+        /// </summary>
+        private void PopulateUIFromConfig(SimulationConfig config)
+        {
+            try
+            {
+                _datePicker.SelectedDate = config.SimulationDate;
+                _txtTimeFrom.Text = config.TimeFrom.ToString(@"hh\:mm");
+                _txtTimeTo.Text = config.TimeTo.ToString(@"hh\:mm");
+                _cboUnderlying.SelectedItem = config.Underlying;
+                _expiryPicker.SelectedDate = config.ExpiryDate;
+                _txtProjectedOpen.Text = config.ProjectedOpen.ToString();
+                _txtStepSize.Text = config.StepSize.ToString();
+                _txtStrikeCount.Text = config.StrikeCount.ToString();
+                _txtSymbolPrefix.Text = config.SymbolPrefix ?? "";
+
+                // Set speed combo
+                string speedText = $"{config.SpeedMultiplier}x";
+                for (int i = 0; i < _cboSpeed.Items.Count; i++)
+                {
+                    if (_cboSpeed.Items[i].ToString() == speedText)
+                    {
+                        _cboSpeed.SelectedIndex = i;
+                        break;
+                    }
+                }
+
+                // Update internal config
+                _config = config;
+
+                UpdateSymbolPreview();
+
+                Logger.Info($"[SimulationEngineTabPage] UI populated from config: Date={config.SimulationDate:yyyy-MM-dd}, " +
+                            $"Underlying={config.Underlying}, Expiry={config.ExpiryDate:yyyy-MM-dd}, ATM={config.ATMStrike}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SimulationEngineTabPage] Error populating UI from config: {ex.Message}", ex);
             }
         }
 
@@ -800,6 +852,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
                 if (success)
                 {
                     Logger.Info("[SimulationEngineTabPage] Data loaded successfully");
+
+                    // Load Nifty Futures historical data for the simulation date
+                    // This populates VP engines with 40 days of data ending before simulation date
+                    LoggerFactory.Simulation.Info($"[SimulationEngine] Loading Nifty Futures data for simulation date {_config.SimulationDate:yyyy-MM-dd}");
+                    await NiftyFuturesMetricsService.Instance.StartSimulationAsync(_config.SimulationDate);
+                    Logger.Info("[SimulationEngineTabPage] Nifty Futures VP data loaded for simulation");
 
                     // Publish the simulated option chain to MarketDataReactiveHub
                     // This regenerates the Option Chain window with simulation config (underlying, expiry, strikes)

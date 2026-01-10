@@ -5,6 +5,7 @@ using System.Linq;
 using System.Windows.Threading;
 using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models;
 using ZerodhaDatafeedAdapter.Logging;
+using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis.Components;
 
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
@@ -125,6 +126,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
         private readonly HashSet<string> _signalsGeneratedToday = new HashSet<string>();
 
+        // Replay mode - allows repetitive trades on same symbol
+        private bool _isReplayMode = false;
+
+        // Track last signal state per symbol to only generate on state change
+        private readonly Dictionary<string, bool> _lastSignalState = new Dictionary<string, bool>();
+
         private IReadOnlyDictionary<string, OptionBarHistory> _currentBarHistories;
 
         public override List<SignalRow> Evaluate(
@@ -187,125 +194,155 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         private SignalRow EvaluateCEOption(OptionStateSnapshot option, Moneyness moneyness,
             DateTime currentTime, IReadOnlyList<SignalRow> existingSignals)
         {
-            // Check if signal already exists for this symbol today
-            string signalKey = $"{Name}_{option.Symbol}_{currentTime.Date:yyyyMMdd}";
-            if (_signalsGeneratedToday.Contains(signalKey))
-                return null;
-
-            // Check if there's already an active or pending signal for this symbol
-            if (existingSignals.Any(s => s.Symbol == option.Symbol &&
-                (s.Status == SignalStatus.Active || s.Status == SignalStatus.Pending)))
-                return null;
-
             // Strategy condition: Session HVN Buy > Session HVN Sell for CE (bullish accumulation)
-            if (option.SessHvnB > option.SessHvnS && option.SessHvnB >= 1)
+            bool conditionMet = option.SessHvnB > option.SessHvnS && option.SessHvnB >= 1;
+            string stateKey = $"CE_{option.Symbol}";
+
+            if (_isReplayMode)
             {
+                // In replay mode: generate signal on state change from false to true
+                bool wasConditionMet = _lastSignalState.TryGetValue(stateKey, out bool lastState) && lastState;
+                _lastSignalState[stateKey] = conditionMet;
+
+                // Only generate if condition just became true (transition)
+                if (!conditionMet || wasConditionMet)
+                    return null;
+            }
+            else
+            {
+                // In real-time mode: use daily dedup
+                string signalKey = $"{Name}_{option.Symbol}_{currentTime.Date:yyyyMMdd}";
+                if (_signalsGeneratedToday.Contains(signalKey))
+                    return null;
+
+                // Check if there's already an active or pending signal for this symbol
+                if (existingSignals.Any(s => s.Symbol == option.Symbol &&
+                    (s.Status == SignalStatus.Active || s.Status == SignalStatus.Pending)))
+                    return null;
+
+                if (!conditionMet)
+                    return null;
+
                 _signalsGeneratedToday.Add(signalKey);
-
-                // Get entry price from bar history at signal time for accurate historical prices
-                double entryPrice = option.RangeBarClosePrice; // Default to current
-                if (_currentBarHistories != null &&
-                    _currentBarHistories.TryGetValue(option.Symbol, out var history))
-                {
-                    var histPrice = history.GetPriceAtOrBefore(currentTime);
-                    if (histPrice.HasValue)
-                        entryPrice = histPrice.Value;
-                }
-
-                // Signals are immediately Active with entry at historical price
-                return new SignalRow
-                {
-                    SignalId = SignalRow.GenerateSignalId(Name, option.Symbol, currentTime),
-                    SignalTime = currentTime,
-                    Symbol = option.Symbol,
-                    Strike = option.Strike,
-                    OptionType = option.OptionType,
-                    Moneyness = moneyness,
-                    Direction = SignalDirection.Long,
-                    Status = SignalStatus.Active,
-                    Quantity = 1, // 1 lot
-                    EntryPrice = entryPrice,
-                    EntryTime = currentTime,
-                    CurrentPrice = option.RangeBarClosePrice, // Current price for P&L tracking
-                    StrategyName = Name,
-                    SignalReason = $"Sess HVN B({option.SessHvnB}) > S({option.SessHvnS})",
-                    DTE = option.DTE,
-                    SessHvnB = option.SessHvnB,
-                    SessHvnS = option.SessHvnS,
-                    RollHvnB = option.RollHvnB,
-                    RollHvnS = option.RollHvnS,
-                    CDMomentum = option.CDMomentum,
-                    CDSmooth = option.CDSmooth,
-                    PriceMomentum = option.PriceMomentum,
-                    PriceSmooth = option.PriceSmooth,
-                    VwapScoreSess = option.VwapScoreSess,
-                    VwapScoreRoll = option.VwapScoreRoll
-                };
             }
 
-            return null;
+            // Condition is met and we should generate a signal
+            // Get entry price from bar history at signal time for accurate historical prices
+            double entryPrice = option.RangeBarClosePrice; // Default to current
+            if (_currentBarHistories != null &&
+                _currentBarHistories.TryGetValue(option.Symbol, out var history))
+            {
+                var histPrice = history.GetPriceAtOrBefore(currentTime);
+                if (histPrice.HasValue)
+                    entryPrice = histPrice.Value;
+            }
+
+            // Signals are immediately Active with entry at historical price
+            return new SignalRow
+            {
+                SignalId = SignalRow.GenerateSignalId(Name, option.Symbol, currentTime),
+                SignalTime = currentTime,
+                Symbol = option.Symbol,
+                Strike = option.Strike,
+                OptionType = option.OptionType,
+                Moneyness = moneyness,
+                Direction = SignalDirection.Long,
+                Status = SignalStatus.Active,
+                Quantity = 1, // 1 lot
+                EntryPrice = entryPrice,
+                EntryTime = currentTime,
+                CurrentPrice = option.RangeBarClosePrice, // Current price for P&L tracking
+                StrategyName = Name,
+                SignalReason = $"Sess HVN B({option.SessHvnB}) > S({option.SessHvnS})",
+                DTE = option.DTE,
+                SessHvnB = option.SessHvnB,
+                SessHvnS = option.SessHvnS,
+                RollHvnB = option.RollHvnB,
+                RollHvnS = option.RollHvnS,
+                CDMomentum = option.CDMomentum,
+                CDSmooth = option.CDSmooth,
+                PriceMomentum = option.PriceMomentum,
+                PriceSmooth = option.PriceSmooth,
+                VwapScoreSess = option.VwapScoreSess,
+                VwapScoreRoll = option.VwapScoreRoll
+            };
         }
 
         private SignalRow EvaluatePEOption(OptionStateSnapshot option, Moneyness moneyness,
             DateTime currentTime, IReadOnlyList<SignalRow> existingSignals)
         {
-            // Check if signal already exists for this symbol today
-            string signalKey = $"{Name}_{option.Symbol}_{currentTime.Date:yyyyMMdd}";
-            if (_signalsGeneratedToday.Contains(signalKey))
-                return null;
-
-            // Check if there's already an active or pending signal for this symbol
-            if (existingSignals.Any(s => s.Symbol == option.Symbol &&
-                (s.Status == SignalStatus.Active || s.Status == SignalStatus.Pending)))
-                return null;
-
             // Strategy condition: Session HVN Sell > Session HVN Buy for PE (bearish accumulation)
-            if (option.SessHvnS > option.SessHvnB && option.SessHvnS >= 1)
+            bool conditionMet = option.SessHvnS > option.SessHvnB && option.SessHvnS >= 1;
+            string stateKey = $"PE_{option.Symbol}";
+
+            if (_isReplayMode)
             {
+                // In replay mode: generate signal on state change from false to true
+                bool wasConditionMet = _lastSignalState.TryGetValue(stateKey, out bool lastState) && lastState;
+                _lastSignalState[stateKey] = conditionMet;
+
+                // Only generate if condition just became true (transition)
+                if (!conditionMet || wasConditionMet)
+                    return null;
+            }
+            else
+            {
+                // In real-time mode: use daily dedup
+                string signalKey = $"{Name}_{option.Symbol}_{currentTime.Date:yyyyMMdd}";
+                if (_signalsGeneratedToday.Contains(signalKey))
+                    return null;
+
+                // Check if there's already an active or pending signal for this symbol
+                if (existingSignals.Any(s => s.Symbol == option.Symbol &&
+                    (s.Status == SignalStatus.Active || s.Status == SignalStatus.Pending)))
+                    return null;
+
+                if (!conditionMet)
+                    return null;
+
                 _signalsGeneratedToday.Add(signalKey);
-
-                // Get entry price from bar history at signal time for accurate historical prices
-                double entryPrice = option.RangeBarClosePrice; // Default to current
-                if (_currentBarHistories != null &&
-                    _currentBarHistories.TryGetValue(option.Symbol, out var history))
-                {
-                    var histPrice = history.GetPriceAtOrBefore(currentTime);
-                    if (histPrice.HasValue)
-                        entryPrice = histPrice.Value;
-                }
-
-                // Signals are immediately Active with entry at historical price
-                return new SignalRow
-                {
-                    SignalId = SignalRow.GenerateSignalId(Name, option.Symbol, currentTime),
-                    SignalTime = currentTime,
-                    Symbol = option.Symbol,
-                    Strike = option.Strike,
-                    OptionType = option.OptionType,
-                    Moneyness = moneyness,
-                    Direction = SignalDirection.Long, // Buying puts
-                    Status = SignalStatus.Active,
-                    Quantity = 1, // 1 lot
-                    EntryPrice = entryPrice,
-                    EntryTime = currentTime,
-                    CurrentPrice = option.RangeBarClosePrice, // Current price for P&L tracking
-                    StrategyName = Name,
-                    SignalReason = $"Sess HVN S({option.SessHvnS}) > B({option.SessHvnB})",
-                    DTE = option.DTE,
-                    SessHvnB = option.SessHvnB,
-                    SessHvnS = option.SessHvnS,
-                    RollHvnB = option.RollHvnB,
-                    RollHvnS = option.RollHvnS,
-                    CDMomentum = option.CDMomentum,
-                    CDSmooth = option.CDSmooth,
-                    PriceMomentum = option.PriceMomentum,
-                    PriceSmooth = option.PriceSmooth,
-                    VwapScoreSess = option.VwapScoreSess,
-                    VwapScoreRoll = option.VwapScoreRoll
-                };
             }
 
-            return null;
+            // Condition is met and we should generate a signal
+            // Get entry price from bar history at signal time for accurate historical prices
+            double entryPrice = option.RangeBarClosePrice; // Default to current
+            if (_currentBarHistories != null &&
+                _currentBarHistories.TryGetValue(option.Symbol, out var history))
+            {
+                var histPrice = history.GetPriceAtOrBefore(currentTime);
+                if (histPrice.HasValue)
+                    entryPrice = histPrice.Value;
+            }
+
+            // Signals are immediately Active with entry at historical price
+            return new SignalRow
+            {
+                SignalId = SignalRow.GenerateSignalId(Name, option.Symbol, currentTime),
+                SignalTime = currentTime,
+                Symbol = option.Symbol,
+                Strike = option.Strike,
+                OptionType = option.OptionType,
+                Moneyness = moneyness,
+                Direction = SignalDirection.Long, // Buying puts
+                Status = SignalStatus.Active,
+                Quantity = 1, // 1 lot
+                EntryPrice = entryPrice,
+                EntryTime = currentTime,
+                CurrentPrice = option.RangeBarClosePrice, // Current price for P&L tracking
+                StrategyName = Name,
+                SignalReason = $"Sess HVN S({option.SessHvnS}) > B({option.SessHvnB})",
+                DTE = option.DTE,
+                SessHvnB = option.SessHvnB,
+                SessHvnS = option.SessHvnS,
+                RollHvnB = option.RollHvnB,
+                RollHvnS = option.RollHvnS,
+                CDMomentum = option.CDMomentum,
+                CDSmooth = option.CDSmooth,
+                PriceMomentum = option.PriceMomentum,
+                PriceSmooth = option.PriceSmooth,
+                VwapScoreSess = option.VwapScoreSess,
+                VwapScoreRoll = option.VwapScoreRoll
+            };
         }
 
         /// <summary>
@@ -314,6 +351,21 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         public void ResetDaily()
         {
             _signalsGeneratedToday.Clear();
+            _lastSignalState.Clear();
+        }
+
+        /// <summary>
+        /// Sets replay mode on/off.
+        /// In replay mode, allows repetitive trades on same symbol (generates on each condition match).
+        /// </summary>
+        public void SetReplayMode(bool enabled)
+        {
+            _isReplayMode = enabled;
+            if (enabled)
+            {
+                _signalsGeneratedToday.Clear();
+                _lastSignalState.Clear();
+            }
         }
     }
 
@@ -344,6 +396,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         private DateTime _lastEvaluationTime = DateTime.MinValue;
         private readonly TimeSpan _minEvaluationInterval = TimeSpan.FromMilliseconds(500); // Throttle evaluations
 
+        // Replay mode - disables duplicate signal check and throttling
+        private bool _isReplayMode = false;
+
+        // Position tracking for auto-exit (CE and PE tracked separately)
+        private bool _autoExitEnabled = true;
+        private SignalRow _activeCELongPosition;
+        private SignalRow _activePELongPosition;
+
         public SignalsOrchestrator(ObservableCollection<SignalRow> signals, Dispatcher dispatcher)
         {
             _signals = signals;
@@ -363,6 +423,70 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// Gets the current underlying state.
         /// </summary>
         public UnderlyingStateSnapshot UnderlyingState => _underlyingState;
+
+        /// <summary>
+        /// Gets or sets whether replay mode is active.
+        /// In replay mode, duplicate signal checks are disabled and throttling is bypassed.
+        /// </summary>
+        public bool IsReplayMode => _isReplayMode;
+
+        /// <summary>
+        /// Sets replay mode on/off.
+        /// </summary>
+        public void SetReplayMode(bool enabled)
+        {
+            _isReplayMode = enabled;
+            _log.Info($"[SignalsOrchestrator] Replay mode: {enabled}");
+
+            if (enabled)
+            {
+                // Reset strategy daily tracking when entering replay mode
+                foreach (var strategy in _strategies)
+                {
+                    if (strategy is HvnBuySellStrategy hvnStrategy)
+                    {
+                        hvnStrategy.ResetDaily();
+                        hvnStrategy.SetReplayMode(true);
+                    }
+                }
+
+                // Clear position tracking
+                _activeCELongPosition = null;
+                _activePELongPosition = null;
+            }
+            else
+            {
+                foreach (var strategy in _strategies)
+                {
+                    if (strategy is HvnBuySellStrategy hvnStrategy)
+                    {
+                        hvnStrategy.SetReplayMode(false);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets the current time - uses simulation time when in replay mode, otherwise real time.
+        /// </summary>
+        private DateTime GetCurrentTime()
+        {
+            if (_isReplayMode && SimulationService.Instance.IsSimulationActive)
+            {
+                var simTime = SimulationService.Instance.CurrentSimTime;
+                return simTime != DateTime.MinValue ? simTime : DateTime.Now;
+            }
+            return DateTime.Now;
+        }
+
+        /// <summary>
+        /// Enables or disables auto-exit of opposite positions.
+        /// </summary>
+        public void EnableAutoExit(bool enabled)
+        {
+            _autoExitEnabled = enabled;
+            _log.Info($"[SignalsOrchestrator] Auto-exit: {enabled}");
+        }
 
         /// <summary>
         /// Gets the underlying bar history for historical lookups.
@@ -456,8 +580,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             // Always update current price for active signals (for live P&L tracking)
             UpdateSignalPrice(snapshot.Symbol, snapshot.RangeBarClosePrice);
 
-            // Throttle strategy evaluations (but not price updates)
-            if ((DateTime.Now - _lastEvaluationTime) >= _minEvaluationInterval)
+            // In replay mode, evaluate on every update (no throttling)
+            // In real-time mode, throttle strategy evaluations
+            if (_isReplayMode || (DateTime.Now - _lastEvaluationTime) >= _minEvaluationInterval)
             {
                 EvaluateStrategies(snapshot.RangeBarCloseTime);
             }
@@ -680,7 +805,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 {
                     signal.Status = SignalStatus.Active;
                     signal.EntryPrice = entryPrice;
-                    signal.EntryTime = DateTime.Now;
+                    signal.EntryTime = GetCurrentTime();
                     _log.Info($"[SignalsOrchestrator] Signal activated: {signal.Symbol} @ {entryPrice:F2}");
                 }
             });
@@ -698,7 +823,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 {
                     signal.Status = SignalStatus.Closed;
                     signal.ExitPrice = exitPrice;
-                    signal.ExitTime = DateTime.Now;
+                    signal.ExitTime = GetCurrentTime();
                     _log.Info($"[SignalsOrchestrator] Signal closed: {signal.Symbol} @ {exitPrice:F2}, P&L: {signal.RealizedPnL:F2}");
                 }
             });

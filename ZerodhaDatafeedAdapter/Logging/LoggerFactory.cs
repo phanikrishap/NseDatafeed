@@ -275,6 +275,11 @@ namespace ZerodhaDatafeedAdapter.Logging
         public static ILoggerService OpSignals => GetLogger(LogDomain.OpSignals);
 
         /// <summary>
+        /// Gets the Simulation logger for simulation engine flow tracking.
+        /// </summary>
+        public static ILoggerService Simulation => GetLogger(LogDomain.Simulation);
+
+        /// <summary>
         /// Gets the ICICI API logger for Breeze API operations.
         /// [Deprecated] Use HistoricalTick instead - kept for backward compatibility.
         /// </summary>
@@ -554,7 +559,10 @@ namespace ZerodhaDatafeedAdapter.Logging
         HistoricalTick,
 
         /// <summary>Option Signals log - HVN and trend analysis (OpSignals.log)</summary>
-        OpSignals
+        OpSignals,
+
+        /// <summary>Simulation engine log - tick replay and simulation flow tracking (Simulation.log)</summary>
+        Simulation
     }
 
     /// <summary>
@@ -615,6 +623,7 @@ namespace ZerodhaDatafeedAdapter.Logging
                 LogDomain.RangeBar => "RangeBar.log",
                 LogDomain.HistoricalTick => "HistoricalTick.log",
                 LogDomain.OpSignals => "OpSignals.log",
+                LogDomain.Simulation => "Simulation.log",
                 _ => "ZerodhaAdapter.log"
             };
         }

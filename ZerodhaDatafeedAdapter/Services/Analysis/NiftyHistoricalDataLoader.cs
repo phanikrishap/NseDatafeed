@@ -20,19 +20,31 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private const int SLICE_DAYS = 5;
         private const int NUM_SLICES = 8;
 
+        /// <summary>
+        /// Loads historical data up to current date (for live mode).
+        /// </summary>
         public async Task<(List<RangeATRBar> bars, List<HistoricalTick> ticks, bool success)> LoadHistoricalDataAsync(Instrument instrument)
         {
+            return await LoadHistoricalDataAsync(instrument, DateTime.Now);
+        }
+
+        /// <summary>
+        /// Loads historical data up to a specific date (for simulation mode).
+        /// Data is loaded from (asOfDate - HISTORICAL_DAYS) to asOfDate.
+        /// </summary>
+        public async Task<(List<RangeATRBar> bars, List<HistoricalTick> ticks, bool success)> LoadHistoricalDataAsync(Instrument instrument, DateTime asOfDate)
+        {
             var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
-            
-            Logger.Info($"[NiftyHistoricalDataLoader] Starting parallel load - {NUM_SLICES} slices x {SLICE_DAYS} days = {HISTORICAL_DAYS} days");
-            RangeBarLogger.Info($"[PARALLEL_LOAD] Starting: {NUM_SLICES} slices x {SLICE_DAYS} days, symbol={instrument.FullName}");
+
+            Logger.Info($"[NiftyHistoricalDataLoader] Starting parallel load - {NUM_SLICES} slices x {SLICE_DAYS} days = {HISTORICAL_DAYS} days (asOf={asOfDate:yyyy-MM-dd})");
+            RangeBarLogger.Info($"[PARALLEL_LOAD] Starting: {NUM_SLICES} slices x {SLICE_DAYS} days, symbol={instrument.FullName}, asOf={asOfDate:yyyy-MM-dd}");
 
             var sliceRanges = new List<(DateTime from, DateTime to, int sliceNum)>();
-            var now = DateTime.Now;
+            var referenceDate = asOfDate;
 
             for (int i = 0; i < NUM_SLICES; i++)
             {
-                var toDate = now.Date.AddDays(1).AddDays(-i * SLICE_DAYS);
+                var toDate = referenceDate.Date.AddDays(1).AddDays(-i * SLICE_DAYS);
                 var fromDate = toDate.AddDays(-SLICE_DAYS);
                 sliceRanges.Add((fromDate, toDate, i));
             }

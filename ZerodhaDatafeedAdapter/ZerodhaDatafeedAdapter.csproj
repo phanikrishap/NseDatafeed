@@ -226,6 +226,7 @@
     <Compile Include="Models\TBSConfigEntry.cs" />
     <Compile Include="Models\TBSExecutionState.cs" />
     <Compile Include="Models\SimulationConfig.cs" />
+    <Compile Include="Models\SimulationSettings.cs" />
     <Compile Include="Services\TBSConfigurationService.cs" />
     <Compile Include="Services\TBSExecutionService.cs" />
     <Compile Include="Services\TBS\StoxxoBridgeManager.cs" />

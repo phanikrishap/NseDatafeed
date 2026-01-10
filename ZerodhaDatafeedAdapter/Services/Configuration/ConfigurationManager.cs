@@ -8,6 +8,7 @@ using ZerodhaDatafeedAdapter.Services.Auth;
 using ZerodhaAPI.Zerodha.Utility;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Classes;
+using ZerodhaDatafeedAdapter.Logging;
 
 namespace ZerodhaDatafeedAdapter.Services.Configuration
 {
@@ -36,6 +37,9 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
 
         // Logging configuration
         private bool _enableVerboseTickLogging = false; // Default to false
+
+        // Simulation configuration
+        private SimulationSettings _simulationSettings = new SimulationSettings();
 
         /// <summary>
         /// Gets the singleton instance of the ConfigurationManager
@@ -79,6 +83,16 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         /// Gets whether verbose tick logging is enabled
         /// </summary>
         public bool EnableVerboseTickLogging => _enableVerboseTickLogging;
+
+        /// <summary>
+        /// Gets the simulation settings from config.json
+        /// </summary>
+        public SimulationSettings SimulationSettings => _simulationSettings;
+
+        /// <summary>
+        /// Gets whether simulation mode is enabled
+        /// </summary>
+        public bool IsSimulationModeEnabled => _simulationSettings?.Enabled ?? false;
 
         /// <summary>
         /// Private constructor to enforce singleton pattern
@@ -177,6 +191,23 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
                 if (generalSettings != null)
                 {
                     _enableVerboseTickLogging = generalSettings["EnableVerboseTickLogging"]?.ToObject<bool>() ?? false;
+                }
+
+                // Load simulation settings
+                JObject simulationSettings = _config["Simulation"] as JObject;
+                if (simulationSettings != null)
+                {
+                    _simulationSettings = simulationSettings.ToObject<SimulationSettings>() ?? new SimulationSettings();
+                    if (_simulationSettings.Enabled)
+                    {
+                        Logger.Info($"[ConfigurationManager] SIMULATION MODE ENABLED - Date={_simulationSettings.SimulationDate:yyyy-MM-dd}, " +
+                                    $"Underlying={_simulationSettings.Underlying}, Expiry={_simulationSettings.ExpiryDate:yyyy-MM-dd}, " +
+                                    $"Time={_simulationSettings.TimeFrom}-{_simulationSettings.TimeTo}");
+                    }
+                }
+                else
+                {
+                    _simulationSettings = new SimulationSettings();
                 }
 
                 return true;

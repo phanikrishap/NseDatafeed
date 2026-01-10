@@ -201,6 +201,39 @@ namespace ZerodhaDatafeedAdapter
                 StartupLogger.LogConfigurationLoad(true);
             }
 
+            // Check if simulation mode is enabled - if so, skip live data initialization
+            if (_configManager.IsSimulationModeEnabled)
+            {
+                Logger.Info("[Connector] SIMULATION MODE: Skipping live data initialization routines");
+                StartupLogger.Info("SIMULATION MODE: Skipping token validation and live data connections");
+                NinjaTrader.NinjaScript.NinjaScript.Log(
+                    "[ZerodhaAdapter] SIMULATION MODE: Running in offline replay mode",
+                    NinjaTrader.Cbi.LogLevel.Information);
+
+                // Signal token as "ready" (though we won't use it)
+                _tokenReadyTcs.TrySetResult(true);
+                MarketDataReactiveHub.Instance.PublishTokenReady(true);
+
+                // Initialize InstrumentManager in simulation mode (loads from existing DB only, no downloads)
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await InstrumentManager.Instance.InitializeAsync();
+                        Logger.Info("[Connector] SIMULATION MODE: InstrumentManager initialized (offline)");
+
+                        // Open SimulationEngineWindow on UI thread
+                        OpenSimulationWindowFromConfig();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[Connector] SIMULATION MODE: InstrumentManager initialization error: {ex.Message}");
+                    }
+                });
+
+                return;
+            }
+
             // Ensure valid access token using TaskCompletionSource pattern
             // Late subscribers can await WhenTokenReady and will get the result
             _ = Task.Run(async () =>
@@ -605,6 +638,75 @@ namespace ZerodhaDatafeedAdapter
             if (propertyChanged == null)
                 return;
             propertyChanged((object)this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        /// <summary>
+        /// Opens the SimulationEngineWindow and populates it with config settings.
+        /// Called when simulation mode is enabled in config.json.
+        /// </summary>
+        private void OpenSimulationWindowFromConfig()
+        {
+            try
+            {
+                var settings = _configManager.SimulationSettings;
+                if (settings == null || !settings.Enabled)
+                    return;
+
+                Logger.Info("[Connector] SIMULATION MODE: Opening SimulationEngineWindow from config...");
+
+                // Set config FIRST, before opening window
+                var simConfig = settings.ToSimulationConfig();
+                Services.SimulationService.Instance.SetConfigFromSettings(simConfig);
+                Logger.Info($"[Connector] SIMULATION MODE: Config set - Date={simConfig.SimulationDate:yyyy-MM-dd}, " +
+                            $"Underlying={simConfig.Underlying}, ATM={simConfig.ATMStrike}");
+
+                // Now open window on UI thread - it will read the pre-loaded config
+                Application.Current?.Dispatcher?.BeginInvoke(new Action(async () =>
+                {
+                    try
+                    {
+                        // Create and show the SimulationEngineWindow
+                        var window = new AddOns.SimulationEngine.SimulationEngineWindow();
+                        window.Show();
+
+                        Logger.Info("[Connector] SIMULATION MODE: SimulationEngineWindow opened");
+
+                        // If AutoStart is enabled, automatically load data after a short delay
+                        if (settings.AutoStart)
+                        {
+                            Logger.Info("[Connector] SIMULATION MODE: AutoStart enabled, loading data...");
+                            await Task.Delay(500); // Give UI time to initialize
+
+                            // Load Nifty Futures metrics for simulation date
+                            Logger.Info("[Connector] SIMULATION MODE: Loading Nifty Futures metrics...");
+                            await Services.Analysis.NiftyFuturesMetricsService.Instance.StartSimulationAsync(simConfig.SimulationDate);
+
+                            // Load tick data for option symbols
+                            Logger.Info("[Connector] SIMULATION MODE: Loading option tick data...");
+                            bool loadSuccess = await Services.SimulationService.Instance.LoadHistoricalBars(simConfig);
+
+                            if (loadSuccess)
+                            {
+                                // Publish simulated option chain to Option Chain and Option Signals windows
+                                Logger.Info("[Connector] SIMULATION MODE: Publishing simulated option chain...");
+                                Services.SimulationService.Instance.PublishSimulatedOptionChain();
+
+                                // Auto-start playback
+                                Logger.Info("[Connector] SIMULATION MODE: Auto-starting playback...");
+                                Services.SimulationService.Instance.Start();
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[Connector] SIMULATION MODE: Error opening window: {ex.Message}", ex);
+                    }
+                }), System.Windows.Threading.DispatcherPriority.Background);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[Connector] SIMULATION MODE: OpenSimulationWindowFromConfig error: {ex.Message}", ex);
+            }
         }
     }
 }

@@ -10,6 +10,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using ZerodhaAPI.Common.Enums;
 using ZerodhaDatafeedAdapter.Helpers;
+using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Analysis;
@@ -25,6 +26,9 @@ namespace ZerodhaDatafeedAdapter.Services
     {
         private static SimulationService _instance;
         private static readonly object _lock = new object();
+
+        // Dedicated logger for simulation flow tracking
+        private static readonly ILoggerService _log = LoggerFactory.Simulation;
 
         public static SimulationService Instance
         {
@@ -176,7 +180,37 @@ namespace ZerodhaDatafeedAdapter.Services
 
         private SimulationService()
         {
-            Logger.Info("[SimulationService] Initialized");
+            _log.Info("[SimulationService] Initialized");
+        }
+
+        /// <summary>
+        /// Sets the simulation config from settings loaded from config.json.
+        /// Called by Connector when simulation mode is enabled in config.
+        /// This allows the SimulationEngineWindow to read the config and populate UI.
+        /// </summary>
+        public void SetConfigFromSettings(SimulationConfig config)
+        {
+            if (config == null)
+            {
+                _log.Warn("[SimulationService] SetConfigFromSettings: null config provided");
+                return;
+            }
+
+            _config = config;
+            _log.Info($"[SimulationService] SetConfigFromSettings: Config pre-loaded from config.json - " +
+                      $"Date={config.SimulationDate:yyyy-MM-dd}, Underlying={config.Underlying}, " +
+                      $"Expiry={config.ExpiryDate:yyyy-MM-dd}, ATM={config.ATMStrike}, " +
+                      $"Time={config.TimeFrom}-{config.TimeTo}");
+        }
+
+        /// <summary>
+        /// Gets the pre-loaded config from config.json settings.
+        /// Returns null if no config was set via SetConfigFromSettings.
+        /// Used by SimulationEngineWindow to populate UI on startup.
+        /// </summary>
+        public SimulationConfig GetPreloadedConfig()
+        {
+            return _config;
         }
 
         /// <summary>
@@ -212,7 +246,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 // Generate option symbols
                 var symbols = GenerateOptionSymbols(config);
                 _optionSymbols.AddRange(symbols);
-                Logger.Info($"[SimulationService] Generated {symbols.Count} option symbols for {config.Underlying}");
+                _log.Info($"[SimulationService] Generated {symbols.Count} option symbols for {config.Underlying}");
 
                 StatusMessage = $"Loading ticks for {symbols.Count} symbols...";
 
@@ -243,13 +277,13 @@ namespace ZerodhaDatafeedAdapter.Services
 
                 State = SimulationState.Ready;
                 StatusMessage = $"Ready: {successCount} symbols, {TotalTickCount} ticks loaded";
-                Logger.Info($"[SimulationService] Load complete: {successCount} symbols, {TotalTickCount} total ticks");
+                _log.Info($"[SimulationService] Load complete: {successCount} symbols, {TotalTickCount} total ticks");
 
                 return true;
             }
             catch (Exception ex)
             {
-                Logger.Error($"[SimulationService] LoadHistoricalBars error: {ex.Message}", ex);
+                _log.Error($"[SimulationService] LoadHistoricalBars error: {ex.Message}", ex);
                 State = SimulationState.Error;
                 StatusMessage = $"Error: {ex.Message}";
                 return false;
@@ -275,10 +309,10 @@ namespace ZerodhaDatafeedAdapter.Services
             _tickTimeline = _tickTimeline.OrderBy(t => t.Time).ToList();
             TotalTickCount = _tickTimeline.Count;
 
-            Logger.Info($"[SimulationService] Built timeline with {_tickTimeline.Count} ticks");
+            _log.Info($"[SimulationService] Built timeline with {_tickTimeline.Count} ticks");
             if (_tickTimeline.Count > 0)
             {
-                Logger.Info($"[SimulationService] Timeline range: {_tickTimeline.First().Time:HH:mm:ss.fff} to {_tickTimeline.Last().Time:HH:mm:ss.fff}");
+                _log.Info($"[SimulationService] Timeline range: {_tickTimeline.First().Time:HH:mm:ss.fff} to {_tickTimeline.Last().Time:HH:mm:ss.fff}");
             }
         }
 
@@ -390,7 +424,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 });
             }
 
-            Logger.Info($"[SimulationService] GenerateOptionsForSimulation: Generated {instruments.Count} MappedInstruments for {config.Underlying}");
+            _log.Info($"[SimulationService] GenerateOptionsForSimulation: Generated {instruments.Count} MappedInstruments for {config.Underlying}");
             return instruments;
         }
 
@@ -403,11 +437,11 @@ namespace ZerodhaDatafeedAdapter.Services
         {
             if (_config == null)
             {
-                Logger.Warn("[SimulationService] PublishSimulatedOptionChain: No config available");
+                _log.Warn("[SimulationService] PublishSimulatedOptionChain: No config available");
                 return;
             }
 
-            Logger.Info($"[SimulationService] PublishSimulatedOptionChain: Publishing option chain for {_config.Underlying} {_config.ExpiryDate:dd-MMM-yyyy}");
+            _log.Info($"[SimulationService] PublishSimulatedOptionChain: Publishing option chain for {_config.Underlying} {_config.ExpiryDate:dd-MMM-yyyy}");
 
             // Generate MappedInstrument list
             var options = GenerateOptionsForSimulation(_config);
@@ -428,7 +462,7 @@ namespace ZerodhaDatafeedAdapter.Services
             // Also set ATM strike in MarketAnalyzerLogic for consistency
             MarketAnalyzerLogic.Instance.SetATMStrike(_config.Underlying, _config.ATMStrike);
 
-            Logger.Info($"[SimulationService] PublishSimulatedOptionChain: Published {options.Count} options, ATM={_config.ATMStrike}, DTE={dte}");
+            _log.Info($"[SimulationService] PublishSimulatedOptionChain: Published {options.Count} options, ATM={_config.ATMStrike}, DTE={dte}");
         }
 
         /// <summary>
@@ -449,7 +483,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
                         if (ntInstrument == null)
                         {
-                            Logger.Info($"[SimulationService] Instrument {symbol} not found in runtime, creating...");
+                            _log.Info($"[SimulationService] Instrument {symbol} not found in runtime, creating...");
 
                             var instrumentDef = new InstrumentDefinition
                             {
@@ -464,14 +498,14 @@ namespace ZerodhaDatafeedAdapter.Services
 
                             if (created || !string.IsNullOrEmpty(ntName))
                             {
-                                Logger.Info($"[SimulationService] Created NT instrument: {ntName}");
+                                _log.Info($"[SimulationService] Created NT instrument: {ntName}");
                                 ntInstrument = Instrument.GetInstrument(ntName);
                             }
                         }
 
                         if (ntInstrument == null)
                         {
-                            Logger.Info($"[SimulationService] Failed to get/create instrument for: {symbol}");
+                            _log.Info($"[SimulationService] Failed to get/create instrument for: {symbol}");
                             tcs.TrySetResult(false);
                             return;
                         }
@@ -484,9 +518,9 @@ namespace ZerodhaDatafeedAdapter.Services
                         DateTime fromDateTimeWithBuffer = fromDateTime.AddMinutes(-5);
                         DateTime toDateTimeWithBuffer = toDateTime.AddMinutes(5);
 
-                        Logger.Info($"[SimulationService] Loading TICK data for {symbol}");
-                        Logger.Info($"[SimulationService]   Request range (local): {fromDateTimeWithBuffer:yyyy-MM-dd HH:mm} to {toDateTimeWithBuffer:yyyy-MM-dd HH:mm}");
-                        Logger.Info($"[SimulationService]   Filter range (local): {fromDateTime:HH:mm} to {toDateTime:HH:mm}");
+                        _log.Info($"[SimulationService] Loading TICK data for {symbol}");
+                        _log.Info($"[SimulationService]   Request range (local): {fromDateTimeWithBuffer:yyyy-MM-dd HH:mm} to {toDateTimeWithBuffer:yyyy-MM-dd HH:mm}");
+                        _log.Info($"[SimulationService]   Filter range (local): {fromDateTime:HH:mm} to {toDateTime:HH:mm}");
 
                         // Use BarsRequest with TICK data type - NinjaTrader uses local time
                         var barsRequest = new BarsRequest(ntInstrument, fromDateTimeWithBuffer, toDateTimeWithBuffer);
@@ -509,13 +543,13 @@ namespace ZerodhaDatafeedAdapter.Services
                                 {
                                     var ticks = new List<TickData>();
 
-                                    Logger.Info($"[SimulationService] BarsRequest returned {request.Bars.Count} ticks for {symbolClosure}");
+                                    _log.Info($"[SimulationService] BarsRequest returned {request.Bars.Count} ticks for {symbolClosure}");
 
                                     if (request.Bars.Count > 0)
                                     {
                                         var firstTick = request.Bars.GetTime(0);
                                         var lastTick = request.Bars.GetTime(request.Bars.Count - 1);
-                                        Logger.Info($"[SimulationService] {symbolClosure} First tick (local): {firstTick:yyyy-MM-dd HH:mm:ss.fff}, Last tick (local): {lastTick:yyyy-MM-dd HH:mm:ss.fff}");
+                                        _log.Info($"[SimulationService] {symbolClosure} First tick (local): {firstTick:yyyy-MM-dd HH:mm:ss.fff}, Last tick (local): {lastTick:yyyy-MM-dd HH:mm:ss.fff}");
                                     }
 
                                     for (int i = 0; i < request.Bars.Count; i++)
@@ -537,18 +571,18 @@ namespace ZerodhaDatafeedAdapter.Services
                                     if (ticks.Count > 0)
                                     {
                                         _loadedTicks[symbolClosure] = ticks.OrderBy(t => t.Time).ToList();
-                                        Logger.Info($"[SimulationService] Loaded {ticks.Count} ticks for {symbolClosure}");
+                                        _log.Info($"[SimulationService] Loaded {ticks.Count} ticks for {symbolClosure}");
                                         tcs.TrySetResult(true);
                                     }
                                     else
                                     {
-                                        Logger.Info($"[SimulationService] No ticks in time range for {symbolClosure}");
+                                        _log.Info($"[SimulationService] No ticks in time range for {symbolClosure}");
                                         tcs.TrySetResult(false);
                                     }
                                 }
                                 else
                                 {
-                                    Logger.Info($"[SimulationService] BarsRequest failed for {symbolClosure}: {errorCode} - {errorMessage}");
+                                    _log.Info($"[SimulationService] BarsRequest failed for {symbolClosure}: {errorCode} - {errorMessage}");
                                     tcs.TrySetResult(false);
                                 }
 
@@ -556,14 +590,14 @@ namespace ZerodhaDatafeedAdapter.Services
                             }
                             catch (Exception ex)
                             {
-                                Logger.Error($"[SimulationService] Error processing ticks for {symbolClosure}: {ex.Message}");
+                                _log.Error($"[SimulationService] Error processing ticks for {symbolClosure}: {ex.Message}");
                                 tcs.TrySetResult(false);
                             }
                         });
                     }
                     catch (Exception ex)
                     {
-                        Logger.Error($"[SimulationService] Error creating BarsRequest for {symbol}: {ex.Message}");
+                        _log.Error($"[SimulationService] Error creating BarsRequest for {symbol}: {ex.Message}");
                         tcs.TrySetResult(false);
                     }
                 });
@@ -576,13 +610,13 @@ namespace ZerodhaDatafeedAdapter.Services
                 }
                 else
                 {
-                    Logger.Warn($"[SimulationService] Timeout loading ticks for {symbol}");
+                    _log.Warn($"[SimulationService] Timeout loading ticks for {symbol}");
                     return false;
                 }
             }
             catch (Exception ex)
             {
-                Logger.Error($"[SimulationService] LoadTicksForSymbol error for {symbol}: {ex.Message}");
+                _log.Error($"[SimulationService] LoadTicksForSymbol error for {symbol}: {ex.Message}");
                 return false;
             }
         }
@@ -594,7 +628,7 @@ namespace ZerodhaDatafeedAdapter.Services
         {
             if (!CanStart)
             {
-                Logger.Warn($"[SimulationService] Cannot start: State={State}");
+                _log.Warn($"[SimulationService] Cannot start: State={State}");
                 return;
             }
 
@@ -634,7 +668,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
             State = SimulationState.Playing;
             StatusMessage = $"Playing at {_config.SpeedMultiplier}x speed...";
-            Logger.Info($"[SimulationService] Started tick playback at {CurrentSimTime:HH:mm:ss.fff}, speed={_config.SpeedMultiplier}x, total ticks={_tickTimeline.Count}");
+            _log.Info($"[SimulationService] Started tick playback at {CurrentSimTime:HH:mm:ss.fff}, speed={_config.SpeedMultiplier}x, total ticks={_tickTimeline.Count}");
         }
 
         /// <summary>
@@ -644,14 +678,14 @@ namespace ZerodhaDatafeedAdapter.Services
         {
             if (!CanPause)
             {
-                Logger.Warn($"[SimulationService] Cannot pause: State={State}");
+                _log.Warn($"[SimulationService] Cannot pause: State={State}");
                 return;
             }
 
             _playbackTimer?.Stop();
             State = SimulationState.Paused;
             StatusMessage = $"Paused at {CurrentSimTime:HH:mm:ss}";
-            Logger.Info($"[SimulationService] Paused at {CurrentSimTime:HH:mm:ss}");
+            _log.Info($"[SimulationService] Paused at {CurrentSimTime:HH:mm:ss}");
         }
 
         /// <summary>
@@ -661,7 +695,7 @@ namespace ZerodhaDatafeedAdapter.Services
         {
             if (!CanStop && State != SimulationState.Completed)
             {
-                Logger.Warn($"[SimulationService] Cannot stop: State={State}");
+                _log.Warn($"[SimulationService] Cannot stop: State={State}");
                 return;
             }
 
@@ -674,7 +708,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
             State = SimulationState.Ready;
             StatusMessage = "Stopped - Ready to replay";
-            Logger.Info("[SimulationService] Stopped");
+            _log.Info("[SimulationService] Stopped");
         }
 
         /// <summary>
@@ -692,7 +726,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 StatusMessage = $"Playing at {multiplier}x speed...";
             }
 
-            Logger.Info($"[SimulationService] Speed set to {multiplier}x");
+            _log.Info($"[SimulationService] Speed set to {multiplier}x");
         }
 
         /// <summary>
@@ -709,7 +743,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 _playbackTimer?.Stop();
                 State = SimulationState.Completed;
                 StatusMessage = $"Completed - {PricesInjectedCount} ticks injected";
-                Logger.Info($"[SimulationService] Playback completed at {CurrentSimTime:HH:mm:ss}");
+                _log.Info($"[SimulationService] Playback completed at {CurrentSimTime:HH:mm:ss}");
                 return;
             }
 
@@ -812,7 +846,7 @@ namespace ZerodhaDatafeedAdapter.Services
             _currentTickIndex = 0;
             State = SimulationState.Idle;
             StatusMessage = "Idle";
-            Logger.Info("[SimulationService] Reset");
+            _log.Info("[SimulationService] Reset");
         }
 
         protected void OnPropertyChanged([CallerMemberName] string propertyName = null)

@@ -80,6 +80,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private bool _isHistoricalPhaseComplete = false; // Could potentially remove if state is managed better
         private bool _isLivePhaseActive = false;
 
+        // Simulation replay state
+        private List<(DateTime BarTime, double ClosePrice, int BarIndex)> _simReplayBars;
+        private int _simReplayBarIndex = 0;
+        private bool _simDataReady = false;
+        private IDisposable _simTickSubscription;
+
         // Reactive streams
         private readonly BehaviorSubject<NiftyFuturesVPMetrics> _metricsSubject =
             new BehaviorSubject<NiftyFuturesVPMetrics>(new NiftyFuturesVPMetrics { IsValid = false });
@@ -159,7 +165,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         {
             Logger.Info("[NiftyFuturesMetricsService] Stop(): Stopping service...");
             _isLivePhaseActive = false;
+            _simDataReady = false;
             _tickSubscription?.Dispose();
+            _simTickSubscription?.Dispose();
 
             _ = NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
             {
@@ -192,6 +200,333 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 }
             });
             Logger.Info("[NiftyFuturesMetricsService] Stop(): Service stopped");
+        }
+
+        /// <summary>
+        /// Loads historical data for simulation mode - up to the simulation date.
+        /// This resets VP engines, loads prior days for historical context, then builds
+        /// replay data for the simulation date itself for progressive bar-by-bar replay.
+        /// </summary>
+        public async Task StartSimulationAsync(DateTime simulationDate)
+        {
+            Logger.Info($"[NiftyFuturesMetricsService] StartSimulationAsync(): Loading data for simulation date {simulationDate:yyyy-MM-dd}");
+            LoggerFactory.Simulation.Info($"[NiftyFuturesMetricsService] StartSimulationAsync: {simulationDate:yyyy-MM-dd}");
+
+            try
+            {
+                // Stop live updates
+                _isLivePhaseActive = false;
+                _tickSubscription?.Dispose();
+                _simTickSubscription?.Dispose();
+
+                // Reset VP engines
+                _vpEngine.Reset(VP_PRICE_INTERVAL);
+                _rollingVpEngine.Reset(VP_PRICE_INTERVAL);
+                _compositeEngine.Reset();
+                _historicalRangeATRBars.Clear();
+                _historicalTicks.Clear();
+                _sessionStart = DateTime.MinValue;
+                _lastSessionDate = DateTime.MinValue;
+                _simDataReady = false;
+                _simReplayBarIndex = 0;
+
+                // Ensure we have instruments
+                if (_niftyIInstrument == null)
+                {
+                    _niftyFuturesSymbol = await _symbolResolver.ResolveNiftyFuturesSymbolAsync();
+                    _niftyIInstrument = await _symbolResolver.GetInstrumentAsync(NIFTY_I_SYMBOL);
+                }
+
+                if (_niftyIInstrument == null)
+                {
+                    Logger.Error("[NiftyFuturesMetricsService] StartSimulationAsync: Failed to get NIFTY_I instrument");
+                    return;
+                }
+
+                // Load historical data up to simulation date (prior day's close, not the simulation day itself)
+                // This populates the circular buffers for RelMetrics historical averages
+                var historyEndDate = simulationDate.Date.AddDays(-1);
+                var (priorBars, priorTicks, priorSuccess) = await _historicalDataLoader.LoadHistoricalDataAsync(_niftyIInstrument, historyEndDate);
+
+                if (!priorSuccess)
+                {
+                    Logger.Error("[NiftyFuturesMetricsService] StartSimulationAsync: Prior historical data load failed");
+                    return;
+                }
+
+                _historicalRangeATRBars = priorBars;
+                _historicalTicks = priorTicks;
+
+                LoggerFactory.Simulation.Info($"[NiftyFuturesMetricsService] Loaded {priorBars.Count} prior bars, {priorTicks.Count} ticks up to {historyEndDate:yyyy-MM-dd}");
+
+                // Apply uptick/downtick rule
+                _metricsCalculator.ApplyUptickDowntickRule(_historicalTicks);
+
+                // Build tick map for prior data
+                _tickMapper = _metricsCalculator.BuildTickToBarMapping(_historicalRangeATRBars, _historicalTicks);
+
+                // Process prior historical VP to populate circular buffers (but NOT the simulation day)
+                ProcessHistoricalVolumeProfileForPriorDays(simulationDate);
+
+                // Now load the simulation date's data separately for progressive replay
+                var (simDayBars, simDayTicks, simSuccess) = await _historicalDataLoader.LoadHistoricalDataAsync(_niftyIInstrument, simulationDate);
+
+                if (!simSuccess)
+                {
+                    Logger.Warn("[NiftyFuturesMetricsService] StartSimulationAsync: Simulation day data load failed");
+                    return;
+                }
+
+                // Filter to only simulation date bars and ticks
+                var simDateBars = simDayBars.Where(b => b.Time.Date == simulationDate.Date).OrderBy(b => b.Time).ToList();
+                var simDateTicks = simDayTicks.Where(t => t.Time.Date == simulationDate.Date).OrderBy(t => t.Time).ToList();
+
+                LoggerFactory.Simulation.Info($"[NiftyFuturesMetricsService] Simulation date has {simDateBars.Count} bars, {simDateTicks.Count} ticks");
+
+                if (simDateBars.Count == 0)
+                {
+                    Logger.Warn($"[NiftyFuturesMetricsService] No bars for simulation date {simulationDate:yyyy-MM-dd}");
+                    return;
+                }
+
+                // Store simulation date bars/ticks for replay
+                _historicalRangeATRBars.AddRange(simDateBars);
+                _historicalTicks.AddRange(simDateTicks);
+
+                // Apply uptick/downtick to new ticks
+                _metricsCalculator.ApplyUptickDowntickRule(simDateTicks);
+
+                // Rebuild tick mapper with simulation date data included
+                _tickMapper = _metricsCalculator.BuildTickToBarMapping(_historicalRangeATRBars, _historicalTicks);
+
+                // Build replay bar list for simulation date
+                _simReplayBars = simDateBars.Select(b => (b.Time, b.Close, b.Index)).ToList();
+                _simReplayBarIndex = 0;
+
+                // Reset session for simulation date
+                _sessionStart = simDateBars.First().Time;
+                _relMetrics.StartSession(_sessionStart);
+                _compositeEngine.StartSession(simulationDate);
+                _currentDayHigh = double.MinValue;
+                _currentDayLow = double.MaxValue;
+                _lastPrice = 0;
+
+                _simDataReady = true;
+                _isHistoricalPhaseComplete = true;
+
+                // Subscribe to simulation tick stream for progressive updates
+                SubscribeToSimulationTicks();
+
+                LoggerFactory.Simulation.Info($"[NiftyFuturesMetricsService] StartSimulationAsync complete - Replay ready with {_simReplayBars.Count} bars");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[NiftyFuturesMetricsService] StartSimulationAsync exception: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Process historical data for days BEFORE the simulation date to populate circular buffers.
+        /// Does NOT process the simulation date itself - that's done progressively.
+        /// </summary>
+        private void ProcessHistoricalVolumeProfileForPriorDays(DateTime simulationDate)
+        {
+            Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfileForPriorDays(): Processing prior to {simulationDate:yyyy-MM-dd}");
+
+            if (_historicalRangeATRBars.Count == 0) return;
+
+            var sessionGroups = _historicalRangeATRBars
+                .Where(b => b.Time.Date < simulationDate.Date) // Exclude simulation date
+                .GroupBy(b => b.Time.Date)
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfileForPriorDays(): Found {sessionGroups.Count} prior sessions");
+
+            int totalMinuteSamples = 0;
+
+            // Build historical averages for RelMetrics from prior sessions
+            foreach (var sessionGroup in sessionGroups)
+            {
+                var sessionBars = sessionGroup.OrderBy(b => b.Time).ToList();
+
+                _vpEngine.Reset(VP_PRICE_INTERVAL);
+                _rollingVpEngine.Reset(VP_PRICE_INTERVAL);
+                _sessionStart = sessionBars.First().Time;
+
+                DateTime lastMinuteSampled = DateTime.MinValue;
+
+                foreach (var bar in sessionBars)
+                {
+                    var ticksForBar = _tickMapper.GetTicksForBar(bar.Index);
+
+                    if (ticksForBar.Count > 0)
+                    {
+                        foreach (var tick in ticksForBar)
+                        {
+                            _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
+                            _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+                        }
+                    }
+
+                    _rollingVpEngine.ExpireOldData(bar.Time);
+                    _vpEngine.SetClosePrice(bar.Close);
+                    _rollingVpEngine.SetClosePrice(bar.Close);
+                    var vpMetrics = _vpEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+                    var rollingVpMetrics = _rollingVpEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+
+                    if (vpMetrics.IsValid)
+                    {
+                        DateTime minuteBoundary = new DateTime(bar.Time.Year, bar.Time.Month, bar.Time.Day,
+                            bar.Time.Hour, bar.Time.Minute, 0);
+
+                        if (minuteBoundary > lastMinuteSampled)
+                        {
+                            _relMetrics.UpdateHistory(minuteBoundary, vpMetrics.HVNBuyCount, vpMetrics.HVNSellCount, vpMetrics.ValueWidth);
+
+                            if (rollingVpMetrics.IsValid)
+                            {
+                                _relMetrics.UpdateRollingHistory(minuteBoundary, rollingVpMetrics.HVNBuyCount, rollingVpMetrics.HVNSellCount, rollingVpMetrics.ValueWidth);
+                            }
+
+                            lastMinuteSampled = minuteBoundary;
+                            totalMinuteSamples++;
+                        }
+                    }
+                }
+            }
+
+            Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfileForPriorDays(): Built RelMetrics from {totalMinuteSamples} minute samples");
+
+            // Build composite profiles from prior sessions (last 10 days before simulation)
+            var recentSessions = sessionGroups
+                .OrderByDescending(g => g.Key)
+                .Take(10)
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            foreach (var sessionGroup in recentSessions)
+            {
+                var sessionBars = sessionGroup.OrderBy(b => b.Time).ToList();
+                DateTime sessionDate = sessionGroup.Key;
+
+                _compositeEngine.StartSession(sessionDate);
+
+                foreach (var bar in sessionBars)
+                {
+                    var ticksForBar = _tickMapper.GetTicksForBar(bar.Index);
+                    foreach (var tick in ticksForBar)
+                    {
+                        _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+                    }
+                }
+
+                _compositeEngine.FinalizeCurrentSession();
+            }
+
+            Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfileForPriorDays(): Composite profiles from {recentSessions.Count} sessions");
+
+            // Reset VP engines for simulation day (will be populated progressively)
+            _vpEngine.Reset(VP_PRICE_INTERVAL);
+            _rollingVpEngine.Reset(VP_PRICE_INTERVAL);
+        }
+
+        /// <summary>
+        /// Subscribe to simulation tick stream to process bars progressively.
+        /// </summary>
+        private void SubscribeToSimulationTicks()
+        {
+            // Subscribe to the underlying price stream from SimulationService
+            // When we receive a tick, check if any bars should close
+            _simTickSubscription = MarketDataReactiveHub.Instance.OptionPriceBatchStream
+                .Subscribe(batch =>
+                {
+                    if (!_simDataReady) return;
+
+                    // Use the timestamp from any tick to advance simulation time
+                    foreach (var update in batch)
+                    {
+                        ProcessSimulationTick(update.Timestamp);
+                        break; // Just need one timestamp to advance
+                    }
+                });
+
+            LoggerFactory.Simulation.Info("[NiftyFuturesMetricsService] Subscribed to simulation tick stream");
+        }
+
+        /// <summary>
+        /// Process simulation tick - advances through pre-built bars as simulation time progresses.
+        /// </summary>
+        private void ProcessSimulationTick(DateTime tickTime)
+        {
+            if (!_simDataReady || _simReplayBars == null || _simReplayBars.Count == 0)
+                return;
+
+            // Process all bars that should have closed by tickTime
+            while (_simReplayBarIndex < _simReplayBars.Count)
+            {
+                var bar = _simReplayBars[_simReplayBarIndex];
+
+                // Only process bars whose close time has been reached
+                if (bar.BarTime > tickTime)
+                    break;
+
+                // Find the RangeATRBar with matching index to get full data
+                var rangeBar = _historicalRangeATRBars.FirstOrDefault(b => b.Index == bar.BarIndex);
+                if (rangeBar == null)
+                {
+                    _simReplayBarIndex++;
+                    continue;
+                }
+
+                // Get ticks for this bar
+                var ticksForBar = _tickMapper.GetTicksForBar(bar.BarIndex);
+
+                // Process ticks
+                foreach (var tick in ticksForBar)
+                {
+                    _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
+                    _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+                    _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+
+                    // Track day high/low
+                    if (tick.Price > _currentDayHigh) _currentDayHigh = tick.Price;
+                    if (tick.Price < _currentDayLow) _currentDayLow = tick.Price;
+                    _lastPrice = tick.Price;
+                }
+
+                _rollingVpEngine.ExpireOldData(bar.BarTime);
+                _vpEngine.SetClosePrice(bar.ClosePrice);
+                _rollingVpEngine.SetClosePrice(bar.ClosePrice);
+
+                _lastBarCloseTime = bar.BarTime;
+                _lastBarIndex = bar.BarIndex;
+
+                // Recalculate and publish metrics
+                RecalculateAndPublishMetrics();
+
+                LoggerFactory.Simulation.Debug($"[NiftyFuturesMetricsService] SimReplay bar {_simReplayBarIndex + 1}/{_simReplayBars.Count} at {bar.BarTime:HH:mm:ss}");
+
+                _simReplayBarIndex++;
+            }
+        }
+
+        /// <summary>
+        /// Stops simulation mode and restores live operation.
+        /// </summary>
+        public async Task StopSimulationAsync()
+        {
+            Logger.Info("[NiftyFuturesMetricsService] StopSimulationAsync(): Restoring live mode");
+            LoggerFactory.Simulation.Info("[NiftyFuturesMetricsService] StopSimulationAsync - restoring live mode");
+
+            // Stop simulation
+            _simDataReady = false;
+            _simTickSubscription?.Dispose();
+            _simTickSubscription = null;
+
+            // Reload current data and resume live updates
+            await RequestHistoricalData();
+            SubscribeToLiveTicks();
         }
 
         private async Task RequestHistoricalData()

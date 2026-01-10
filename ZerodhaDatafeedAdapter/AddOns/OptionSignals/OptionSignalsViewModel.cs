@@ -70,6 +70,15 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         // Bar history for signal orchestrator - stores 256 bar snapshots
         public OptionBarHistory BarHistory { get; set; }
 
+        // Simulation mode: pre-built bar replay data
+        // Stores (barTime, closePrice, prevBarTime) for deterministic replay
+        public List<(DateTime BarTime, double ClosePrice, DateTime PrevBarTime)> SimReplayBars { get; set; }
+        public List<(DateTime Time, int Index)> SimTickTimes { get; set; }
+        public int SimReplayBarIndex { get; set; } = 0;
+        public int SimReplayTickIndex { get; set; } = 0;
+        public double SimLastPrice { get; set; }
+        public bool SimDataReady { get; set; } = false;
+
         public OptionVPState()
         {
             SessionVPEngine = new VPEngine();
@@ -209,14 +218,48 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 .Sample(TimeSpan.FromSeconds(1)) // Throttle to 1 update per second
                 .Subscribe(OnNiftyFuturesMetricsUpdate));
 
+            // Subscribe to SimulationService state changes for replay mode
+            SimulationService.Instance.StateChanged += OnSimulationStateChanged;
+
+            // Initialize replay mode based on current simulation state
+            if (SimulationService.Instance.IsSimulationMode)
+            {
+                _signalsOrchestrator?.SetReplayMode(true);
+                _log.Info("[OptionSignalsViewModel] Started in simulation mode - replay mode enabled");
+            }
+
             TerminalService.Instance.Info("OptionSignalsViewModel services started");
         }
 
         public void StopServices()
         {
             _log.Info("[OptionSignalsViewModel] Stopping services");
+            SimulationService.Instance.StateChanged -= OnSimulationStateChanged;
             _subscriptions?.Clear();
             ClearAllVPStates();
+        }
+
+        /// <summary>
+        /// Handles simulation state changes to enable/disable replay mode.
+        /// </summary>
+        private void OnSimulationStateChanged(SimulationState newState)
+        {
+            bool isSimulationActive = newState == SimulationState.Playing ||
+                                       newState == SimulationState.Paused ||
+                                       newState == SimulationState.Ready;
+
+            _signalsOrchestrator?.SetReplayMode(isSimulationActive);
+
+            if (isSimulationActive)
+            {
+                _log.Info($"[OptionSignalsViewModel] Simulation state changed to {newState} - replay mode enabled");
+                TerminalService.Instance.Info($"Simulation mode active ({newState}) - taking all trades");
+            }
+            else
+            {
+                _log.Info($"[OptionSignalsViewModel] Simulation state changed to {newState} - replay mode disabled");
+                TerminalService.Instance.Info($"Live mode active - normal signal dedup enabled");
+            }
         }
 
         private void OnProjectedOpenReady(ProjectedOpenState state)
@@ -507,6 +550,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         /// <summary>
         /// Process all historical data once both tick and range bars are ready.
         /// Context-aware: Uses prior working day data if pre-market, today's data otherwise.
+        /// In simulation mode, builds replay data instead of processing immediately.
         /// </summary>
         private void ProcessHistoricalData(OptionVPState state)
         {
@@ -556,6 +600,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 return;
             }
 
+            // Check if we're in simulation mode - if so, build replay data instead of processing now
+            if (SimulationService.Instance.IsSimulationMode)
+            {
+                BuildSimulationReplayData(state, rangeBars, tickTimes, targetDate);
+                return;
+            }
+
+            // Live mode: process all historical bars immediately
             DateTime prevBarTime = DateTime.MinValue;
             int barsProcessed = 0;
             double lastPrice = 0;
@@ -605,6 +657,43 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             }
 
             _log.Info($"[VP] {state.Symbol} historical processing complete: {barsProcessed} bars");
+        }
+
+        /// <summary>
+        /// Builds simulation replay data structures for deterministic bar-by-bar replay.
+        /// Called when in simulation mode to prepare bars and ticks for progressive replay.
+        /// </summary>
+        private void BuildSimulationReplayData(OptionVPState state, Bars rangeBars,
+            List<(DateTime time, int index)> tickTimes, DateTime targetDate)
+        {
+            // Build list of bars to replay
+            state.SimReplayBars = new List<(DateTime BarTime, double ClosePrice, DateTime PrevBarTime)>();
+            DateTime prevBarTime = DateTime.MinValue;
+
+            for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
+            {
+                DateTime barTime = rangeBars.GetTime(barIdx);
+
+                // Skip bars not from target date
+                if (barTime.Date != targetDate)
+                {
+                    prevBarTime = barTime;
+                    continue;
+                }
+
+                double closePrice = rangeBars.GetClose(barIdx);
+                state.SimReplayBars.Add((barTime, closePrice, prevBarTime));
+                prevBarTime = barTime;
+            }
+
+            // Store tick times for replay
+            state.SimTickTimes = tickTimes;
+            state.SimReplayBarIndex = 0;
+            state.SimReplayTickIndex = 0;
+            state.SimLastPrice = 0;
+            state.SimDataReady = true;
+
+            _log.Info($"[VP] {state.Symbol} simulation replay data ready: {state.SimReplayBars.Count} bars, {tickTimes.Count} ticks");
         }
 
         /// <summary>
@@ -1003,6 +1092,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         private void OnOptionPriceBatch(IList<OptionPriceUpdate> batch)
         {
+            bool isSimulationMode = SimulationService.Instance.IsSimulationActive;
+
             foreach (var update in batch)
             {
                 if (_symbolToRowMap.TryGetValue(update.Symbol, out var map))
@@ -1018,18 +1109,127 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                         map.row.PELTP = update.Price.ToString("F2");
                         map.row.PETickTime = timeStr;
                     }
+
+                    // In simulation mode, also process ticks through VP engines
+                    if (isSimulationMode && _vpStates.TryGetValue(update.Symbol, out var vpState))
+                    {
+                        ProcessSimulatedTick(vpState, update.Price, update.Timestamp);
+                    }
                 }
             }
         }
 
         /// <summary>
+        /// Process a simulated tick - advances through pre-built historical bars as simulation time progresses.
+        /// Uses actual RangeATR bars from NT8 database for deterministic replay.
+        /// </summary>
+        private void ProcessSimulatedTick(OptionVPState state, double price, DateTime tickTime)
+        {
+            // Check if simulation replay data is ready
+            if (!state.SimDataReady || state.SimReplayBars == null || state.SimReplayBars.Count == 0)
+            {
+                return; // Data not ready yet
+            }
+
+            var tickBars = state.TickBarsRequest?.Bars;
+            if (tickBars == null || state.SimTickTimes == null)
+            {
+                return; // No tick data available
+            }
+
+            // Process all bars that should have closed by tickTime
+            while (state.SimReplayBarIndex < state.SimReplayBars.Count)
+            {
+                var bar = state.SimReplayBars[state.SimReplayBarIndex];
+
+                // Only process bars whose close time has been reached
+                if (bar.BarTime > tickTime)
+                {
+                    break; // Bar hasn't closed yet in simulation time
+                }
+
+                // Start new bar for CD momentum engine
+                state.CDMomoEngine.StartNewBar();
+
+                // Process all ticks within this bar's time window
+                while (state.SimReplayTickIndex < state.SimTickTimes.Count)
+                {
+                    var (tTime, tIdx) = state.SimTickTimes[state.SimReplayTickIndex];
+
+                    // Skip ticks before or at previous bar close
+                    if (bar.PrevBarTime != DateTime.MinValue && tTime <= bar.PrevBarTime)
+                    {
+                        state.SimReplayTickIndex++;
+                        continue;
+                    }
+
+                    // Stop if tick is after current bar close time
+                    if (tTime > bar.BarTime)
+                    {
+                        break;
+                    }
+
+                    // Process this tick
+                    double tPrice = tickBars.GetClose(tIdx);
+                    long tVolume = tickBars.GetVolume(tIdx);
+                    bool isBuy = tPrice >= state.SimLastPrice;
+
+                    // Feed to VP engines
+                    state.SessionVPEngine.AddTick(tPrice, tVolume, isBuy);
+                    state.RollingVPEngine.AddTick(tPrice, tVolume, isBuy, tTime);
+                    state.CDMomoEngine.AddTick(tPrice, tVolume, isBuy, tTime);
+
+                    state.SimLastPrice = tPrice;
+                    state.SimReplayTickIndex++;
+                }
+
+                // Close the bar
+                double closePrice = bar.ClosePrice;
+                DateTime barTime = bar.BarTime;
+
+                // Update ATR display
+                UpdateAtrDisplay(state, closePrice, barTime);
+
+                // Update VP engines
+                state.SessionVPEngine.SetClosePrice(closePrice);
+                state.RollingVPEngine.SetClosePrice(closePrice);
+                state.RollingVPEngine.ExpireOldData(barTime);
+
+                // Update LastClosePrice for Price Momentum and VWAP Score
+                state.LastClosePrice = closePrice;
+
+                // Recalculate VP and check for signals
+                RecalculateVP(state, barTime);
+
+                state.LastBarCloseTime = barTime;
+                state.LastRangeBarIndex = state.SimReplayBarIndex;
+
+                _log.Debug($"[SimReplay] {state.Symbol} Bar {state.SimReplayBarIndex + 1}/{state.SimReplayBars.Count} closed at {barTime:HH:mm:ss}, Close={closePrice:F2}");
+
+                state.SimReplayBarIndex++;
+            }
+        }
+
+        /// <summary>
         /// Determines which date's data to process based on current market phase:
+        /// - Simulation mode: use simulation date from SimulationService
         /// - PreMarket (before 9:15 on a trading day): use prior working day
         /// - MarketHours/PostMarket on a trading day: use today
         /// - Non-trading day (weekend/holiday): use prior working day
         /// </summary>
         private DateTime GetTargetDataDate()
         {
+            // In simulation mode, use the simulation date
+            if (SimulationService.Instance.IsSimulationMode)
+            {
+                var simConfig = SimulationService.Instance.CurrentConfig;
+                if (simConfig != null)
+                {
+                    _log.Info($"[OptionSignalsViewModel] GetTargetDataDate: Using simulation date {simConfig.SimulationDate:yyyy-MM-dd}");
+                    return simConfig.SimulationDate.Date;
+                }
+            }
+
             DateTime today = DateTime.Today;
 
             // If today is not a trading day (weekend or holiday), use prior working day
