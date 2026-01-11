@@ -137,6 +137,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         private double _atmStrike;
         private int _strikeStep = 50;
 
+        // ATM tracking for fluid grid re-centering
+        private int _lastPopulatedATM; // The ATM used when grid was last populated
+        private OptionsGeneratedEvent _lastOptionsEvent; // Cached for re-triggering
+
         public string Underlying
         {
             get => _underlying;
@@ -175,8 +179,26 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             // Initialize Signals Orchestrator
             _signalsOrchestrator = new SignalsOrchestrator(Signals, _dispatcher);
 
+            // Subscribe to signal stats changes to update UI summary metrics
+            _signalsOrchestrator.SignalStatsChanged += OnSignalStatsChanged;
+
             _log.Info("[OptionSignalsViewModel] Initialized with SignalsOrchestrator");
             SetupInternalPipelines();
+        }
+
+        /// <summary>
+        /// Handles signal stats changes (signal added, closed, or P&L updated).
+        /// Raises PropertyChanged for computed summary properties.
+        /// </summary>
+        private void OnSignalStatsChanged(object sender, EventArgs e)
+        {
+            // Must raise PropertyChanged on UI thread for WPF binding
+            _dispatcher.InvokeAsync(() =>
+            {
+                OnPropertyChanged(nameof(ActiveSignalCount));
+                OnPropertyChanged(nameof(TotalUnrealizedPnL));
+                OnPropertyChanged(nameof(TotalRealizedPnL));
+            });
         }
 
         private void SetupInternalPipelines()
@@ -221,6 +243,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             // Subscribe to SimulationService state changes for replay mode
             SimulationService.Instance.StateChanged += OnSimulationStateChanged;
 
+            // Subscribe to ATM changes for fluid strike grid re-centering
+            OptionGenerationService.Instance.ATMChanged += OnATMChanged;
+
             // Initialize replay mode based on current simulation state
             if (SimulationService.Instance.IsSimulationMode)
             {
@@ -233,10 +258,44 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             TerminalService.Instance.Info("OptionSignalsViewModel services started");
         }
 
+        /// <summary>
+        /// Handles ATM strike changes. Re-centers the strike grid if ATM has shifted significantly.
+        /// </summary>
+        private void OnATMChanged(object sender, ATMChangedEventArgs e)
+        {
+            // Only process if this is for our current underlying
+            if (e.Underlying != _underlying) return;
+
+            int newATM = (int)e.NewATM;
+            int atmDiff = Math.Abs(newATM - _lastPopulatedATM);
+
+            // Re-center if ATM shifted by 2+ strikes (avoid excessive re-centering)
+            if (atmDiff >= (int)(e.StrikeStep * 2) && _lastOptionsEvent != null)
+            {
+                _log.Info($"[OptionSignalsViewModel] ATM shifted significantly: {_lastPopulatedATM} -> {newATM} (diff={atmDiff}). Re-centering strike grid.");
+
+                // Create a synthetic event with updated ATM for re-triggering
+                var recenteredEvent = new OptionsGeneratedEvent
+                {
+                    Options = _lastOptionsEvent.Options,
+                    SelectedUnderlying = _lastOptionsEvent.SelectedUnderlying,
+                    SelectedExpiry = _lastOptionsEvent.SelectedExpiry,
+                    DTE = _lastOptionsEvent.DTE,
+                    ATMStrike = newATM, // Use new ATM
+                    GeneratedAt = DateTime.Now,
+                    ProjectedOpenUsed = _lastOptionsEvent.ProjectedOpenUsed
+                };
+
+                // Re-trigger strike population with new ATM
+                _strikeGenerationTrigger.OnNext(recenteredEvent);
+            }
+        }
+
         public void StopServices()
         {
             _log.Info("[OptionSignalsViewModel] Stopping services");
             SimulationService.Instance.StateChanged -= OnSimulationStateChanged;
+            OptionGenerationService.Instance.ATMChanged -= OnATMChanged;
             _subscriptions?.Clear();
             ClearAllVPStates();
         }
@@ -348,6 +407,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             if (evt?.Options == null || evt.Options.Count == 0) return;
             _log.Info($"[OptionSignalsViewModel] SyncAndPopulateStrikes started for {evt.SelectedUnderlying} ATM={evt.ATMStrike}");
 
+            // Cache the event for potential ATM re-centering later
+            _lastOptionsEvent = evt;
+
             await _dispatcher.InvokeAsync(() => {
                 Underlying = evt.SelectedUnderlying;
                 _selectedExpiry = evt.SelectedExpiry;
@@ -356,7 +418,17 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 StatusText = "Synchronizing Historical Tick Data...";
             });
 
-            int atmStrike = (int)evt.ATMStrike;
+            // Use dynamic ATM from MarketAnalyzerLogic if available (calculated from straddle prices)
+            // Fall back to event ATM (from ProjectedOpen) if dynamic ATM not yet calculated
+            // This applies to both live and simulation modes for fluid ATM tracking
+            decimal dynamicAtm = MarketAnalyzerLogic.Instance.GetATMStrike(evt.SelectedUnderlying);
+            int atmStrike = dynamicAtm > 0 ? (int)dynamicAtm : (int)evt.ATMStrike;
+
+            if (dynamicAtm > 0 && (int)dynamicAtm != (int)evt.ATMStrike)
+            {
+                _log.Info($"[OptionSignalsViewModel] Using dynamic ATM={atmStrike} (event ATM was {evt.ATMStrike})");
+            }
+
             int step = 50;
             var uniqueStrikes = evt.Options.Where(o => o.strike.HasValue)
                 .Select(o => (int)o.strike.Value)
@@ -366,9 +438,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
             if (uniqueStrikes.Count >= 2) step = uniqueStrikes[1] - uniqueStrikes[0];
 
-            // Store for SignalsOrchestrator
+            // Store for SignalsOrchestrator and ATM tracking
             _atmStrike = atmStrike;
             _strikeStep = step;
+            _lastPopulatedATM = atmStrike; // Track for fluid re-centering
 
             var strikesToLoad = new List<int>();
             for (int i = -10; i <= 10; i++) strikesToLoad.Add(atmStrike + (i * step));
@@ -461,9 +534,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                     StatusText = $"Monitoring {Rows.Count} strikes. (Historical Sync OK)";
                     IsBusy = false;
 
-                    // Update SignalsOrchestrator with market context
+                    // Update SignalsOrchestrator with market context (pass underlying for dynamic ATM lookup)
                     _signalsOrchestrator?.ClearStates();
-                    _signalsOrchestrator?.SetMarketContext(_atmStrike, _strikeStep, _selectedExpiry);
+                    _signalsOrchestrator?.SetMarketContext(_atmStrike, _strikeStep, _selectedExpiry, _underlying);
                 }
             });
         }
@@ -1433,6 +1506,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         /// </summary>
         private void ProcessSimulatedTick(OptionVPState state, double price, DateTime tickTime)
         {
+            // IMPORTANT: Update signal prices on EVERY tick for real-time P&L tracking
+            // This MUST be called before early returns to ensure prices update even when bar data isn't ready
+            _signalsOrchestrator?.UpdateSignalPrice(state.Symbol, price);
+
             // Check if simulation replay data is ready
             if (!state.SimDataReady || state.SimReplayBars == null || state.SimReplayBars.Count == 0)
             {
@@ -1572,6 +1649,13 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         public void Dispose()
         {
             StopServices();
+
+            // Unsubscribe from orchestrator events before disposal
+            if (_signalsOrchestrator != null)
+            {
+                _signalsOrchestrator.SignalStatsChanged -= OnSignalStatsChanged;
+            }
+
             _signalsOrchestrator?.Dispose();
         }
     }

@@ -13,6 +13,17 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
     /// Service for generating option symbols based on underlying price and expiry.
     /// Handles Zerodha-specific naming conventions for weekly and monthly expiries.
     /// </summary>
+    /// <summary>
+    /// Event args for ATM strike changes.
+    /// </summary>
+    public class ATMChangedEventArgs : EventArgs
+    {
+        public string Underlying { get; set; }
+        public decimal OldATM { get; set; }
+        public decimal NewATM { get; set; }
+        public decimal StrikeStep { get; set; }
+    }
+
     public class OptionGenerationService
     {
         private static readonly Lazy<OptionGenerationService> _instance = new Lazy<OptionGenerationService>(() => new OptionGenerationService());
@@ -20,9 +31,39 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         private readonly ConcurrentDictionary<string, decimal> _atmStrikes = new ConcurrentDictionary<string, decimal>();
 
+        /// <summary>
+        /// Fired when ATM strike changes by one or more strike steps.
+        /// Used by Option Signals to re-center the strike grid.
+        /// </summary>
+        public event EventHandler<ATMChangedEventArgs> ATMChanged;
+
         private OptionGenerationService() { }
 
-        public void SetATMStrike(string underlying, decimal strike) => _atmStrikes[underlying] = strike;
+        public void SetATMStrike(string underlying, decimal strike)
+        {
+            decimal oldAtm = _atmStrikes.TryGetValue(underlying, out var existing) ? existing : 0;
+            _atmStrikes[underlying] = strike;
+
+            // Fire event if ATM changed by at least one strike step
+            if (oldAtm > 0 && strike != oldAtm)
+            {
+                decimal strikeStep = (decimal)GetStrikeStep(underlying);
+                decimal atmDiff = Math.Abs(strike - oldAtm);
+
+                // Only fire if change is >= 1 strike step (significant shift)
+                if (atmDiff >= strikeStep)
+                {
+                    ATMChanged?.Invoke(this, new ATMChangedEventArgs
+                    {
+                        Underlying = underlying,
+                        OldATM = oldAtm,
+                        NewATM = strike,
+                        StrikeStep = strikeStep
+                    });
+                }
+            }
+        }
+
         public decimal GetATMStrike(string underlying) => _atmStrikes.TryGetValue(underlying, out var strike) ? strike : 0;
 
         public async Task<List<MappedInstrument>> GenerateOptionsAsync(string underlying, double currentPrice, DateTime expiry, int strikeCount = 10)

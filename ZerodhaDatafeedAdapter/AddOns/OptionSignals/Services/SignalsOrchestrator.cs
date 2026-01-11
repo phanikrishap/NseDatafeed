@@ -6,6 +6,7 @@ using System.Windows.Threading;
 using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Services;
+using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Analysis.Components;
 
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
@@ -409,6 +410,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
     /// </summary>
     public class SignalsOrchestrator : IDisposable
     {
+        /// <summary>
+        /// Fired when signal statistics change (signal added, closed, or P&L updated).
+        /// Subscribe to this to update UI summary metrics.
+        /// </summary>
+        public event EventHandler SignalStatsChanged;
+
         private readonly ObservableCollection<SignalRow> _signals;
         private readonly Dictionary<string, OptionStateSnapshot> _optionStates = new Dictionary<string, OptionStateSnapshot>();
         private readonly Dictionary<string, OptionBarHistory> _barHistories = new Dictionary<string, OptionBarHistory>();
@@ -427,6 +434,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         private double _atmStrike;
         private int _strikeStep = 50;
         private DateTime? _selectedExpiry;
+        private string _underlying = "NIFTY"; // Underlying for dynamic ATM lookup
         private DateTime _lastEvaluationTime = DateTime.MinValue;
         private readonly TimeSpan _minEvaluationInterval = TimeSpan.FromMilliseconds(500); // Throttle evaluations
 
@@ -560,15 +568,19 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// <summary>
         /// Sets market context for signal evaluation.
         /// </summary>
-        public void SetMarketContext(double atmStrike, int strikeStep, DateTime? selectedExpiry)
+        public void SetMarketContext(double atmStrike, int strikeStep, DateTime? selectedExpiry, string underlying = null)
         {
             lock (_lock)
             {
                 _atmStrike = atmStrike;
                 _strikeStep = strikeStep;
                 _selectedExpiry = selectedExpiry;
+                if (!string.IsNullOrEmpty(underlying))
+                {
+                    _underlying = underlying;
+                }
             }
-            TerminalService.Instance.Info($"Market context set: ATM={atmStrike}, Step={strikeStep}, Expiry={selectedExpiry?.ToString("dd-MMM") ?? "N/A"}");
+            TerminalService.Instance.Info($"Market context set: Underlying={_underlying}, ATM={atmStrike}, Step={strikeStep}, Expiry={selectedExpiry?.ToString("dd-MMM") ?? "N/A"}");
         }
 
         /// <summary>
@@ -685,19 +697,60 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// <summary>
         /// Updates price for existing signals and checks stoploss exposure.
         /// </summary>
+        // Throttle logging - only log every N calls
+        private int _updatePriceCallCount = 0;
+        private const int LOG_EVERY_N_CALLS = 100;
+
         public void UpdateSignalPrice(string symbol, double price)
         {
+            bool statsChanged = false;
+            _updatePriceCallCount++;
+
+            // Log once at start to confirm method is being called
+            if (_updatePriceCallCount == 1)
+            {
+                _log.Info($"[SignalsOrchestrator] UpdateSignalPrice called for first time: symbol={symbol}, price={price:F2}, activeSignals={_signals.Count(s => s.Status == SignalStatus.Active)}");
+            }
+
             // Use Invoke instead of InvokeAsync for synchronous execution in simulation mode
             // This ensures P&L updates happen immediately during replay
             Action updateAction = () =>
             {
                 var execSettings = ZerodhaDatafeedAdapter.Services.Configuration.ConfigurationManager.Instance.ExecutionSettings;
+
+                // Find all active signals for this symbol
                 var activeSignals = _signals.Where(s =>
                     s.Symbol == symbol && s.Status == SignalStatus.Active).ToList();
 
+                // Log periodic updates to trace price update flow
+                if (_updatePriceCallCount % LOG_EVERY_N_CALLS == 0)
+                {
+                    _log.Info($"[SignalsOrchestrator] UpdateSignalPrice #{_updatePriceCallCount}: symbol={symbol}, price={price:F2}, matchedCount={activeSignals.Count}, totalActive={_signals.Count(s => s.Status == SignalStatus.Active)}");
+                }
+
+                // Debug: Log when we have active signals but no matches found
+                if (activeSignals.Count == 0 && _signals.Any(s => s.Status == SignalStatus.Active))
+                {
+                    // Log first few mismatches at INFO level
+                    if (_updatePriceCallCount <= 5)
+                    {
+                        var allActiveSymbols = _signals.Where(s => s.Status == SignalStatus.Active)
+                            .Select(s => s.Symbol).Distinct().Take(5);
+                        _log.Info($"[SignalsOrchestrator] UpdateSignalPrice: No match for '{symbol}', active symbols: [{string.Join(", ", allActiveSymbols)}]");
+                    }
+                }
+
                 foreach (var signal in activeSignals)
                 {
+                    double oldPrice = signal.CurrentPrice;
                     signal.CurrentPrice = price;
+                    statsChanged = true; // P&L changed
+
+                    // Log successful price updates periodically
+                    if (_updatePriceCallCount % 500 == 0 || (_updatePriceCallCount <= 10 && Math.Abs(oldPrice - price) > 0.01))
+                    {
+                        _log.Info($"[SignalsOrchestrator] Price UPDATED: {symbol} {oldPrice:F2} -> {price:F2}, UnrealizedPnL={signal.UnrealizedPnL:F2}, SignalId={signal.SignalId}");
+                    }
 
                     // Check stoploss exposure - exit if loss exceeds configured threshold
                     if (execSettings != null && execSettings.IsStoplossTriggered((decimal)signal.UnrealizedPnL))
@@ -728,6 +781,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             {
                 _dispatcher.InvokeAsync(updateAction);
             }
+
+            // Notify subscribers that stats may have changed
+            if (statsChanged)
+            {
+                SignalStatsChanged?.Invoke(this, EventArgs.Empty);
+            }
         }
 
         /// <summary>
@@ -744,6 +803,17 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 if (_atmStrike <= 0 || _optionStates.Count == 0)
                     return;
 
+                // Get dynamic ATM from MarketAnalyzerLogic (calculated by Option Chain based on straddle prices)
+                // This ensures we use the same ATM as Option Chain window shows
+                double dynamicAtm = (double)MarketAnalyzerLogic.Instance.GetATMStrike(_underlying);
+                double atmToUse = dynamicAtm > 0 ? dynamicAtm : _atmStrike;
+
+                // Log ATM change if significant
+                if (dynamicAtm > 0 && Math.Abs(dynamicAtm - _atmStrike) > _strikeStep)
+                {
+                    _log.Info($"[SignalsOrchestrator] Using dynamic ATM={dynamicAtm} (initial ATM was {_atmStrike})");
+                }
+
                 newSignals = new List<SignalRow>();
 
                 foreach (var strategy in _strategies.Where(s => s.IsEnabled))
@@ -753,7 +823,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                         var strategySignals = strategy.Evaluate(
                             _optionStates,
                             _barHistories,
-                            _atmStrike,
+                            atmToUse,
                             _strikeStep,
                             currentTime,
                             _signals.ToList());
@@ -799,6 +869,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                             TerminalService.Instance.Signal($"[HIST {signal.SignalTime:HH:mm:ss}] {signal.DirectionStr} {signal.Symbol} @ {signal.EntryPrice:F2} | {signal.SignalReason}");
                         }
                     }
+
+                    // Notify subscribers that stats have changed (new signals added)
+                    SignalStatsChanged?.Invoke(this, EventArgs.Empty);
                 });
             }
         }
@@ -937,6 +1010,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     }
 
                     _log.Info($"[SignalsOrchestrator] Signal closed: {signal.Symbol} @ {exitPrice:F2}, P&L: {signal.RealizedPnL:F2}, Reason: {exitReason ?? "Manual/Opposite signal"}");
+
+                    // Notify subscribers that stats have changed (signal closed)
+                    SignalStatsChanged?.Invoke(this, EventArgs.Empty);
                 }
             });
         }
