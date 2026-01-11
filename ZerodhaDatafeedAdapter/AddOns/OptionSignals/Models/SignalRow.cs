@@ -1,4 +1,5 @@
 using System;
+using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.ViewModels;
 
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
@@ -339,6 +340,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
 
         private void RecalculatePnL()
         {
+            // Get lot size from instrument masters via SymbolHelper (caches DB values)
+            string underlying = _symbol != null && _symbol.StartsWith("SENSEX", StringComparison.OrdinalIgnoreCase) ? "SENSEX" : "NIFTY";
+            int lotSize = SymbolHelper.GetLotSize(underlying);
+
             if (_status == SignalStatus.Active && _entryPrice > 0 && _currentPrice > 0)
             {
                 // Calculate unrealized P&L
@@ -346,8 +351,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
                     ? _currentPrice - _entryPrice
                     : _entryPrice - _currentPrice;
 
-                // NIFTY lot size = 25
-                UnrealizedPnL = priceDiff * _quantity * 25;
+                UnrealizedPnL = priceDiff * _quantity * lotSize;
             }
             else if (_status == SignalStatus.Closed && _entryPrice > 0 && _exitPrice > 0)
             {
@@ -356,7 +360,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
                     ? _exitPrice - _entryPrice
                     : _entryPrice - _exitPrice;
 
-                RealizedPnL = priceDiff * _quantity * 25;
+                RealizedPnL = priceDiff * _quantity * lotSize;
                 UnrealizedPnL = 0;
             }
         }

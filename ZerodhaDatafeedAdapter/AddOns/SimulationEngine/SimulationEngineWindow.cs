@@ -452,6 +452,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
             _cboSpeed.Items.Add("2x");
             _cboSpeed.Items.Add("5x");
             _cboSpeed.Items.Add("10x");
+            _cboSpeed.Items.Add("30x");
+            _cboSpeed.Items.Add("60x");
+            _cboSpeed.Items.Add("120x");
+            _cboSpeed.Items.Add("300x");
             _cboSpeed.SelectedIndex = 0;
             _cboSpeed.SelectionChanged += OnSpeedChanged;
             panel.Children.Add(_cboSpeed);

@@ -206,10 +206,17 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// Loads historical data for simulation mode - up to the simulation date.
         /// This resets VP engines, loads prior days for historical context, then builds
         /// replay data for the simulation date itself for progressive bar-by-bar replay.
+        /// NOTE: Always uses NIFTY_I for volume profile metrics, regardless of whether
+        /// simulating NIFTY or SENSEX options (SENSEX_I is illiquid and NIFTY/SENSEX are complementary).
         /// </summary>
+        /// <param name="simulationDate">The date to simulate</param>
         public async Task StartSimulationAsync(DateTime simulationDate)
         {
-            Logger.Info($"[NiftyFuturesMetricsService] StartSimulationAsync(): Loading data for simulation date {simulationDate:yyyy-MM-dd}");
+            // Always use NIFTY_I for volume profile - it's the liquid underlying
+            // SENSEX_I is illiquid; NIFTY and SENSEX are highly complementary instruments
+            string continuousSymbol = NIFTY_I_SYMBOL;
+
+            Logger.Info($"[NiftyFuturesMetricsService] StartSimulationAsync(): Loading data for simulation date {simulationDate:yyyy-MM-dd}, symbol={continuousSymbol}");
             LoggerFactory.Simulation.Info($"[NiftyFuturesMetricsService] StartSimulationAsync: {simulationDate:yyyy-MM-dd}");
 
             try
@@ -230,23 +237,22 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 _simDataReady = false;
                 _simReplayBarIndex = 0;
 
-                // Ensure we have instruments
-                if (_niftyIInstrument == null)
-                {
-                    _niftyFuturesSymbol = await _symbolResolver.ResolveNiftyFuturesSymbolAsync();
-                    _niftyIInstrument = await _symbolResolver.GetInstrumentAsync(NIFTY_I_SYMBOL);
-                }
+                // Get the appropriate continuous contract instrument
+                Instrument simInstrument = await _symbolResolver.GetInstrumentAsync(continuousSymbol);
 
-                if (_niftyIInstrument == null)
+                if (simInstrument == null)
                 {
-                    Logger.Error("[NiftyFuturesMetricsService] StartSimulationAsync: Failed to get NIFTY_I instrument");
+                    Logger.Error($"[NiftyFuturesMetricsService] StartSimulationAsync: Failed to get {continuousSymbol} instrument");
+                    LoggerFactory.Simulation.Error($"[NiftyFuturesMetricsService] Failed to get instrument for {continuousSymbol}");
                     return;
                 }
+
+                Logger.Info($"[NiftyFuturesMetricsService] StartSimulationAsync: Got instrument {simInstrument.FullName} for {continuousSymbol}");
 
                 // Load historical data up to simulation date (prior day's close, not the simulation day itself)
                 // This populates the circular buffers for RelMetrics historical averages
                 var historyEndDate = simulationDate.Date.AddDays(-1);
-                var (priorBars, priorTicks, priorSuccess) = await _historicalDataLoader.LoadHistoricalDataAsync(_niftyIInstrument, historyEndDate);
+                var (priorBars, priorTicks, priorSuccess) = await _historicalDataLoader.LoadHistoricalDataAsync(simInstrument, historyEndDate);
 
                 if (!priorSuccess)
                 {
@@ -269,7 +275,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 ProcessHistoricalVolumeProfileForPriorDays(simulationDate);
 
                 // Now load the simulation date's data separately for progressive replay
-                var (simDayBars, simDayTicks, simSuccess) = await _historicalDataLoader.LoadHistoricalDataAsync(_niftyIInstrument, simulationDate);
+                var (simDayBars, simDayTicks, simSuccess) = await _historicalDataLoader.LoadHistoricalDataAsync(simInstrument, simulationDate);
 
                 if (!simSuccess)
                 {

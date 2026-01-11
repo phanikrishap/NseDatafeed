@@ -514,26 +514,55 @@ namespace ZerodhaDatafeedAdapter.Services
                         // No timezone conversion needed
                         DateTime fromDateTime = config.SimulationDate.Date + config.TimeFrom;
                         DateTime toDateTime = config.SimulationDate.Date + config.TimeTo;
-                        // Add buffer for request
-                        DateTime fromDateTimeWithBuffer = fromDateTime.AddMinutes(-5);
-                        DateTime toDateTimeWithBuffer = toDateTime.AddMinutes(5);
+                        // Request full day's data (from midnight to midnight) to ensure we get all ticks
+                        DateTime fromDateTimeWithBuffer = config.SimulationDate.Date;
+                        DateTime toDateTimeWithBuffer = config.SimulationDate.Date.AddDays(1);
 
                         _log.Info($"[SimulationService] Loading TICK data for {symbol}");
                         _log.Info($"[SimulationService]   Request range (local): {fromDateTimeWithBuffer:yyyy-MM-dd HH:mm} to {toDateTimeWithBuffer:yyyy-MM-dd HH:mm}");
                         _log.Info($"[SimulationService]   Filter range (local): {fromDateTime:HH:mm} to {toDateTime:HH:mm}");
 
-                        // Use BarsRequest with TICK data type - NinjaTrader uses local time
-                        var barsRequest = new BarsRequest(ntInstrument, fromDateTimeWithBuffer, toDateTimeWithBuffer);
+                        // Use BarsRequest with date range constructor - requesting full simulation day
+                        BarsRequest barsRequest = null;
+                        try
+                        {
+                            barsRequest = new BarsRequest(ntInstrument, fromDateTimeWithBuffer, toDateTimeWithBuffer);
+                        }
+                        catch (Exception barsEx)
+                        {
+                            _log.Error($"[SimulationService] BarsRequest constructor failed for {symbol}: {barsEx.Message}");
+                            tcs.TrySetResult(false);
+                            return;
+                        }
+
+                        if (barsRequest == null)
+                        {
+                            _log.Error($"[SimulationService] BarsRequest is null for {symbol}");
+                            tcs.TrySetResult(false);
+                            return;
+                        }
+
                         barsRequest.BarsPeriod = new BarsPeriod
                         {
                             BarsPeriodType = BarsPeriodType.Tick,
                             Value = 1  // 1 tick per bar
                         };
-                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+
+                        // Try to get trading hours, use default if not available
+                        var tradingHours = TradingHours.Get("Default 24 x 7");
+                        if (tradingHours != null)
+                        {
+                            barsRequest.TradingHours = tradingHours;
+                        }
+                        else
+                        {
+                            _log.Warn($"[SimulationService] TradingHours 'Default 24 x 7' not found, using default");
+                        }
 
                         string symbolClosure = symbol;
                         DateTime filterFrom = fromDateTime;
                         DateTime filterTo = toDateTime;
+                        DateTime simDate = config.SimulationDate.Date;
 
                         barsRequest.Request((request, errorCode, errorMessage) =>
                         {
@@ -556,8 +585,8 @@ namespace ZerodhaDatafeedAdapter.Services
                                     {
                                         DateTime tickTime = request.Bars.GetTime(i);
 
-                                        // Filter within time range (tick times are already in local time)
-                                        if (tickTime >= filterFrom && tickTime <= filterTo)
+                                        // Filter: must be on simulation date AND within time range
+                                        if (tickTime.Date == simDate && tickTime >= filterFrom && tickTime <= filterTo)
                                         {
                                             ticks.Add(new TickData
                                             {

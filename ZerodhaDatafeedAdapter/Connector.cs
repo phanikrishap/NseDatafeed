@@ -677,8 +677,8 @@ namespace ZerodhaDatafeedAdapter
                             Logger.Info("[Connector] SIMULATION MODE: AutoStart enabled, loading data...");
                             await Task.Delay(500); // Give UI time to initialize
 
-                            // Load Nifty Futures metrics for simulation date
-                            Logger.Info("[Connector] SIMULATION MODE: Loading Nifty Futures metrics...");
+                            // Load underlying Futures metrics for simulation date (always uses NIFTY_I - it's liquid and complementary to both NIFTY/SENSEX)
+                            Logger.Info("[Connector] SIMULATION MODE: Loading NIFTY_I Futures metrics (used for both NIFTY and SENSEX)...");
                             await Services.Analysis.NiftyFuturesMetricsService.Instance.StartSimulationAsync(simConfig.SimulationDate);
 
                             // Load tick data for option symbols

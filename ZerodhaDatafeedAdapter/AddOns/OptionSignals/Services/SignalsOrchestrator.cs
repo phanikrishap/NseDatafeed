@@ -134,6 +134,27 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
         private IReadOnlyDictionary<string, OptionBarHistory> _currentBarHistories;
 
+        // Market hours constants (IST)
+        private static readonly TimeSpan MARKET_OPEN = new TimeSpan(9, 15, 0);
+        private static readonly TimeSpan MARKET_CLOSE = new TimeSpan(15, 30, 0);
+
+        /// <summary>
+        /// Calculates quantity (lots) based on entry exposure from ExecutionSettings.
+        /// Quantity = EntryExposure / (LotSize * EntryPrice), capped at MaxLots.
+        /// </summary>
+        private int CalculateQuantity(double entryPrice, string symbol)
+        {
+            var execSettings = ZerodhaDatafeedAdapter.Services.Configuration.ConfigurationManager.Instance.ExecutionSettings;
+            if (execSettings == null || entryPrice <= 0)
+                return 1;
+
+            // Get underlying from symbol (NIFTY25JAN... -> NIFTY, SENSEX26JAN... -> SENSEX)
+            string underlying = symbol.StartsWith("SENSEX", StringComparison.OrdinalIgnoreCase) ? "SENSEX" : "NIFTY";
+            int lotSize = Helpers.SymbolHelper.GetLotSize(underlying);
+
+            return execSettings.CalculateLots((decimal)entryPrice, lotSize);
+        }
+
         public override List<SignalRow> Evaluate(
             IReadOnlyDictionary<string, OptionStateSnapshot> optionStates,
             IReadOnlyDictionary<string, OptionBarHistory> barHistories,
@@ -144,6 +165,13 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         {
             _currentBarHistories = barHistories;
             var signals = new List<SignalRow>();
+
+            // Market hours check: Only generate signals during market hours (9:15 AM to 3:30 PM IST)
+            var timeOfDay = currentTime.TimeOfDay;
+            if (timeOfDay < MARKET_OPEN || timeOfDay > MARKET_CLOSE)
+            {
+                return signals; // No signals outside market hours
+            }
 
             // Define target strikes: ATM, ITM1 (ATM-step for CE, ATM+step for PE), OTM1 (ATM+step for CE, ATM-step for PE)
             var targetCEStrikes = new List<(double strike, Moneyness moneyness)>
@@ -237,6 +265,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     entryPrice = histPrice.Value;
             }
 
+            // Calculate quantity based on entry exposure
+            int quantity = CalculateQuantity(entryPrice, option.Symbol);
+
             // Signals are immediately Active with entry at historical price
             return new SignalRow
             {
@@ -248,7 +279,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 Moneyness = moneyness,
                 Direction = SignalDirection.Long,
                 Status = SignalStatus.Active,
-                Quantity = 1, // 1 lot
+                Quantity = quantity,
                 EntryPrice = entryPrice,
                 EntryTime = currentTime,
                 CurrentPrice = option.RangeBarClosePrice, // Current price for P&L tracking
@@ -314,6 +345,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     entryPrice = histPrice.Value;
             }
 
+            // Calculate quantity based on entry exposure
+            int quantity = CalculateQuantity(entryPrice, option.Symbol);
+
             // Signals are immediately Active with entry at historical price
             return new SignalRow
             {
@@ -325,7 +359,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 Moneyness = moneyness,
                 Direction = SignalDirection.Long, // Buying puts
                 Status = SignalStatus.Active,
-                Quantity = 1, // 1 lot
+                Quantity = quantity,
                 EntryPrice = entryPrice,
                 EntryTime = currentTime,
                 CurrentPrice = option.RangeBarClosePrice, // Current price for P&L tracking
@@ -409,7 +443,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             _signals = signals;
             _dispatcher = dispatcher;
 
-            // Initialize underlying bar history
+            // Initialize underlying bar history (default to NIFTY)
             _underlyingBarHistory = new UnderlyingBarHistory("NIFTY_I", 256);
 
             // Register default strategies
@@ -417,6 +451,20 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
             _log.Info("[SignalsOrchestrator] Initialized with default strategies");
             TerminalService.Instance.Info("SignalsOrchestrator initialized");
+        }
+
+        /// <summary>
+        /// Resets the underlying bar history with a new symbol.
+        /// Call this when the underlying changes (e.g., switching from NIFTY to SENSEX).
+        /// </summary>
+        public void ResetUnderlyingHistory(string symbol)
+        {
+            lock (_lock)
+            {
+                _underlyingBarHistory = new UnderlyingBarHistory(symbol, 256);
+                _underlyingState = null;
+                _log.Info($"[SignalsOrchestrator] Underlying history reset for {symbol}");
+            }
         }
 
         /// <summary>
@@ -440,6 +488,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
             if (enabled)
             {
+                // Clear existing signals when entering replay/simulation mode
+                ClearAllSignals();
+
                 // Reset strategy daily tracking when entering replay mode
                 foreach (var strategy in _strategies)
                 {
@@ -464,6 +515,19 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Clears all signals from the collection.
+        /// </summary>
+        public void ClearAllSignals()
+        {
+            _dispatcher.InvokeAsync(() =>
+            {
+                _signals.Clear();
+                _log.Info("[SignalsOrchestrator] All signals cleared");
+                TerminalService.Instance.Info("Signals cleared for new session");
+            });
         }
 
         /// <summary>
@@ -619,18 +683,51 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         }
 
         /// <summary>
-        /// Updates price for existing signals.
+        /// Updates price for existing signals and checks stoploss exposure.
         /// </summary>
         public void UpdateSignalPrice(string symbol, double price)
         {
-            _dispatcher.InvokeAsync(() =>
+            // Use Invoke instead of InvokeAsync for synchronous execution in simulation mode
+            // This ensures P&L updates happen immediately during replay
+            Action updateAction = () =>
             {
-                foreach (var signal in _signals.Where(s =>
-                    s.Symbol == symbol && s.Status == SignalStatus.Active))
+                var execSettings = ZerodhaDatafeedAdapter.Services.Configuration.ConfigurationManager.Instance.ExecutionSettings;
+                var activeSignals = _signals.Where(s =>
+                    s.Symbol == symbol && s.Status == SignalStatus.Active).ToList();
+
+                foreach (var signal in activeSignals)
                 {
                     signal.CurrentPrice = price;
+
+                    // Check stoploss exposure - exit if loss exceeds configured threshold
+                    if (execSettings != null && execSettings.IsStoplossTriggered((decimal)signal.UnrealizedPnL))
+                    {
+                        _log.Info($"[SignalsOrchestrator] STOPLOSS TRIGGERED: {signal.Symbol} UnrealizedPnL={signal.UnrealizedPnL:F2} exceeds StoplossExposure={execSettings.StoplossExposure}");
+                        TerminalService.Instance.Signal($"[STOPLOSS] {signal.Symbol} closed at {price:F2} | Loss={signal.UnrealizedPnL:F2}");
+
+                        // Close the signal
+                        CloseSignal(signal.SignalId, price, "Stoploss exposure exceeded");
+                    }
                 }
-            });
+            };
+
+            // In replay mode, execute synchronously for immediate P&L updates
+            // In live mode, use async to avoid blocking tick processing
+            if (_isReplayMode)
+            {
+                if (_dispatcher.CheckAccess())
+                {
+                    updateAction();
+                }
+                else
+                {
+                    _dispatcher.Invoke(updateAction);
+                }
+            }
+            else
+            {
+                _dispatcher.InvokeAsync(updateAction);
+            }
         }
 
         /// <summary>
@@ -816,6 +913,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// </summary>
         public void CloseSignal(string signalId, double exitPrice)
         {
+            CloseSignal(signalId, exitPrice, null);
+        }
+
+        /// <summary>
+        /// Closes an active signal with an optional reason.
+        /// </summary>
+        public void CloseSignal(string signalId, double exitPrice, string exitReason)
+        {
             _dispatcher.InvokeAsync(() =>
             {
                 var signal = _signals.FirstOrDefault(s => s.SignalId == signalId);
@@ -824,7 +929,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     signal.Status = SignalStatus.Closed;
                     signal.ExitPrice = exitPrice;
                     signal.ExitTime = GetCurrentTime();
-                    _log.Info($"[SignalsOrchestrator] Signal closed: {signal.Symbol} @ {exitPrice:F2}, P&L: {signal.RealizedPnL:F2}");
+
+                    // Append exit reason to signal reason if provided
+                    if (!string.IsNullOrEmpty(exitReason))
+                    {
+                        signal.SignalReason = $"{signal.SignalReason} | Exit: {exitReason}";
+                    }
+
+                    _log.Info($"[SignalsOrchestrator] Signal closed: {signal.Symbol} @ {exitPrice:F2}, P&L: {signal.RealizedPnL:F2}, Reason: {exitReason ?? "Manual/Opposite signal"}");
                 }
             });
         }

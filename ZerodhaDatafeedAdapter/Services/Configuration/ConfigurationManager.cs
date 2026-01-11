@@ -41,6 +41,9 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         // Simulation configuration
         private SimulationSettings _simulationSettings = new SimulationSettings();
 
+        // Execution settings
+        private ExecutionSettings _executionSettings = new ExecutionSettings();
+
         /// <summary>
         /// Gets the singleton instance of the ConfigurationManager
         /// </summary>
@@ -93,6 +96,11 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         /// Gets whether simulation mode is enabled
         /// </summary>
         public bool IsSimulationModeEnabled => _simulationSettings?.Enabled ?? false;
+
+        /// <summary>
+        /// Gets the execution settings from config.json
+        /// </summary>
+        public ExecutionSettings ExecutionSettings => _executionSettings;
 
         /// <summary>
         /// Private constructor to enforce singleton pattern
@@ -208,6 +216,20 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
                 else
                 {
                     _simulationSettings = new SimulationSettings();
+                }
+
+                // Load execution settings
+                JObject executionSettings = _config["ExecutionSettings"] as JObject;
+                if (executionSettings != null)
+                {
+                    _executionSettings = executionSettings.ToObject<ExecutionSettings>() ?? new ExecutionSettings();
+                    Logger.Info($"[ConfigurationManager] ExecutionSettings loaded - EntryExposure={_executionSettings.EntryExposure}, " +
+                                $"MaxLots={_executionSettings.MaxLots}, StoplossExposure={_executionSettings.StoplossExposure}");
+                }
+                else
+                {
+                    _executionSettings = new ExecutionSettings();
+                    Logger.Info("[ConfigurationManager] ExecutionSettings not found, using defaults");
                 }
 
                 return true;

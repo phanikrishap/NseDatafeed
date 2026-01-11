@@ -224,8 +224,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             // Initialize replay mode based on current simulation state
             if (SimulationService.Instance.IsSimulationMode)
             {
-                _signalsOrchestrator?.SetReplayMode(true);
-                _log.Info("[OptionSignalsViewModel] Started in simulation mode - replay mode enabled");
+                // Use the simulation state handler for consistency
+                var currentState = SimulationService.Instance.State;
+                OnSimulationStateChanged(currentState);
+                _log.Info($"[OptionSignalsViewModel] Started in simulation mode ({currentState}) - replay mode enabled");
             }
 
             TerminalService.Instance.Info("OptionSignalsViewModel services started");
@@ -248,15 +250,30 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                                        newState == SimulationState.Paused ||
                                        newState == SimulationState.Ready;
 
-            _signalsOrchestrator?.SetReplayMode(isSimulationActive);
-
             if (isSimulationActive)
             {
-                _log.Info($"[OptionSignalsViewModel] Simulation state changed to {newState} - replay mode enabled");
-                TerminalService.Instance.Info($"Simulation mode active ({newState}) - taking all trades");
+                // Get the simulation underlying from config
+                var simConfig = SimulationService.Instance.CurrentConfig;
+                string simUnderlying = simConfig?.Underlying ?? "NIFTY";
+
+                // Reset underlying history if it's different from NIFTY (default)
+                if (!simUnderlying.Equals("NIFTY", StringComparison.OrdinalIgnoreCase))
+                {
+                    string underlyingSymbol = simUnderlying.Equals("SENSEX", StringComparison.OrdinalIgnoreCase)
+                        ? "SENSEX_I"
+                        : $"{simUnderlying}_I";
+                    _signalsOrchestrator?.ResetUnderlyingHistory(underlyingSymbol);
+                }
+
+                _signalsOrchestrator?.SetReplayMode(true);
+                _log.Info($"[OptionSignalsViewModel] Simulation state changed to {newState} - replay mode enabled for {simUnderlying}");
+                TerminalService.Instance.Info($"Simulation mode active ({newState}) - taking all trades for {simUnderlying}");
             }
             else
             {
+                _signalsOrchestrator?.SetReplayMode(false);
+                // Reset back to NIFTY underlying for live mode
+                _signalsOrchestrator?.ResetUnderlyingHistory("NIFTY_I");
                 _log.Info($"[OptionSignalsViewModel] Simulation state changed to {newState} - replay mode disabled");
                 TerminalService.Instance.Info($"Live mode active - normal signal dedup enabled");
             }
@@ -492,51 +509,139 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
             NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
             {
-                // Create Tick BarsRequest for Volume Profile (request first)
-                var tickRequest = new BarsRequest(instrument, 10000);
-                tickRequest.BarsPeriod = new BarsPeriod
-                {
-                    BarsPeriodType = BarsPeriodType.Tick,
-                    Value = 1
-                };
-                tickRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                // Determine if we're in simulation mode and need specific date range
+                bool isSimMode = SimulationService.Instance.IsSimulationMode;
+                DateTime? simDate = isSimMode ? SimulationService.Instance.CurrentConfig?.SimulationDate : null;
 
+                BarsRequest tickRequest;
+                BarsRequest rangeRequest;
+
+                if (isSimMode && simDate.HasValue)
+                {
+                    // Simulation mode: Request bars from prior working day through simulation day
+                    DateTime priorDay = HolidayCalendarService.Instance.GetPriorWorkingDay(simDate.Value);
+                    DateTime fromDate = priorDay.Date;
+                    DateTime toDate = simDate.Value.Date.AddDays(1); // Include full simulation day
+
+                    _log.Info($"[OptionSignalsViewModel] {symbol} SimMode: Requesting bars from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}");
+
+                    // Create Tick BarsRequest with date range for simulation
+                    tickRequest = new BarsRequest(instrument, fromDate, toDate);
+                    tickRequest.BarsPeriod = new BarsPeriod
+                    {
+                        BarsPeriodType = BarsPeriodType.Tick,
+                        Value = 1
+                    };
+                    tickRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+
+                    // Create RangeATR BarsRequest with date range for simulation
+                    rangeRequest = new BarsRequest(instrument, fromDate, toDate);
+                    rangeRequest.BarsPeriod = new BarsPeriod
+                    {
+                        BarsPeriodType = (BarsPeriodType)7015, // RangeATR
+                        Value = 1,
+                        Value2 = 3,
+                        BaseBarsPeriodValue = 1
+                    };
+                    rangeRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                }
+                else
+                {
+                    // Live mode: Request last N bars
+                    tickRequest = new BarsRequest(instrument, 10000);
+                    tickRequest.BarsPeriod = new BarsPeriod
+                    {
+                        BarsPeriodType = BarsPeriodType.Tick,
+                        Value = 1
+                    };
+                    tickRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+
+                    rangeRequest = new BarsRequest(instrument, 100);
+                    rangeRequest.BarsPeriod = new BarsPeriod
+                    {
+                        BarsPeriodType = (BarsPeriodType)7015, // RangeATR
+                        Value = 1,
+                        Value2 = 3,
+                        BaseBarsPeriodValue = 1
+                    };
+                    rangeRequest.TradingHours = TradingHours.Get("Default 24 x 7");
+                }
+
+                // Subscribe to range bar updates (for live mode real-time updates)
+                rangeRequest.Update += (s, e) => state.RangeBarUpdates.OnNext(e);
+
+                // Request tick data
                 tickRequest.Request((r, code, msg) => {
                     if (code == ErrorCode.NoError)
                     {
-                        _log.Debug($"[OptionSignalsViewModel] TickBars Success: {symbol}, count={r.Bars.Count}");
+                        // Comprehensive logging for tick bars
+                        int totalCount = r.Bars.Count;
+                        if (totalCount > 0)
+                        {
+                            DateTime firstTime = r.Bars.GetTime(0);
+                            DateTime lastTime = r.Bars.GetTime(totalCount - 1);
+
+                            // Count bars by date for diagnostics
+                            var barsByDate = new Dictionary<DateTime, int>();
+                            for (int i = 0; i < totalCount; i++)
+                            {
+                                var barDate = r.Bars.GetTime(i).Date;
+                                if (!barsByDate.ContainsKey(barDate))
+                                    barsByDate[barDate] = 0;
+                                barsByDate[barDate]++;
+                            }
+
+                            var dateBreakdown = string.Join(", ", barsByDate.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key:MM-dd}:{kv.Value}"));
+                            _log.Info($"[OptionSignalsViewModel] TickBars OK: {symbol}, total={totalCount}, first={firstTime:MM-dd HH:mm:ss}, last={lastTime:MM-dd HH:mm:ss}, byDate=[{dateBreakdown}]");
+                        }
+                        else
+                        {
+                            _log.Warn($"[OptionSignalsViewModel] TickBars Empty: {symbol}, count=0");
+                        }
                         state.TickDataReady.OnNext(true);
                     }
                     else
                     {
-                        _log.Warn($"[OptionSignalsViewModel] TickBars Failed: {symbol} - {msg}");
+                        _log.Warn($"[OptionSignalsViewModel] TickBars FAILED: {symbol} - code={code}, msg={msg}");
                         state.TickDataReady.OnNext(true); // Signal anyway so we don't block
                     }
                 });
 
                 state.TickBarsRequest = tickRequest;
 
-                // Create RangeATR BarsRequest
-                var rangeRequest = new BarsRequest(instrument, 100);
-                rangeRequest.BarsPeriod = new BarsPeriod
-                {
-                    BarsPeriodType = (BarsPeriodType)7015, // RangeATR
-                    Value = 1,
-                    Value2 = 3,
-                    BaseBarsPeriodValue = 1
-                };
-                rangeRequest.TradingHours = TradingHours.Get("Default 24 x 7");
-                rangeRequest.Update += (s, e) => state.RangeBarUpdates.OnNext(e);
-
+                // Request range bar data
                 rangeRequest.Request((r, code, msg) => {
                     if (code == ErrorCode.NoError)
                     {
-                        _log.Debug($"[OptionSignalsViewModel] RangeBars Success: {symbol}, count={r.Bars.Count}");
+                        // Comprehensive logging for range bars
+                        int totalCount = r.Bars.Count;
+                        if (totalCount > 0)
+                        {
+                            DateTime firstTime = r.Bars.GetTime(0);
+                            DateTime lastTime = r.Bars.GetTime(totalCount - 1);
+
+                            // Count bars by date for diagnostics
+                            var barsByDate = new Dictionary<DateTime, int>();
+                            for (int i = 0; i < totalCount; i++)
+                            {
+                                var barDate = r.Bars.GetTime(i).Date;
+                                if (!barsByDate.ContainsKey(barDate))
+                                    barsByDate[barDate] = 0;
+                                barsByDate[barDate]++;
+                            }
+
+                            var dateBreakdown = string.Join(", ", barsByDate.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key:MM-dd}:{kv.Value}"));
+                            _log.Info($"[OptionSignalsViewModel] RangeBars OK: {symbol}, total={totalCount}, first={firstTime:MM-dd HH:mm:ss}, last={lastTime:MM-dd HH:mm:ss}, byDate=[{dateBreakdown}]");
+                        }
+                        else
+                        {
+                            _log.Warn($"[OptionSignalsViewModel] RangeBars Empty: {symbol}, count=0");
+                        }
                         state.RangeBarsReady.OnNext(true);
                     }
                     else
                     {
-                        _log.Warn($"[OptionSignalsViewModel] RangeBars Failed: {symbol} - {msg}");
+                        _log.Warn($"[OptionSignalsViewModel] RangeBars FAILED: {symbol} - code={code}, msg={msg}");
                         state.RangeBarsReady.OnNext(true); // Signal anyway
                     }
                 });
@@ -579,7 +684,31 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             // - MarketHours/PostMarket: use today
             // - Non-trading day (weekend/holiday): use prior working day
             DateTime targetDate = GetTargetDataDate();
-            _log.Debug($"[VP] {state.Symbol} target date for VP: {targetDate:yyyy-MM-dd} (IsPreMarket={DateTimeHelper.IsPreMarket()}, IsTradingDay={!DateTimeHelper.IsNonTradingDay(DateTime.Today)})");
+            bool isSimMode = SimulationService.Instance.IsSimulationMode;
+
+            _log.Info($"[VP] {state.Symbol} ProcessHistoricalData: targetDate={targetDate:yyyy-MM-dd}, isSimMode={isSimMode}, " +
+                $"rangeBars={rangeBars.Count}, tickBars={tickBars.Count}");
+
+            // Count range bars and tick bars by date for diagnostics
+            var rangeDateCounts = new Dictionary<DateTime, int>();
+            for (int i = 0; i < rangeBars.Count; i++)
+            {
+                var d = rangeBars.GetTime(i).Date;
+                if (!rangeDateCounts.ContainsKey(d)) rangeDateCounts[d] = 0;
+                rangeDateCounts[d]++;
+            }
+
+            var tickDateCounts = new Dictionary<DateTime, int>();
+            for (int i = 0; i < tickBars.Count; i++)
+            {
+                var d = tickBars.GetTime(i).Date;
+                if (!tickDateCounts.ContainsKey(d)) tickDateCounts[d] = 0;
+                tickDateCounts[d]++;
+            }
+
+            var rangeBreakdown = string.Join(", ", rangeDateCounts.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key:MM-dd}:{kv.Value}"));
+            var tickBreakdown = string.Join(", ", tickDateCounts.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key:MM-dd}:{kv.Value}"));
+            _log.Info($"[VP] {state.Symbol} RangeBars byDate=[{rangeBreakdown}], TickBars byDate=[{tickBreakdown}]");
 
             // Build sorted tick time index for target date
             var tickTimes = new List<(DateTime time, int index)>(tickBars.Count);
@@ -592,7 +721,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
             if (tickTimes.Count == 0)
             {
-                _log.Warn($"[VP] {state.Symbol} no ticks for {targetDate:yyyy-MM-dd}");
+                _log.Warn($"[VP] {state.Symbol} NO TICKS for targetDate={targetDate:yyyy-MM-dd} (available dates: [{tickBreakdown}])");
                 int lastBarIdx = rangeBars.Count - 1;
                 UpdateAtrDisplay(state, rangeBars.GetClose(lastBarIdx), rangeBars.GetTime(lastBarIdx));
                 state.LastRangeBarIndex = lastBarIdx;
@@ -601,8 +730,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             }
 
             // Check if we're in simulation mode - if so, build replay data instead of processing now
-            if (SimulationService.Instance.IsSimulationMode)
+            if (isSimMode)
             {
+                _log.Info($"[VP] {state.Symbol} Entering BuildSimulationReplayData: tickTimes count for {targetDate:MM-dd}={tickTimes.Count}");
                 BuildSimulationReplayData(state, rangeBars, tickTimes, targetDate);
                 return;
             }
@@ -662,13 +792,191 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         /// <summary>
         /// Builds simulation replay data structures for deterministic bar-by-bar replay.
         /// Called when in simulation mode to prepare bars and ticks for progressive replay.
+        /// IMPORTANT: First processes the prior working day's data to populate VP engines with
+        /// historical state before building replay data for the simulation date.
         /// </summary>
         private void BuildSimulationReplayData(OptionVPState state, Bars rangeBars,
             List<(DateTime time, int index)> tickTimes, DateTime targetDate)
         {
-            // Build list of bars to replay
+            var tickBars = state.TickBarsRequest?.Bars;
+
+            // STEP 1: Pre-populate VP engines with prior working day's data
+            // This ensures session metrics (Ses B, Ses S, Ses Tr, etc.) show meaningful values
+            // before simulation starts, just like they would at market open after prior day's trading
+            DateTime priorWorkingDay = HolidayCalendarService.Instance.GetPriorWorkingDay(targetDate);
+
+            // Count range bars for prior working day for diagnostics
+            int priorDayRangeBarCount = 0;
+            int simDayRangeBarCount = 0;
+            for (int i = 0; i < rangeBars.Count; i++)
+            {
+                var barDate = rangeBars.GetTime(i).Date;
+                if (barDate == priorWorkingDay) priorDayRangeBarCount++;
+                else if (barDate == targetDate) simDayRangeBarCount++;
+            }
+
+            _log.Info($"[VP] {state.Symbol} BuildSimReplayData: priorDay={priorWorkingDay:MM-dd}, simDay={targetDate:MM-dd}, " +
+                $"priorDayRangeBars={priorDayRangeBarCount}, simDayRangeBars={simDayRangeBarCount}");
+
+            // Build tick index for prior day
+            var priorDayTickTimes = new List<(DateTime time, int index)>();
+            if (tickBars != null)
+            {
+                for (int i = 0; i < tickBars.Count; i++)
+                {
+                    var t = tickBars.GetTime(i);
+                    if (t.Date == priorWorkingDay)
+                        priorDayTickTimes.Add((t, i));
+                }
+            }
+
+            _log.Info($"[VP] {state.Symbol} priorDayTicks={priorDayTickTimes.Count}, simDayTicks(passedIn)={tickTimes.Count}");
+
+            int priorDayBarsProcessed = 0;
+            double priorDayLastPrice = 0;
+
+            if (priorDayTickTimes.Count > 0)
+            {
+                // Process all prior day bars to populate VP engines
+                DateTime prevBarTime = DateTime.MinValue;
+                int tickSearchStart = 0;
+
+                for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
+                {
+                    DateTime barTime = rangeBars.GetTime(barIdx);
+
+                    // Only process bars from prior working day
+                    if (barTime.Date != priorWorkingDay)
+                    {
+                        prevBarTime = barTime;
+                        continue;
+                    }
+
+                    double closePrice = rangeBars.GetClose(barIdx);
+
+                    // Start new bar for CD momentum engine
+                    state.CDMomoEngine.StartNewBar();
+
+                    // Process ticks for this bar
+                    while (tickSearchStart < priorDayTickTimes.Count)
+                    {
+                        var (tickTime, tickIdx) = priorDayTickTimes[tickSearchStart];
+
+                        if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime)
+                        {
+                            tickSearchStart++;
+                            continue;
+                        }
+
+                        if (tickTime > barTime) break;
+
+                        double price = tickBars.GetClose(tickIdx);
+                        long volume = tickBars.GetVolume(tickIdx);
+                        bool isBuy = price >= priorDayLastPrice;
+
+                        state.SessionVPEngine.AddTick(price, volume, isBuy);
+                        state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+                        state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
+
+                        priorDayLastPrice = price;
+                        tickSearchStart++;
+                    }
+
+                    // Update VP close price and expire old rolling data
+                    state.SessionVPEngine.SetClosePrice(closePrice);
+                    state.RollingVPEngine.SetClosePrice(closePrice);
+                    state.RollingVPEngine.ExpireOldData(barTime);
+
+                    // Process Price Momentum
+                    state.PriceMomoEngine.ProcessBar(closePrice, barTime);
+
+                    // Close CD momentum bar
+                    state.CDMomoEngine.CloseBar(barTime);
+
+                    prevBarTime = barTime;
+                    priorDayLastPrice = closePrice;
+                    priorDayBarsProcessed++;
+                }
+
+                // After processing prior day, calculate final VP state and update display
+                if (priorDayBarsProcessed > 0)
+                {
+                    // Calculate session VP for final state display
+                    var sessResult = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+                    var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+
+                    // Update trend tracking
+                    state.LastSessionTrend = DetermineTrend(sessResult);
+                    state.LastRollingTrend = DetermineTrend(rollResult);
+                    state.LastClosePrice = priorDayLastPrice;
+
+                    // Update the row with prior day's final metrics
+                    HvnTrend sessTrend = state.LastSessionTrend;
+                    HvnTrend rollTrend = state.LastRollingTrend;
+
+                    if (state.Type == "CE")
+                    {
+                        state.Row.CEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
+                        state.Row.CEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
+                        state.Row.CETrendSess = sessTrend;
+                        state.Row.CEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
+                        state.Row.CEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
+                        state.Row.CETrendRoll = rollTrend;
+                    }
+                    else
+                    {
+                        state.Row.PEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
+                        state.Row.PEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
+                        state.Row.PETrendSess = sessTrend;
+                        state.Row.PEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
+                        state.Row.PEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
+                        state.Row.PETrendRoll = rollTrend;
+                    }
+
+                    _log.Info($"[VP] {state.Symbol} prior day {priorWorkingDay:yyyy-MM-dd} processed: {priorDayBarsProcessed} bars, " +
+                        $"SessHVN B={sessResult.HVNBuyCount}/S={sessResult.HVNSellCount}, RollHVN B={rollResult.HVNBuyCount}/S={rollResult.HVNSellCount}");
+                }
+            }
+            else
+            {
+                _log.Warn($"[VP] {state.Symbol} no prior day tick data found for {priorWorkingDay:yyyy-MM-dd}");
+            }
+
+            // STEP 2: Reset VP engines for simulation day (fresh session, but with populated momentum history)
+            // NOTE: Session VP should reset for new trading day (it's a fresh session at 9:15)
+            // Rolling VP intentionally NOT reset - it carries forward 60-min window of data
+            state.SessionVPEngine.Reset(0.50); // Reset session VP for new day
+
+            // Update row to reflect session reset (session is now empty, rolling has carryover)
+            // Session values reset to 0 (fresh day), Rolling values retain prior day's end values
+            if (state.Type == "CE")
+            {
+                state.Row.CEHvnBSess = "0";
+                state.Row.CEHvnSSess = "0";
+                state.Row.CETrendSess = HvnTrend.Neutral;
+                state.Row.CETrendSessTime = "";
+                // Rolling values intentionally kept from prior day processing above
+            }
+            else
+            {
+                state.Row.PEHvnBSess = "0";
+                state.Row.PEHvnSSess = "0";
+                state.Row.PETrendSess = HvnTrend.Neutral;
+                state.Row.PETrendSessTime = "";
+                // Rolling values intentionally kept from prior day processing above
+            }
+
+            // Reset session trend tracking for new day
+            state.LastSessionTrend = HvnTrend.Neutral;
+            state.SessionTrendOnsetTime = null;
+            // Rolling trend tracking intentionally kept
+
+            // Store last price from prior day for determining buy/sell direction on first sim ticks
+            state.SimLastPrice = priorDayLastPrice > 0 ? priorDayLastPrice : 0;
+
+            // STEP 3: Build list of simulation day bars to replay
             state.SimReplayBars = new List<(DateTime BarTime, double ClosePrice, DateTime PrevBarTime)>();
-            DateTime prevBarTime = DateTime.MinValue;
+            DateTime prevSimBarTime = DateTime.MinValue;
 
             for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
             {
@@ -677,23 +985,23 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 // Skip bars not from target date
                 if (barTime.Date != targetDate)
                 {
-                    prevBarTime = barTime;
+                    prevSimBarTime = barTime;
                     continue;
                 }
 
                 double closePrice = rangeBars.GetClose(barIdx);
-                state.SimReplayBars.Add((barTime, closePrice, prevBarTime));
-                prevBarTime = barTime;
+                state.SimReplayBars.Add((barTime, closePrice, prevSimBarTime));
+                prevSimBarTime = barTime;
             }
 
             // Store tick times for replay
             state.SimTickTimes = tickTimes;
             state.SimReplayBarIndex = 0;
             state.SimReplayTickIndex = 0;
-            state.SimLastPrice = 0;
             state.SimDataReady = true;
 
-            _log.Info($"[VP] {state.Symbol} simulation replay data ready: {state.SimReplayBars.Count} bars, {tickTimes.Count} ticks");
+            _log.Info($"[VP] {state.Symbol} simulation replay data ready: {state.SimReplayBars.Count} bars for {targetDate:yyyy-MM-dd}, " +
+                $"{tickTimes.Count} ticks (prior day pre-populated: {priorDayBarsProcessed} bars)");
         }
 
         /// <summary>
