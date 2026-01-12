@@ -758,8 +758,12 @@ namespace ZerodhaDatafeedAdapter.Services
             _log.Info($"[SimulationService] Speed set to {multiplier}x");
         }
 
+        // Maximum ticks to process per timer callback to prevent UI freeze
+        private const int MAX_TICKS_PER_CALLBACK = 500;
+
         /// <summary>
-        /// Playback timer tick handler - processes ticks based on elapsed wall-clock time
+        /// Playback timer tick handler - processes ticks based on elapsed wall-clock time.
+        /// Limits ticks per callback to prevent UI thread starvation at high speeds.
         /// </summary>
         private void OnPlaybackTick(object sender, EventArgs e)
         {
@@ -785,9 +789,9 @@ namespace ZerodhaDatafeedAdapter.Services
             // Update the target simulation time - this accumulates over each timer tick
             _targetSimTime = _targetSimTime + simTimeElapsed;
 
-            // Process all ticks up to _targetSimTime
+            // Process ticks up to _targetSimTime, but limit to MAX_TICKS_PER_CALLBACK to prevent UI freeze
             int ticksInjected = 0;
-            while (_currentTickIndex < _tickTimeline.Count)
+            while (_currentTickIndex < _tickTimeline.Count && ticksInjected < MAX_TICKS_PER_CALLBACK)
             {
                 var tick = _tickTimeline[_currentTickIndex];
 

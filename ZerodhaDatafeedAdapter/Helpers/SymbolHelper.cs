@@ -235,8 +235,24 @@ namespace ZerodhaDatafeedAdapter.Helpers
         #region Strike Extraction
 
         /// <summary>
+        /// Known option underlyings for strike extraction.
+        /// Ordered by length (longest first) to match correctly.
+        /// </summary>
+        private static readonly string[] KnownOptionUnderlyings = new[]
+        {
+            "MIDCPNIFTY", // 10 chars
+            "BANKNIFTY",  // 9 chars
+            "FINNIFTY",   // 8 chars
+            "SENSEX",     // 6 chars
+            "NIFTY",      // 5 chars
+            "BANKEX"      // 6 chars
+        };
+
+        /// <summary>
         /// Extract strike price from an option symbol.
-        /// Works with Zerodha format options (e.g., NIFTY25JAN24700CE, SENSEX2610185000PE).
+        /// Works with Zerodha format options:
+        /// - Monthly: NIFTY25JAN24700CE (underlying + YY + MMM + strike + CE/PE)
+        /// - Weekly: SENSEX2610884800CE (underlying + YY + M + DD + strike + CE/PE)
         /// </summary>
         /// <param name="symbol">The option symbol</param>
         /// <param name="strike">Output strike price if found</param>
@@ -248,24 +264,99 @@ namespace ZerodhaDatafeedAdapter.Helpers
 
             try
             {
+                string upperSymbol = symbol.ToUpperInvariant();
+
                 // Find option type suffix (CE or PE)
-                int optTypeIdx = symbol.LastIndexOf("CE");
-                if (optTypeIdx < 0) optTypeIdx = symbol.LastIndexOf("PE");
+                int optTypeIdx = upperSymbol.LastIndexOf("CE");
+                if (optTypeIdx < 0) optTypeIdx = upperSymbol.LastIndexOf("PE");
                 if (optTypeIdx < 0) return false;
 
-                // Extract numeric characters before the option type
-                string strikeStr = "";
-                for (int i = optTypeIdx - 1; i >= 0 && char.IsDigit(symbol[i]); i--)
+                // Find which underlying this symbol belongs to
+                string underlying = null;
+                foreach (var u in KnownOptionUnderlyings)
                 {
-                    strikeStr = symbol[i] + strikeStr;
+                    if (upperSymbol.StartsWith(u))
+                    {
+                        underlying = u;
+                        break;
+                    }
                 }
 
-                return decimal.TryParse(strikeStr, out strike);
+                if (underlying == null)
+                {
+                    // Unknown underlying - fall back to extracting all digits before CE/PE
+                    // This may include date digits but is better than nothing
+                    string strikeStr = "";
+                    for (int i = optTypeIdx - 1; i >= 0 && char.IsDigit(symbol[i]); i--)
+                    {
+                        strikeStr = symbol[i] + strikeStr;
+                    }
+                    return decimal.TryParse(strikeStr, out strike);
+                }
+
+                // Extract the part between underlying and CE/PE
+                string middle = upperSymbol.Substring(underlying.Length, optTypeIdx - underlying.Length);
+
+                // Check if this is monthly format (contains month abbreviation like JAN, FEB, etc.)
+                bool isMonthly = ContainsMonthAbbreviation(middle);
+
+                if (isMonthly)
+                {
+                    // Monthly format: YY + MMM + STRIKE
+                    // Find where the month abbreviation ends (after 3 letters)
+                    int monthEnd = FindMonthAbbreviationEnd(middle);
+                    if (monthEnd > 0 && monthEnd < middle.Length)
+                    {
+                        string strikeStr = middle.Substring(monthEnd);
+                        return decimal.TryParse(strikeStr, out strike);
+                    }
+                }
+                else
+                {
+                    // Weekly format: YY + M + DD + STRIKE (where M is 1-9 or O/N/D)
+                    // Format is: 2 digits (year) + 1 char (month) + 2 digits (day) + strike
+                    // Total prefix before strike is 5 characters (e.g., "26108" for Jan 8, 2026)
+                    if (middle.Length > 5)
+                    {
+                        string strikeStr = middle.Substring(5); // Skip YYMDD
+                        return decimal.TryParse(strikeStr, out strike);
+                    }
+                }
+
+                return false;
             }
             catch
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Check if a string contains a month abbreviation (JAN, FEB, etc.).
+        /// </summary>
+        private static bool ContainsMonthAbbreviation(string text)
+        {
+            string[] months = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+            foreach (var month in months)
+            {
+                if (text.Contains(month)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Find the end index of the month abbreviation in a string.
+        /// Returns the index after the month (where strike begins).
+        /// </summary>
+        private static int FindMonthAbbreviationEnd(string text)
+        {
+            string[] months = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+            foreach (var month in months)
+            {
+                int idx = text.IndexOf(month, StringComparison.Ordinal);
+                if (idx >= 0) return idx + 3; // Return position after month abbreviation
+            }
+            return -1;
         }
 
         /// <summary>
