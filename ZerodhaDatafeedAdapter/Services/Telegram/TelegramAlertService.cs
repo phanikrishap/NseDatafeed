@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
@@ -195,9 +196,8 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
         {
             // Process alerts with rate limiting to respect Telegram API limits
             var alertSubscription = _alertSubject
-                .ObserveOn(System.Reactive.Concurrency.TaskPoolScheduler.Default)
                 .Subscribe(
-                    async alert => await ProcessAlertAsync(alert),
+                    alert => Task.Run(async () => await ProcessAlertAsync(alert)),
                     ex => Logger.Error($"[TelegramAlertService] Alert pipeline error: {ex.Message}"));
 
             _subscriptions.Add(alertSubscription);
@@ -283,8 +283,7 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
                     var chatId = new ChatId(long.Parse(_settings.ChatId));
                     await _botClient.SendMessage(
                         chatId: chatId,
-                        text: alert.FormattedMessage,
-                        parseMode: ParseMode.None);
+                        text: alert.FormattedMessage);
 
                     Logger.Debug($"[TelegramAlertService] Sent: {alert.FormattedMessage}");
 
@@ -571,7 +570,6 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
                     await _botClient.SendMessage(
                         chatId: chatId,
                         text: response,
-                        parseMode: ParseMode.None,
                         cancellationToken: cancellationToken);
                 }
                 catch (Exception ex)
