@@ -13,6 +13,7 @@ using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.TBS;
+using ZerodhaDatafeedAdapter.Services.Telegram;
 
 namespace ZerodhaDatafeedAdapter.Services
 {
@@ -267,6 +268,16 @@ namespace ZerodhaDatafeedAdapter.Services
 
             OnSummaryUpdated();
             TBSLogger.Info($"[TBSExecutionService] Initialized {_executionStates.Count} tranches");
+
+            // Send Telegram alert for TBS Module loaded
+            if (_executionStates.Count > 0)
+            {
+                var firstConfig = _executionStates.First().Config;
+                TelegramAlertService.Instance.SendTBSModuleLoadedAlert(
+                    underlying ?? firstConfig?.Underlying ?? "Unknown",
+                    dte ?? firstConfig?.DTE ?? 0,
+                    _executionStates.Count);
+            }
         }
 
         private TBSExecutionState CreateExecutionState(TBSConfigEntry config, TimeSpan now, bool isSimulationActive)
@@ -627,6 +638,10 @@ namespace ZerodhaDatafeedAdapter.Services
                     leg.ExitTime = DateTime.Now;
                     leg.ExitReason = $"SL Hit @ {leg.CurrentPrice:F2}";
                     anyLegHitSLThisTick = true;
+
+                    // Send Telegram alert for individual SL
+                    TelegramAlertService.Instance.SendStoplossAlert(
+                        state.TrancheId, leg.OptionType, leg.CurrentPrice);
                 }
             }
 
@@ -641,6 +656,10 @@ namespace ZerodhaDatafeedAdapter.Services
                 }
                 state.SLToCostApplied = true;
                 state.Message = "SL moved to cost (hedge)";
+
+                // Send Telegram alert for profit protection
+                TelegramAlertService.Instance.SendProfitProtectionAlert(
+                    state.TrancheId, "SL moved to cost (hedge)");
             }
 
             // Check combined SL
@@ -678,6 +697,9 @@ namespace ZerodhaDatafeedAdapter.Services
                         leg.ExitTime = DateTime.Now;
                         leg.ExitReason = "Combined SL Hit";
                     }
+
+                    // Send Telegram alert for combined SL
+                    TelegramAlertService.Instance.SendCombinedSLAlert(state.TrancheId, currentPremium);
                 }
             }
         }
@@ -704,6 +726,9 @@ namespace ZerodhaDatafeedAdapter.Services
                 }
                 state.TargetHit = true;
                 state.Message = $"Target hit @ P&L {state.CombinedPnL:F2}";
+
+                // Send Telegram alert for target hit
+                TelegramAlertService.Instance.SendTargetHitAlert(state.TrancheId, state.CombinedPnL);
 
                 if (!state.StoxxoExitCalled && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
                 {
@@ -790,6 +815,10 @@ namespace ZerodhaDatafeedAdapter.Services
                 {
                     state.TargetProfitThreshold = state.CombinedEntryPremium * state.TargetPercent * state.Quantity * state.LotSize;
                 }
+
+                // Send Telegram alert for tranche entry
+                TelegramAlertService.Instance.SendTrancheEntryAlert(
+                    state.TrancheId, state.Strike, ceLeg.EntryPrice, peLeg.EntryPrice);
             }
 
             TBSLogger.Info($"Tranche #{state.TrancheId} Locked strike {state.Strike}");

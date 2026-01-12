@@ -18,6 +18,7 @@ using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Instruments;
+using ZerodhaDatafeedAdapter.Services.Telegram;
 
 namespace ZerodhaDatafeedAdapter.Services.Analysis
 {
@@ -625,6 +626,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 // Fire legacy event for backward compatibility
                 PriceSyncReady?.Invoke();
+
+                // Send Telegram alert for Option Chain generated
+                TelegramAlertService.Instance.SendOptionChainAlert(underlying, dte, atmStrike);
             }
         }
 

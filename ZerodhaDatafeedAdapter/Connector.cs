@@ -11,6 +11,7 @@ using ZerodhaDatafeedAdapter.Services.MarketData;
 using ZerodhaDatafeedAdapter.Services.Zerodha;
 using ZerodhaDatafeedAdapter.ViewModels;
 using ZerodhaDatafeedAdapter.Logging;
+using ZerodhaDatafeedAdapter.Services.Telegram;
 using log4net;
 using NinjaTrader.Adapter;
 using NinjaTrader.Cbi;
@@ -201,6 +202,20 @@ namespace ZerodhaDatafeedAdapter
                 StartupLogger.LogConfigurationLoad(true);
             }
 
+            // Initialize Telegram integration (non-blocking)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await TelegramAlertService.Instance.InitializeAsync();
+                    Logger.Info("[Connector] Telegram integration initialized");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[Connector] Telegram initialization error (non-fatal): {ex.Message}");
+                }
+            });
+
             // Check if simulation mode is enabled - if so, skip live data initialization
             if (_configManager.IsSimulationModeEnabled)
             {
@@ -251,6 +266,9 @@ namespace ZerodhaDatafeedAdapter
                         NinjaTrader.NinjaScript.NinjaScript.Log(
                             "[ZerodhaAdapter] Zerodha access token is valid.",
                             NinjaTrader.Cbi.LogLevel.Information);
+
+                        // Send Telegram alert
+                        TelegramAlertService.Instance.SendTokenValidationAlert(true);
                     }
                     else
                     {
@@ -262,6 +280,9 @@ namespace ZerodhaDatafeedAdapter
                         NinjaTrader.NinjaScript.NinjaScript.Log(
                             "[ZerodhaAdapter] WARNING: Failed to obtain valid Zerodha access token. Manual login may be required.",
                             NinjaTrader.Cbi.LogLevel.Warning);
+
+                        // Send Telegram alert
+                        TelegramAlertService.Instance.SendTokenValidationAlert(false, "Manual login may be required");
                     }
 
                     // Signal token ready via TaskCompletionSource (safe for late subscribers)

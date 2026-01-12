@@ -119,6 +119,9 @@
     <Reference Include="FilterDataGrid">
       <HintPath>..\References\FilterDataGrid.dll</HintPath>
     </Reference>
+    <Reference Include="Telegram.Bot">
+      <HintPath>..\References\Telegram.Bot.dll</HintPath>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="AssemblyInfo.cs" />
@@ -299,6 +302,9 @@
     <Compile Include="AddOns\OptionSignals\Models\UnderlyingBarHistory.cs" />
     <Compile Include="AddOns\OptionSignals\OptionSignalsViewModel.cs" />
     <Compile Include="AddOns\OptionSignals\OptionSignalsWindow.cs" />
+    <!-- Telegram Integration -->
+    <Compile Include="Models\TelegramSettings.cs" />
+    <Compile Include="Services\Telegram\TelegramAlertService.cs" />
   </ItemGroup>
   <ItemGroup>
     <Page Include="Controls\CircularProgressBar.xaml">

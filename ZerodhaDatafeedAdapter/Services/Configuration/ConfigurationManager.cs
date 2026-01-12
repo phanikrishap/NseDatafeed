@@ -44,6 +44,9 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         // Execution settings
         private ExecutionSettings _executionSettings = new ExecutionSettings();
 
+        // Telegram settings
+        private TelegramSettings _telegramSettings = new TelegramSettings();
+
         /// <summary>
         /// Gets the singleton instance of the ConfigurationManager
         /// </summary>
@@ -101,6 +104,11 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         /// Gets the execution settings from config.json
         /// </summary>
         public ExecutionSettings ExecutionSettings => _executionSettings;
+
+        /// <summary>
+        /// Gets the Telegram settings from config.json
+        /// </summary>
+        public TelegramSettings TelegramSettings => _telegramSettings;
 
         /// <summary>
         /// Private constructor to enforce singleton pattern
@@ -230,6 +238,20 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
                 {
                     _executionSettings = new ExecutionSettings();
                     Logger.Info("[ConfigurationManager] ExecutionSettings not found, using defaults");
+                }
+
+                // Load Telegram settings
+                JObject telegramSettings = _config["TelegramSettings"] as JObject;
+                if (telegramSettings != null)
+                {
+                    _telegramSettings = telegramSettings.ToObject<TelegramSettings>() ?? new TelegramSettings();
+                    Logger.Info($"[ConfigurationManager] TelegramSettings loaded - Enabled={_telegramSettings.Enabled}, " +
+                                $"SendStartupAlerts={_telegramSettings.SendStartupAlerts}, EnableBotCommands={_telegramSettings.EnableBotCommands}");
+                }
+                else
+                {
+                    _telegramSettings = new TelegramSettings();
+                    Logger.Info("[ConfigurationManager] TelegramSettings not found, Telegram integration disabled");
                 }
 
                 return true;
