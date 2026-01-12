@@ -1,15 +1,15 @@
 using System;
 using System.Collections.Concurrent;
 using System.Linq;
+using System.Net.Http;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Telegram.Bot;
-using Telegram.Bot.Polling;
-using Telegram.Bot.Types;
-using Telegram.Bot.Types.Enums;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Configuration;
 
@@ -57,11 +57,13 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
         public string Command { get; set; }
         public string[] Arguments { get; set; }
         public long ChatId { get; set; }
+        public int MessageId { get; set; }
         public DateTime ReceivedAt { get; set; } = DateTime.Now;
     }
 
     /// <summary>
-    /// Telegram Alert Service - Event-driven Rx-based Telegram integration.
+    /// Lightweight Telegram Alert Service using direct HTTP API calls.
+    /// No external Telegram.Bot dependency - uses HttpClient directly.
     /// Provides one-way alerts and two-way bot command handling for TBS control.
     /// </summary>
     public class TelegramAlertService : IDisposable
@@ -74,23 +76,32 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
 
         #endregion
 
+        #region Constants
+
+        private const string TELEGRAM_API_BASE = "https://api.telegram.org/bot";
+        private const int POLLING_TIMEOUT_SECONDS = 30;
+        private const int MIN_MESSAGE_INTERVAL_MS = 100;
+
+        #endregion
+
         #region Fields
 
-        private TelegramBotClient _botClient;
+        private HttpClient _httpClient;
         private TelegramSettings _settings;
-        private CancellationTokenSource _receivingCts;
+        private CancellationTokenSource _pollingCts;
+        private Task _pollingTask;
+        private long _lastUpdateId = 0;
         private bool _isInitialized = false;
         private bool _isDisposed = false;
+        private string _botUsername;
 
         // Rx subjects for event-driven architecture
         private readonly Subject<TelegramAlert> _alertSubject = new Subject<TelegramAlert>();
         private readonly Subject<TelegramCommand> _commandSubject = new Subject<TelegramCommand>();
         private readonly CompositeDisposable _subscriptions = new CompositeDisposable();
 
-        // Message queue for rate limiting (Telegram has limits)
-        private readonly ConcurrentQueue<TelegramAlert> _messageQueue = new ConcurrentQueue<TelegramAlert>();
+        // Rate limiting
         private readonly SemaphoreSlim _sendSemaphore = new SemaphoreSlim(1, 1);
-        private const int MIN_MESSAGE_INTERVAL_MS = 100; // Respect Telegram rate limits
 
         #endregion
 
@@ -99,7 +110,7 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
         /// <summary>
         /// Whether the service is properly initialized and ready
         /// </summary>
-        public bool IsReady => _isInitialized && _settings?.IsValid == true && _botClient != null;
+        public bool IsReady => _isInitialized && _settings?.IsValid == true && _httpClient != null;
 
         /// <summary>
         /// Stream of incoming bot commands (for TBS control)
@@ -111,13 +122,18 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
         /// </summary>
         public TelegramSettings Settings => _settings;
 
+        /// <summary>
+        /// Bot username (available after initialization)
+        /// </summary>
+        public string BotUsername => _botUsername;
+
         #endregion
 
         #region Constructor
 
         private TelegramAlertService()
         {
-            Logger.Info("[TelegramAlertService] Instance created");
+            Logger.Info("[TelegramAlertService] Instance created (lightweight HTTP implementation)");
         }
 
         #endregion
@@ -153,12 +169,25 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
                     return;
                 }
 
-                // Initialize bot client
-                _botClient = new TelegramBotClient(_settings.Token);
+                // Initialize HTTP client
+                _httpClient = new HttpClient
+                {
+                    Timeout = TimeSpan.FromSeconds(POLLING_TIMEOUT_SECONDS + 10)
+                };
 
                 // Test connection by getting bot info
-                var me = await _botClient.GetMe();
-                Logger.Info($"[TelegramAlertService] Bot connected: @{me.Username}");
+                var me = await GetMeAsync();
+                if (me == null)
+                {
+                    Logger.Error("[TelegramAlertService] Failed to connect to Telegram API");
+                    return;
+                }
+
+                _botUsername = me.Value<string>("username");
+                Logger.Info($"[TelegramAlertService] Bot connected: @{_botUsername}");
+
+                // Set bot commands menu
+                await SetBotCommandsAsync();
 
                 // Setup alert processing pipeline
                 SetupAlertPipeline();
@@ -166,7 +195,7 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
                 // Start receiving commands if enabled
                 if (_settings.EnableBotCommands)
                 {
-                    StartReceivingCommands();
+                    StartPolling();
                 }
 
                 _isInitialized = true;
@@ -190,11 +219,10 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
         }
 
         /// <summary>
-        /// Setup the Rx pipeline for processing alerts with rate limiting
+        /// Setup the Rx pipeline for processing alerts
         /// </summary>
         private void SetupAlertPipeline()
         {
-            // Process alerts with rate limiting to respect Telegram API limits
             var alertSubscription = _alertSubject
                 .Subscribe(
                     alert => Task.Run(async () => await ProcessAlertAsync(alert)),
@@ -204,25 +232,252 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
             Logger.Debug("[TelegramAlertService] Alert pipeline configured");
         }
 
+        #endregion
+
+        #region Telegram API Methods
+
         /// <summary>
-        /// Start receiving bot commands (polling mode)
+        /// Get bot information (getMe API)
         /// </summary>
-        private void StartReceivingCommands()
+        private async Task<JObject> GetMeAsync()
         {
-            _receivingCts = new CancellationTokenSource();
-
-            var receiverOptions = new ReceiverOptions
+            try
             {
-                AllowedUpdates = new[] { UpdateType.Message }
-            };
+                var response = await _httpClient.GetStringAsync($"{TELEGRAM_API_BASE}{_settings.Token}/getMe");
+                var json = JObject.Parse(response);
+                if (json.Value<bool>("ok"))
+                {
+                    return json["result"] as JObject;
+                }
+                Logger.Error($"[TelegramAlertService] getMe failed: {json}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[TelegramAlertService] getMe exception: {ex.Message}");
+                return null;
+            }
+        }
 
-            _botClient.StartReceiving(
-                updateHandler: HandleUpdateAsync,
-                errorHandler: HandlePollingErrorAsync,
-                receiverOptions: receiverOptions,
-                cancellationToken: _receivingCts.Token);
+        /// <summary>
+        /// Set the bot's command menu (setMyCommands API)
+        /// </summary>
+        private async Task<bool> SetBotCommandsAsync()
+        {
+            try
+            {
+                var commands = new[]
+                {
+                    new { command = "help", description = "Show available commands" },
+                    new { command = "status", description = "Show current TBS status" },
+                    new { command = "pnl", description = "Show P&L summary" },
+                    new { command = "trailsl", description = "Set trailing SL (usage: /trailsl <id> <%)>" },
+                    new { command = "squareoff", description = "Square off a tranche (usage: /squareoff <id>)" },
+                    new { command = "squareoffall", description = "Square off all live tranches" },
+                    new { command = "profitprotect", description = "Apply profit protection (usage: /profitprotect <threshold>)" }
+                };
 
-            Logger.Info("[TelegramAlertService] Started receiving bot commands");
+                var payload = new { commands = commands };
+
+                var content = new StringContent(
+                    JsonConvert.SerializeObject(payload),
+                    Encoding.UTF8,
+                    "application/json");
+
+                var response = await _httpClient.PostAsync(
+                    $"{TELEGRAM_API_BASE}{_settings.Token}/setMyCommands",
+                    content);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    Logger.Info("[TelegramAlertService] Bot commands menu updated successfully");
+                    return true;
+                }
+
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.Warn($"[TelegramAlertService] setMyCommands failed: {response.StatusCode} - {errorBody}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[TelegramAlertService] setMyCommands exception: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Send a text message (sendMessage API)
+        /// </summary>
+        private async Task<bool> SendMessageAsync(string chatId, string text)
+        {
+            try
+            {
+                var payload = new
+                {
+                    chat_id = chatId,
+                    text = text,
+                    parse_mode = "HTML"
+                };
+
+                var content = new StringContent(
+                    JsonConvert.SerializeObject(payload),
+                    Encoding.UTF8,
+                    "application/json");
+
+                var response = await _httpClient.PostAsync(
+                    $"{TELEGRAM_API_BASE}{_settings.Token}/sendMessage",
+                    content);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    return true;
+                }
+
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.Error($"[TelegramAlertService] sendMessage failed: {response.StatusCode} - {errorBody}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[TelegramAlertService] sendMessage exception: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Get updates (long polling)
+        /// </summary>
+        private async Task<JArray> GetUpdatesAsync(CancellationToken ct)
+        {
+            try
+            {
+                var url = $"{TELEGRAM_API_BASE}{_settings.Token}/getUpdates?timeout={POLLING_TIMEOUT_SECONDS}&offset={_lastUpdateId + 1}";
+                var response = await _httpClient.GetStringAsync(url);
+                var json = JObject.Parse(response);
+
+                if (json.Value<bool>("ok"))
+                {
+                    return json["result"] as JArray;
+                }
+
+                Logger.Error($"[TelegramAlertService] getUpdates failed: {json}");
+                return null;
+            }
+            catch (TaskCanceledException)
+            {
+                // Normal cancellation
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[TelegramAlertService] getUpdates exception: {ex.Message}");
+                return null;
+            }
+        }
+
+        #endregion
+
+        #region Polling
+
+        /// <summary>
+        /// Start long polling for incoming commands
+        /// </summary>
+        private void StartPolling()
+        {
+            _pollingCts = new CancellationTokenSource();
+            _pollingTask = Task.Run(async () => await PollForUpdatesAsync(_pollingCts.Token));
+            Logger.Info("[TelegramAlertService] Started polling for commands");
+        }
+
+        /// <summary>
+        /// Poll for updates continuously
+        /// </summary>
+        private async Task PollForUpdatesAsync(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    var updates = await GetUpdatesAsync(ct);
+                    if (updates != null)
+                    {
+                        foreach (var update in updates)
+                        {
+                            await ProcessUpdateAsync(update as JObject);
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[TelegramAlertService] Polling error: {ex.Message}");
+                    await Task.Delay(5000, ct); // Wait before retry
+                }
+            }
+
+            Logger.Info("[TelegramAlertService] Polling stopped");
+        }
+
+        /// <summary>
+        /// Process a single update from Telegram
+        /// </summary>
+        private async Task ProcessUpdateAsync(JObject update)
+        {
+            if (update == null) return;
+
+            try
+            {
+                _lastUpdateId = update.Value<long>("update_id");
+
+                var message = update["message"] as JObject;
+                if (message == null) return;
+
+                var text = message.Value<string>("text");
+                if (string.IsNullOrEmpty(text)) return;
+
+                var chat = message["chat"] as JObject;
+                var chatId = chat?.Value<long>("id") ?? 0;
+                var messageId = message.Value<int>("message_id");
+
+                // Only process commands (messages starting with /)
+                if (!text.StartsWith("/")) return;
+
+                // Parse command
+                var parts = text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                var command = parts[0].ToLowerInvariant();
+
+                // Remove @botname suffix if present
+                if (command.Contains("@"))
+                {
+                    command = command.Split('@')[0];
+                }
+
+                var args = parts.Length > 1 ? new string[parts.Length - 1] : Array.Empty<string>();
+                if (args.Length > 0) Array.Copy(parts, 1, args, 0, args.Length);
+
+                Logger.Info($"[TelegramAlertService] Received command: {command} from chat {chatId}");
+
+                // Create command object and publish to stream
+                var cmd = new TelegramCommand
+                {
+                    Command = command,
+                    Arguments = args,
+                    ChatId = chatId,
+                    MessageId = messageId
+                };
+
+                _commandSubject.OnNext(cmd);
+
+                // Handle built-in commands
+                await HandleBuiltInCommandAsync(cmd);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[TelegramAlertService] Error processing update: {ex.Message}");
+            }
         }
 
         #endregion
@@ -280,12 +535,11 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
                 await _sendSemaphore.WaitAsync();
                 try
                 {
-                    var chatId = new ChatId(long.Parse(_settings.ChatId));
-                    await _botClient.SendMessage(
-                        chatId: chatId,
-                        text: alert.FormattedMessage);
-
-                    Logger.Debug($"[TelegramAlertService] Sent: {alert.FormattedMessage}");
+                    var success = await SendMessageAsync(_settings.ChatId, alert.FormattedMessage);
+                    if (success)
+                    {
+                        Logger.Debug($"[TelegramAlertService] Sent: {alert.FormattedMessage}");
+                    }
 
                     // Rate limiting
                     await Task.Delay(MIN_MESSAGE_INTERVAL_MS);
@@ -334,21 +588,11 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
 
         #region Convenience Alert Methods
 
-        /// <summary>
-        /// Send startup alert
-        /// </summary>
         public void SendStartupAlert(string message)
         {
-            SendAlert(new TelegramAlert
-            {
-                Type = TelegramAlertType.Startup,
-                Message = message
-            });
+            SendAlert(new TelegramAlert { Type = TelegramAlertType.Startup, Message = message });
         }
 
-        /// <summary>
-        /// Send token validation result alert
-        /// </summary>
         public void SendTokenValidationAlert(bool success, string details = null)
         {
             var message = success
@@ -363,9 +607,6 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
             });
         }
 
-        /// <summary>
-        /// Send option chain generated alert
-        /// </summary>
         public void SendOptionChainAlert(string underlying, int dte, double atmStrike)
         {
             SendAlert(new TelegramAlert
@@ -375,9 +616,6 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
             });
         }
 
-        /// <summary>
-        /// Send TBS module loaded alert
-        /// </summary>
         public void SendTBSModuleLoadedAlert(string underlying, int dte, int trancheCount)
         {
             SendAlert(new TelegramAlert
@@ -387,9 +625,6 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
             });
         }
 
-        /// <summary>
-        /// Send tranche entry alert
-        /// </summary>
         public void SendTrancheEntryAlert(int trancheId, decimal strike, decimal cePremium, decimal pePremium)
         {
             SendAlert(new TelegramAlert
@@ -399,9 +634,6 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
             });
         }
 
-        /// <summary>
-        /// Send tranche exit alert
-        /// </summary>
         public void SendTrancheExitAlert(int trancheId, decimal pnl, string reason)
         {
             var pnlText = pnl >= 0 ? $"+{pnl:F2}" : $"{pnl:F2}";
@@ -412,59 +644,44 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
             });
         }
 
-        /// <summary>
-        /// Send stoploss triggered alert
-        /// </summary>
         public void SendStoplossAlert(int trancheId, string legType, decimal triggerPrice)
         {
             SendAlert(new TelegramAlert
             {
                 Type = TelegramAlertType.StoplossTriggered,
-                Message = $"SL TRIGGERED - Tranche #{trancheId} {legType} @ {triggerPrice:F2}",
+                Message = $"🚨 SL TRIGGERED - Tranche #{trancheId} {legType} @ {triggerPrice:F2}",
                 IsUrgent = true
             });
         }
 
-        /// <summary>
-        /// Send combined SL triggered alert
-        /// </summary>
         public void SendCombinedSLAlert(int trancheId, decimal premium)
         {
             SendAlert(new TelegramAlert
             {
                 Type = TelegramAlertType.StoplossTriggered,
-                Message = $"COMBINED SL TRIGGERED - Tranche #{trancheId} @ premium {premium:F2}",
+                Message = $"🚨 COMBINED SL TRIGGERED - Tranche #{trancheId} @ premium {premium:F2}",
                 IsUrgent = true
             });
         }
 
-        /// <summary>
-        /// Send target hit alert
-        /// </summary>
         public void SendTargetHitAlert(int trancheId, decimal pnl)
         {
             SendAlert(new TelegramAlert
             {
                 Type = TelegramAlertType.TargetHit,
-                Message = $"TARGET HIT - Tranche #{trancheId} P&L: +{pnl:F2}"
+                Message = $"🎯 TARGET HIT - Tranche #{trancheId} P&L: +{pnl:F2}"
             });
         }
 
-        /// <summary>
-        /// Send profit protection applied alert
-        /// </summary>
         public void SendProfitProtectionAlert(int trancheId, string action)
         {
             SendAlert(new TelegramAlert
             {
                 Type = TelegramAlertType.ProfitProtection,
-                Message = $"Profit Protection - Tranche #{trancheId}: {action}"
+                Message = $"🛡️ Profit Protection - Tranche #{trancheId}: {action}"
             });
         }
 
-        /// <summary>
-        /// Send Stoxxo order status alert
-        /// </summary>
         public void SendStoxxoAlert(int trancheId, string portfolioName, string status)
         {
             SendAlert(new TelegramAlert
@@ -479,53 +696,10 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
         #region Command Handling
 
         /// <summary>
-        /// Handle incoming Telegram updates (commands)
-        /// </summary>
-        private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
-        {
-            try
-            {
-                if (update.Message?.Text == null) return;
-
-                var messageText = update.Message.Text.Trim();
-                var chatId = update.Message.Chat.Id;
-
-                // Only process commands (messages starting with /)
-                if (!messageText.StartsWith("/")) return;
-
-                // Parse command
-                var parts = messageText.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                var command = parts[0].ToLowerInvariant();
-                var args = parts.Length > 1 ? new string[parts.Length - 1] : Array.Empty<string>();
-                if (args.Length > 0) Array.Copy(parts, 1, args, 0, args.Length);
-
-                Logger.Info($"[TelegramAlertService] Received command: {command} from chat {chatId}");
-
-                // Create command object and publish to stream
-                var cmd = new TelegramCommand
-                {
-                    Command = command,
-                    Arguments = args,
-                    ChatId = chatId
-                };
-
-                _commandSubject.OnNext(cmd);
-
-                // Handle built-in commands
-                await HandleBuiltInCommandAsync(cmd, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[TelegramAlertService] Error handling update: {ex.Message}");
-            }
-        }
-
-        /// <summary>
         /// Handle built-in bot commands
         /// </summary>
-        private async Task HandleBuiltInCommandAsync(TelegramCommand cmd, CancellationToken cancellationToken)
+        private async Task HandleBuiltInCommandAsync(TelegramCommand cmd)
         {
-            var chatId = new ChatId(cmd.ChatId);
             string response = null;
 
             switch (cmd.Command)
@@ -559,47 +733,31 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
                     break;
 
                 default:
-                    // Unknown command - let external handlers deal with it via CommandStream
+                    // Unknown command - ignore
                     break;
             }
 
             if (!string.IsNullOrEmpty(response))
             {
-                try
-                {
-                    await _botClient.SendMessage(
-                        chatId: chatId,
-                        text: response,
-                        cancellationToken: cancellationToken);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[TelegramAlertService] Failed to send command response: {ex.Message}");
-                }
+                await SendMessageAsync(cmd.ChatId.ToString(), response);
             }
         }
 
-        /// <summary>
-        /// Get help text for available commands
-        /// </summary>
         private string GetHelpText()
         {
-            return @"Available Commands:
+            return @"<b>Available Commands:</b>
 
 /help - Show this help message
 /status - Show current TBS status
 /pnl - Show P&L summary
 
-Trading Commands:
-/trailsl <tranche_id> <percent> - Set trailing SL for a tranche
-/squareoff <tranche_id> - Square off a specific tranche
+<b>Trading Commands:</b>
+/trailsl &lt;tranche_id&gt; &lt;percent&gt; - Set trailing SL
+/squareoff &lt;tranche_id&gt; - Square off a tranche
 /squareoffall - Square off all live tranches
-/profitprotect <threshold> - Apply profit protection when P&L exceeds threshold";
+/profitprotect &lt;threshold&gt; - Apply profit protection";
         }
 
-        /// <summary>
-        /// Get current status text
-        /// </summary>
         private string GetStatusText()
         {
             try
@@ -607,7 +765,7 @@ Trading Commands:
                 var tbs = TBSExecutionService.Instance;
                 var now = DateTime.Now;
 
-                return $@"TBS Status ({now:HH:mm:ss})
+                return $@"<b>TBS Status</b> ({now:HH:mm:ss})
 Live: {tbs.LiveCount}
 Monitoring: {tbs.MonitoringCount}
 Total P&L: {tbs.TotalPnL:F2}
@@ -619,15 +777,12 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
             }
         }
 
-        /// <summary>
-        /// Get P&L summary
-        /// </summary>
         private string GetPnLSummary()
         {
             try
             {
                 var tbs = TBSExecutionService.Instance;
-                var summary = $"Total P&L: {tbs.TotalPnL:F2}\n\n";
+                var summary = $"<b>Total P&L:</b> {tbs.TotalPnL:F2}\n\n";
 
                 foreach (var state in tbs.ExecutionStates)
                 {
@@ -646,13 +801,10 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
             }
         }
 
-        /// <summary>
-        /// Handle /trailsl command
-        /// </summary>
         private string HandleTrailSLCommand(string[] args)
         {
             if (args.Length < 2)
-                return "Usage: /trailsl <tranche_id> <percent>\nExample: /trailsl 1 50 (moves SL to 50% of current profit)";
+                return "Usage: /trailsl &lt;tranche_id&gt; &lt;percent&gt;";
 
             if (!int.TryParse(args[0], out int trancheId))
                 return "Invalid tranche ID";
@@ -671,7 +823,6 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
                 if (state.Status != TBSExecutionStatus.Live)
                     return $"Tranche #{trancheId} is not live (status: {state.Status})";
 
-                // Apply trailing SL to each active leg
                 foreach (var leg in state.Legs.Where(l => l.Status == TBSLegStatus.Active))
                 {
                     var profitPerUnit = leg.EntryPrice - leg.CurrentPrice;
@@ -683,7 +834,7 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
                 }
 
                 state.Message = $"Trailing SL applied @ {percent}%";
-                return $"Trailing SL applied to Tranche #{trancheId} at {percent}% of profit";
+                return $"✅ Trailing SL applied to Tranche #{trancheId} at {percent}% of profit";
             }
             catch (Exception ex)
             {
@@ -691,13 +842,10 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
             }
         }
 
-        /// <summary>
-        /// Handle /squareoff command
-        /// </summary>
         private string HandleSquareOffCommand(string[] args)
         {
             if (args.Length < 1)
-                return "Usage: /squareoff <tranche_id>";
+                return "Usage: /squareoff &lt;tranche_id&gt;";
 
             if (!int.TryParse(args[0], out int trancheId))
                 return "Invalid tranche ID";
@@ -713,7 +861,6 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
                 if (state.Status != TBSExecutionStatus.Live)
                     return $"Tranche #{trancheId} is not live (status: {state.Status})";
 
-                // Mark for square off
                 state.Status = TBSExecutionStatus.SquaredOff;
                 state.Message = "Manual square off via Telegram";
                 state.ExitTime = DateTime.Now;
@@ -726,7 +873,7 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
                     leg.Status = TBSLegStatus.Exited;
                 }
 
-                return $"Tranche #{trancheId} marked for square off";
+                return $"✅ Tranche #{trancheId} marked for square off";
             }
             catch (Exception ex)
             {
@@ -734,9 +881,6 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
             }
         }
 
-        /// <summary>
-        /// Handle /squareoffall command
-        /// </summary>
         private string HandleSquareOffAllCommand()
         {
             try
@@ -762,7 +906,7 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
                 }
 
                 return count > 0
-                    ? $"Marked {count} tranches for square off"
+                    ? $"✅ Marked {count} tranches for square off"
                     : "No live tranches to square off";
             }
             catch (Exception ex)
@@ -771,13 +915,10 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
             }
         }
 
-        /// <summary>
-        /// Handle /profitprotect command - Apply global trailing SL when P&L exceeds threshold
-        /// </summary>
         private string HandleProfitProtectCommand(string[] args)
         {
             if (args.Length < 1)
-                return "Usage: /profitprotect <threshold>\nExample: /profitprotect 1000 (trail SL when total P&L > 1000)";
+                return "Usage: /profitprotect &lt;threshold&gt;";
 
             if (!decimal.TryParse(args[0], out decimal threshold))
                 return "Invalid threshold";
@@ -794,7 +935,6 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
                 {
                     foreach (var leg in state.Legs.Where(l => l.Status == TBSLegStatus.Active))
                     {
-                        // Move SL to cost
                         if (!state.SLToCostApplied)
                         {
                             leg.SLPrice = leg.EntryPrice;
@@ -806,22 +946,13 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
                 }
 
                 return count > 0
-                    ? $"Profit protection applied to {count} live tranches (SL moved to cost)"
+                    ? $"✅ Profit protection applied to {count} live tranches (SL moved to cost)"
                     : "No live tranches for profit protection";
             }
             catch (Exception ex)
             {
                 return $"Error: {ex.Message}";
             }
-        }
-
-        /// <summary>
-        /// Handle polling errors
-        /// </summary>
-        private Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
-        {
-            Logger.Error($"[TelegramAlertService] Polling error: {exception.Message}");
-            return Task.CompletedTask;
         }
 
         #endregion
@@ -835,13 +966,15 @@ Option Chain Ready: {tbs.IsOptionChainReady}";
 
             Logger.Info("[TelegramAlertService] Disposing...");
 
-            _receivingCts?.Cancel();
-            _receivingCts?.Dispose();
+            _pollingCts?.Cancel();
+            try { _pollingTask?.Wait(5000); } catch { }
+            _pollingCts?.Dispose();
 
             _subscriptions.Dispose();
             _alertSubject.Dispose();
             _commandSubject.Dispose();
             _sendSemaphore.Dispose();
+            _httpClient?.Dispose();
 
             Logger.Info("[TelegramAlertService] Disposed");
         }

@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reactive.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
@@ -18,6 +20,9 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
         #region Fields
 
         private readonly StoxxoService _stoxxoService;
+
+        // Per-tranche locks to prevent concurrent reconciliation
+        private readonly ConcurrentDictionary<int, SemaphoreSlim> _reconcileLocks = new ConcurrentDictionary<int, SemaphoreSlim>();
 
         #endregion
 
@@ -103,6 +108,7 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
         /// Reconcile Stoxxo legs with internal TBS state using Rx retry pattern.
         /// Stoxxo executes BUY legs first, then SELL legs ~1 second later.
         /// This method retries until both CE and PE SELL legs are mapped (up to 30 seconds).
+        /// Uses per-tranche locking to prevent concurrent reconciliation race conditions.
         /// </summary>
         /// <param name="state">The execution state to reconcile</param>
         /// <returns>Number of legs reconciled</returns>
@@ -111,10 +117,20 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
             if (state == null) throw new ArgumentNullException(nameof(state));
             if (string.IsNullOrEmpty(state.StoxxoPortfolioName)) return 0;
 
-            TBSLogger.Info($"[StoxxoBridge] ReconcileLegsAsync START for Tranche #{state.TrancheId}, Portfolio={state.StoxxoPortfolioName}");
+            // Get or create a lock for this tranche to prevent concurrent reconciliation
+            var trancheLock = _reconcileLocks.GetOrAdd(state.TrancheId, _ => new SemaphoreSlim(1, 1));
+
+            // Try to acquire lock without blocking - if another reconciliation is in progress, skip
+            if (!await trancheLock.WaitAsync(0))
+            {
+                TBSLogger.Info($"[StoxxoBridge] ReconcileLegsAsync SKIPPED for Tranche #{state.TrancheId} - another reconciliation in progress");
+                return CountMappedLegs(state);
+            }
 
             try
             {
+                TBSLogger.Info($"[StoxxoBridge] ReconcileLegsAsync START for Tranche #{state.TrancheId}, Portfolio={state.StoxxoPortfolioName}");
+
                 // Use Rx to retry reconciliation until we get both SELL legs mapped
                 var result = await Observable
                     .Interval(TimeSpan.FromMilliseconds(RECONCILE_RETRY_INTERVAL_MS))
@@ -146,6 +162,10 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
             {
                 TBSLogger.Error($"[StoxxoBridge] ReconcileLegsAsync error for Tranche #{state.TrancheId}: {ex.Message}", ex);
                 return 0;
+            }
+            finally
+            {
+                trancheLock.Release();
             }
         }
 
@@ -193,17 +213,19 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
         }
 
         /// <summary>
-        /// Map Stoxxo leg data to internal TBS leg state
+        /// Map Stoxxo leg data to internal TBS leg state.
+        /// IMPORTANT: Stoxxo is the source of truth for strike - if Stoxxo executed at a different
+        /// ATM strike, we realign TBS state to match Stoxxo's actual executed strike.
         /// </summary>
         /// <returns>Number of legs successfully mapped</returns>
         private int MapStoxxoLegsToInternal(TBSExecutionState state, List<StoxxoUserLeg> stoxxoLegs)
         {
-            TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: Processing {stoxxoLegs.Count} Stoxxo legs for Tranche #{state.TrancheId}");
+            TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: Processing {stoxxoLegs.Count} Stoxxo legs for Tranche #{state.TrancheId}, TBS Strike={state.Strike}");
 
             // Log all legs before filtering
             foreach (var leg in stoxxoLegs)
             {
-                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: ALL LEG - LegID={leg.LegID}, Txn={leg.Txn}, Ins={leg.Instrument}, Strike={leg.Strike}");
+                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: ALL LEG - LegID={leg.LegID}, Txn={leg.Txn}, Ins={leg.Instrument}, Strike={leg.Strike}, Symbol={leg.Symbol}");
             }
 
             var sellLegs = stoxxoLegs
@@ -215,7 +237,7 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
             // Log filtered sell legs
             foreach (var leg in sellLegs)
             {
-                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: SELL LEG - LegID={leg.LegID}, Ins={leg.Instrument}, Strike={leg.Strike}, EntryQty={leg.EntryFilledQty}");
+                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: SELL LEG - LegID={leg.LegID}, Ins={leg.Instrument}, Strike={leg.Strike}, EntryQty={leg.EntryFilledQty}, Symbol={leg.Symbol}");
             }
 
             var ceLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("CE", StringComparison.OrdinalIgnoreCase) == true);
@@ -224,9 +246,27 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
             TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: CE Leg Found={ceLeg != null}, PE Leg Found={peLeg != null}");
 
             if (ceLeg != null)
-                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: CE LEG MATCH - LegID={ceLeg.LegID}, Strike={ceLeg.Strike}, EntryQty={ceLeg.EntryFilledQty}, AvgEntry={ceLeg.AvgEntryPrice}");
+                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: CE LEG DETAIL - LegID={ceLeg.LegID}, Strike={ceLeg.Strike}, EntryQty={ceLeg.EntryFilledQty}, AvgEntry={ceLeg.AvgEntryPrice}, Symbol={ceLeg.Symbol}");
             if (peLeg != null)
-                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: PE LEG MATCH - LegID={peLeg.LegID}, Strike={peLeg.Strike}, EntryQty={peLeg.EntryFilledQty}, AvgEntry={peLeg.AvgEntryPrice}");
+                TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: PE LEG DETAIL - LegID={peLeg.LegID}, Strike={peLeg.Strike}, EntryQty={peLeg.EntryFilledQty}, AvgEntry={peLeg.AvgEntryPrice}, Symbol={peLeg.Symbol}");
+
+            // STRIKE REALIGNMENT: Check if Stoxxo executed at a different strike than TBS assumed
+            // Stoxxo is the source of truth - we need to monitor the ACTUAL executed strike
+            decimal stoxxoStrike = 0;
+            if (ceLeg != null && ceLeg.Strike > 0)
+                stoxxoStrike = ceLeg.Strike;
+            else if (peLeg != null && peLeg.Strike > 0)
+                stoxxoStrike = peLeg.Strike;
+
+            if (stoxxoStrike > 0 && state.Strike > 0 && stoxxoStrike != state.Strike)
+            {
+                TBSLogger.Warn($"[StoxxoBridge] STRIKE MISMATCH DETECTED for Tranche #{state.TrancheId}: " +
+                    $"TBS assumed Strike={state.Strike}, Stoxxo executed at Strike={stoxxoStrike}");
+                TBSLogger.Warn($"[StoxxoBridge] REALIGNING Tranche #{state.TrancheId} strike from {state.Strike} to {stoxxoStrike} (Stoxxo is source of truth)");
+
+                // Realign the TBS state to Stoxxo's actual executed strike
+                RealignStrikeToStoxxo(state, stoxxoStrike);
+            }
 
             int mappedCount = 0;
             foreach (var leg in state.Legs)
@@ -240,7 +280,7 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
                     leg.StoxxoExitPrice = stoxxoLeg.AvgExitPrice;
                     leg.StoxxoStatus = stoxxoLeg.Status;
                     mappedCount++;
-                    TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: MAPPED {leg.OptionType} -> StoxxoLegID={leg.StoxxoLegID}, Qty={leg.StoxxoQty}, EntryPrice={leg.StoxxoEntryPrice}");
+                    TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal: MAPPED {leg.OptionType} -> StoxxoLegID={leg.StoxxoLegID}, Qty={leg.StoxxoQty}, EntryPrice={leg.StoxxoEntryPrice}, Symbol={leg.Symbol}");
                 }
                 else
                 {
@@ -248,8 +288,56 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
                 }
             }
 
-            TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal COMPLETE: {mappedCount}/{state.Legs.Count} TBS legs mapped");
+            TBSLogger.Info($"[StoxxoBridge] MapStoxxoLegsToInternal COMPLETE: {mappedCount}/{state.Legs.Count} TBS legs mapped, Final Strike={state.Strike}");
             return mappedCount;
+        }
+
+        /// <summary>
+        /// Realign TBS state strike and leg symbols to match Stoxxo's actual executed strike.
+        /// This ensures we're monitoring stop-losses for the correct options.
+        /// </summary>
+        private void RealignStrikeToStoxxo(TBSExecutionState state, decimal stoxxoStrike)
+        {
+            decimal oldStrike = state.Strike;
+            state.Strike = stoxxoStrike;
+
+            // Update leg symbols to match new strike
+            var underlying = state.Config?.Underlying ?? "NIFTY";
+
+            // Get expiry from MarketAnalyzerLogic (same pattern as TBSExecutionService.UpdateLegSymbols)
+            DateTime? expiry = null;
+            var selectedExpiryStr = Services.Analysis.MarketAnalyzerLogic.Instance.SelectedExpiry;
+            if (!string.IsNullOrEmpty(selectedExpiryStr) && DateTime.TryParse(selectedExpiryStr, out var parsed))
+                expiry = parsed;
+
+            if (!expiry.HasValue)
+            {
+                TBSLogger.Warn($"[StoxxoBridge] RealignStrikeToStoxxo: Could not get expiry for {underlying}, symbols not updated");
+                return;
+            }
+
+            // Get isMonthlyExpiry flag
+            bool isMonthlyExpiry = Services.Analysis.MarketAnalyzerLogic.Instance.SelectedIsMonthlyExpiry;
+
+            // If underlying doesn't match, try to determine from cached expiries
+            if (Services.Analysis.MarketAnalyzerLogic.Instance.SelectedUnderlying != underlying)
+            {
+                var expiries = Services.Analysis.MarketAnalyzerLogic.Instance.GetCachedExpiries(underlying);
+                if (expiries != null && expiries.Count > 0)
+                {
+                    isMonthlyExpiry = Helpers.SymbolHelper.IsMonthlyExpiry(expiry.Value, expiries);
+                }
+            }
+
+            foreach (var leg in state.Legs)
+            {
+                string oldSymbol = leg.Symbol;
+                string newSymbol = Helpers.SymbolHelper.BuildOptionSymbol(underlying, expiry.Value, stoxxoStrike, leg.OptionType, isMonthlyExpiry);
+                leg.Symbol = newSymbol;
+                TBSLogger.Info($"[StoxxoBridge] RealignStrikeToStoxxo: Tranche #{state.TrancheId} {leg.OptionType} symbol changed: {oldSymbol} -> {newSymbol}");
+            }
+
+            TBSLogger.Info($"[StoxxoBridge] RealignStrikeToStoxxo COMPLETE: Tranche #{state.TrancheId} realigned from Strike={oldStrike} to Strike={stoxxoStrike}");
         }
 
         #endregion
@@ -257,7 +345,8 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
         #region Leg Updates
 
         /// <summary>
-        /// Update Stoxxo leg details for a tranche
+        /// Update Stoxxo leg details for a tranche.
+        /// Also validates strike consistency - if Stoxxo reports a different strike, realigns TBS state.
         /// </summary>
         public async Task UpdateLegDetailsAsync(TBSExecutionState state)
         {
@@ -272,6 +361,23 @@ namespace ZerodhaDatafeedAdapter.Services.TBS
                 var sellLegs = legs
                     .Where(l => l.Txn?.Equals("Sell", StringComparison.OrdinalIgnoreCase) == true)
                     .ToList();
+
+                // Check for strike mismatch on every update (Stoxxo is source of truth)
+                var ceLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("CE", StringComparison.OrdinalIgnoreCase) == true);
+                var peLeg = sellLegs.FirstOrDefault(l => l.Instrument?.Equals("PE", StringComparison.OrdinalIgnoreCase) == true);
+
+                decimal stoxxoStrike = 0;
+                if (ceLeg != null && ceLeg.Strike > 0)
+                    stoxxoStrike = ceLeg.Strike;
+                else if (peLeg != null && peLeg.Strike > 0)
+                    stoxxoStrike = peLeg.Strike;
+
+                if (stoxxoStrike > 0 && state.Strike > 0 && stoxxoStrike != state.Strike)
+                {
+                    TBSLogger.Warn($"[StoxxoBridge] UpdateLegDetailsAsync: STRIKE MISMATCH for Tranche #{state.TrancheId}: " +
+                        $"TBS Strike={state.Strike}, Stoxxo Strike={stoxxoStrike} - REALIGNING");
+                    RealignStrikeToStoxxo(state, stoxxoStrike);
+                }
 
                 foreach (var leg in state.Legs)
                 {
