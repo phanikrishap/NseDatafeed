@@ -385,8 +385,51 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
         private void StartPolling()
         {
             _pollingCts = new CancellationTokenSource();
-            _pollingTask = Task.Run(async () => await PollForUpdatesAsync(_pollingCts.Token));
+            _pollingTask = Task.Run(async () =>
+            {
+                // Clear any existing webhook/polling connection to avoid 409 Conflict
+                await ClearExistingConnectionAsync();
+                await PollForUpdatesAsync(_pollingCts.Token);
+            });
             Logger.Info("[TelegramAlertService] Started polling for commands");
+        }
+
+        /// <summary>
+        /// Clear any existing webhook or polling connection to prevent 409 Conflict errors.
+        /// This is necessary when another instance may still be polling or a webhook is set.
+        /// </summary>
+        private async Task ClearExistingConnectionAsync()
+        {
+            try
+            {
+                // Call deleteWebhook with drop_pending_updates to clear any existing connection
+                var payload = new { drop_pending_updates = true };
+                var content = new StringContent(
+                    JsonConvert.SerializeObject(payload),
+                    Encoding.UTF8,
+                    "application/json");
+
+                var response = await _httpClient.PostAsync(
+                    $"{TELEGRAM_API_BASE}{_settings.Token}/deleteWebhook",
+                    content);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    Logger.Info("[TelegramAlertService] Cleared existing webhook/polling connection");
+                }
+                else
+                {
+                    var errorBody = await response.Content.ReadAsStringAsync();
+                    Logger.Warn($"[TelegramAlertService] deleteWebhook returned: {response.StatusCode} - {errorBody}");
+                }
+
+                // Small delay to ensure Telegram API registers the change
+                await Task.Delay(500);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[TelegramAlertService] Failed to clear existing connection: {ex.Message}");
+            }
         }
 
         /// <summary>
