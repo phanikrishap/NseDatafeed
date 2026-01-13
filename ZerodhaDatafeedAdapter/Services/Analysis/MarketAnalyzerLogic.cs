@@ -17,6 +17,7 @@ using NinjaTrader.Cbi;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.Reactive;
+using ZerodhaDatafeedAdapter.Services.Hedge;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.Telegram;
 
@@ -1140,6 +1141,24 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 // Also fire legacy event for backward compatibility
                 OptionsGenerated?.Invoke(generated);
+
+                // Initialize hedge subscriptions (liquid strikes for hedge selection)
+                // NIFTY: multiples of 100, SENSEX: multiples of 500
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await HedgeSubscriptionService.Instance.InitializeAsync(
+                            selectedUnderlying,
+                            selectedExpiry,
+                            (decimal)atmStrike,
+                            isMonthlyExpiry);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"[MarketAnalyzerLogic] HedgeSubscriptionService initialization failed: {ex.Message}");
+                    }
+                });
 
                 // Fire PriceSyncReady AFTER options are generated - this is the definitive signal
                 // that Option Chain has underlying, expiry, DTE, ATM strikes, and is ready for TBS

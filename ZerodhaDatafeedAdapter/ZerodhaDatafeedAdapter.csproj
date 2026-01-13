@@ -234,6 +234,7 @@
     <Compile Include="Services\TBSConfigurationService.cs" />
     <Compile Include="Services\TBSExecutionService.cs" />
     <Compile Include="Services\TBS\StoxxoBridgeManager.cs" />
+    <Compile Include="Services\Hedge\HedgeSubscriptionService.cs" />
     <Compile Include="Services\SimulationService.cs" />
     <Compile Include="Services\StoxxoService.cs" />
     <Compile Include="Models\StoxxoModels.cs" />
