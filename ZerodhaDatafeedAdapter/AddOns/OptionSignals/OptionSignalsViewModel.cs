@@ -5,13 +5,10 @@ using System.Linq;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
-using System.Reactive.Threading.Tasks;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Windows;
 using System.Windows.Data;
 using System.Windows.Threading;
-using NinjaTrader.Cbi;
-using NinjaTrader.Data;
 using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models;
 using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services;
 using ZerodhaDatafeedAdapter.Helpers;
@@ -21,104 +18,21 @@ using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Analysis.Components;
-using ZerodhaDatafeedAdapter.Services.Historical;
 using ZerodhaDatafeedAdapter.ViewModels;
 
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 {
-    /// <summary>
-    /// Tracks VP state for a single option symbol (CE or PE at a strike)
-    /// VP is computed at RangeATR bar close using ticks from that bar's time range.
-    /// </summary>
-    internal class OptionVPState
-    {
-        public string Symbol { get; set; }
-        public string Type { get; set; } // "CE" or "PE"
-        public OptionSignalsRow Row { get; set; }
-
-        // Session VP - accumulates all day, never expires
-        public VPEngine SessionVPEngine { get; set; }
-
-        // Rolling VP - 60-minute rolling window
-        public RollingVolumeProfileEngine RollingVPEngine { get; set; }
-
-        // CD Momentum Engine - smaMomentum applied to cumulative delta (Momentum + Smooth)
-        public CDMomentumEngine CDMomoEngine { get; set; }
-
-        // Price Momentum Engine - smaMomentum applied to price (Momentum + Smooth)
-        public MomentumEngine PriceMomoEngine { get; set; }
-
-        public BarsRequest RangeBarsRequest { get; set; }
-        public BarsRequest TickBarsRequest { get; set; }
-        public double LastClosePrice { get; set; }
-        public int LastVPTickIndex { get; set; } = -1;
-        public int LastRangeBarIndex { get; set; } = -1;
-        public DateTime LastBarCloseTime { get; set; } = DateTime.MinValue;
-
-        // Rx subjects for coordinating data readiness
-        public BehaviorSubject<bool> TickDataReady { get; } = new BehaviorSubject<bool>(false);
-        public BehaviorSubject<bool> RangeBarsReady { get; } = new BehaviorSubject<bool>(false);
-        public Subject<BarsUpdateEventArgs> RangeBarUpdates { get; } = new Subject<BarsUpdateEventArgs>();
-        public CompositeDisposable Subscriptions { get; } = new CompositeDisposable();
-
-        // Trend tracking
-        public HvnTrend LastSessionTrend { get; set; } = HvnTrend.Neutral;
-        public HvnTrend LastRollingTrend { get; set; } = HvnTrend.Neutral;
-        public DateTime? SessionTrendOnsetTime { get; set; }
-        public DateTime? RollingTrendOnsetTime { get; set; }
-
-        // Bar history for signal orchestrator - stores 256 bar snapshots
-        public OptionBarHistory BarHistory { get; set; }
-
-        // Simulation mode: pre-built bar replay data
-        // Stores (barTime, closePrice, prevBarTime) for deterministic replay
-        public List<(DateTime BarTime, double ClosePrice, DateTime PrevBarTime)> SimReplayBars { get; set; }
-        public List<(DateTime Time, int Index)> SimTickTimes { get; set; }
-        public int SimReplayBarIndex { get; set; } = 0;
-        public int SimReplayTickIndex { get; set; } = 0;
-        public double SimLastPrice { get; set; }
-        public bool SimDataReady { get; set; } = false;
-
-        public OptionVPState()
-        {
-            SessionVPEngine = new VPEngine();
-            RollingVPEngine = new RollingVolumeProfileEngine(60); // 60-min rolling window
-
-            // Initialize with dynamic tick intervals for options
-            SessionVPEngine.Reset(0.50);
-            RollingVPEngine.ResetWithDynamicInterval();
-
-            // Initialize Momentum engines (smaMomentum style with Momentum + Smooth)
-            CDMomoEngine = new CDMomentumEngine(14, 7);      // CD Momentum (period=14, smooth=7)
-            PriceMomoEngine = new MomentumEngine(14, 7);    // Price Momentum (period=14, smooth=7)
-        }
-
-        public void Dispose()
-        {
-            Subscriptions?.Dispose();
-            TickDataReady?.Dispose();
-            RangeBarsReady?.Dispose();
-            RangeBarUpdates?.Dispose();
-            RangeBarsRequest?.Dispose();
-            TickBarsRequest?.Dispose();
-        }
-    }
-
     public class OptionSignalsViewModel : ViewModelBase, IDisposable
     {
         private CompositeDisposable _subscriptions;
-        private readonly Dictionary<string, OptionVPState> _vpStates = new Dictionary<string, OptionVPState>();
-        private readonly Dictionary<string, (OptionSignalsRow row, string type)> _symbolToRowMap = new Dictionary<string, (OptionSignalsRow, string)>();
+        private readonly OptionSignalsComputeService _computeService = OptionSignalsComputeService.Instance;
         private readonly Subject<OptionsGeneratedEvent> _strikeGenerationTrigger = new Subject<OptionsGeneratedEvent>();
         private readonly Dispatcher _dispatcher;
         private readonly object _rowsLock = new object();
+        private readonly object _signalsLock = new object();
 
         // Dedicated logger
         private static readonly ILoggerService _log = LoggerFactory.OpSignals;
-
-        // VP Configuration
-        private const double VALUE_AREA_PERCENT = 0.70;
-        private const double HVN_RATIO = 0.25;
 
         // Data Collections
         public ObservableCollection<OptionSignalsRow> Rows { get; } = new ObservableCollection<OptionSignalsRow>();
@@ -126,8 +40,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         // Signals Orchestrator
         private SignalsOrchestrator _signalsOrchestrator;
-        private readonly object _signalsLock = new object();
-
+        
         // Properties
         private string _underlying = "NIFTY";
         private string _expiry = "---";
@@ -136,10 +49,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         private DateTime? _selectedExpiry;
         private double _atmStrike;
         private int _strikeStep = 50;
+        private int _currentDisplayATM;
+        private int _lastPopulatedATM; // Track ATM used when grid was last populated
 
-        // ATM tracking for fluid grid re-centering
-        private int _lastPopulatedATM; // The ATM used when grid was last populated
-        private OptionsGeneratedEvent _lastOptionsEvent; // Cached for re-triggering
+        // Cached for re-triggering
+        private OptionsGeneratedEvent _lastOptionsEvent; 
 
         public string Underlying
         {
@@ -267,28 +181,41 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             if (e.Underlying != _underlying) return;
 
             int newATM = (int)e.NewATM;
-            int atmDiff = Math.Abs(newATM - _lastPopulatedATM);
+            int atmDiff = Math.Abs(newATM - _currentDisplayATM);
 
             // Re-center if ATM shifted by 2+ strikes (avoid excessive re-centering)
-            if (atmDiff >= (int)(e.StrikeStep * 2) && _lastOptionsEvent != null)
+            // Just refresh display, VP state is preserved in ComputeService
+            if (atmDiff >= _strikeStep * 2)
             {
-                _log.Info($"[OptionSignalsViewModel] ATM shifted significantly: {_lastPopulatedATM} -> {newATM} (diff={atmDiff}). Re-centering strike grid.");
+                _log.Info($"[OptionSignalsViewModel] ATM shifted significantly: {_currentDisplayATM} -> {newATM} (diff={atmDiff}). Refreshing display (VP preserved).");
+                
+                _currentDisplayATM = newATM;
+                RefreshDisplayRows(newATM);
 
-                // Create a synthetic event with updated ATM for re-triggering
-                var recenteredEvent = new OptionsGeneratedEvent
+                // Update market context for signals orchestrator
+                if (_selectedExpiry.HasValue)
                 {
-                    Options = _lastOptionsEvent.Options,
-                    SelectedUnderlying = _lastOptionsEvent.SelectedUnderlying,
-                    SelectedExpiry = _lastOptionsEvent.SelectedExpiry,
-                    DTE = _lastOptionsEvent.DTE,
-                    ATMStrike = newATM, // Use new ATM
-                    GeneratedAt = DateTime.Now,
-                    ProjectedOpenUsed = _lastOptionsEvent.ProjectedOpenUsed
-                };
-
-                // Re-trigger strike population with new ATM
-                _strikeGenerationTrigger.OnNext(recenteredEvent);
+                    _computeService.SetMarketContext(newATM, _strikeStep, _selectedExpiry.Value, _underlying);
+                }
             }
+        }
+
+        private void RefreshDisplayRows(int atmStrike)
+        {
+            _dispatcher.InvokeAsync(() =>
+            {
+                lock (_rowsLock)
+                {
+                    // Get ~20 strikes around current ATM for display
+                    var displayRows = _computeService.GetRowsAroundATM(atmStrike, 10);
+                    
+                    Rows.Clear();
+                    foreach (var row in displayRows)
+                    {
+                        Rows.Add(row);
+                    }
+                }
+            });
         }
 
         public void StopServices()
@@ -297,7 +224,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             SimulationService.Instance.StateChanged -= OnSimulationStateChanged;
             OptionGenerationService.Instance.ATMChanged -= OnATMChanged;
             _subscriptions?.Clear();
-            ClearAllVPStates();
+            // DON'T clear ComputeService - it's a singleton shared across instances if any
+            // but we can ensure it stops processing if needed, though typically it runs for the session
         }
 
         /// <summary>
@@ -325,6 +253,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 }
 
                 _signalsOrchestrator?.SetReplayMode(true);
+                // Also notify compute service about simulation mode if needed, 
+                // though it likely checks SimulationService.Instance directly or via internal processors
+                
                 _log.Info($"[OptionSignalsViewModel] Simulation state changed to {newState} - replay mode enabled for {simUnderlying}");
                 TerminalService.Instance.Info($"Simulation mode active ({newState}) - taking all trades for {simUnderlying}");
             }
@@ -405,9 +336,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
         private async Task SyncAndPopulateStrikes(OptionsGeneratedEvent evt, System.Threading.CancellationToken ct)
         {
             if (evt?.Options == null || evt.Options.Count == 0) return;
+            
             _log.Info($"[OptionSignalsViewModel] SyncAndPopulateStrikes started for {evt.SelectedUnderlying} ATM={evt.ATMStrike}");
 
-            // Cache the event for potential ATM re-centering later
+            // Cache the event for potential use
             _lastOptionsEvent = evt;
 
             await _dispatcher.InvokeAsync(() => {
@@ -415,12 +347,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 _selectedExpiry = evt.SelectedExpiry;
                 Expiry = evt.SelectedExpiry.ToString("dd-MMM-yyyy");
                 IsBusy = true;
-                StatusText = "Synchronizing Historical Tick Data...";
+                StatusText = "Initializing...";
             });
 
+            // Determine ATM and step
             // Use dynamic ATM from MarketAnalyzerLogic if available (calculated from straddle prices)
-            // Fall back to event ATM (from ProjectedOpen) if dynamic ATM not yet calculated
-            // This applies to both live and simulation modes for fluid ATM tracking
             decimal dynamicAtm = MarketAnalyzerLogic.Instance.GetATMStrike(evt.SelectedUnderlying);
             int atmStrike = dynamicAtm > 0 ? (int)dynamicAtm : (int)evt.ATMStrike;
 
@@ -428,1222 +359,61 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             {
                 _log.Info($"[OptionSignalsViewModel] Using dynamic ATM={atmStrike} (event ATM was {evt.ATMStrike})");
             }
-
-            int step = 50;
+            
             var uniqueStrikes = evt.Options.Where(o => o.strike.HasValue)
-                .Select(o => (int)o.strike.Value)
-                .Distinct()
-                .OrderBy(s => s)
-                .ToList();
+                .Select(o => (int)o.strike.Value).Distinct().OrderBy(s => s).ToList();
+            int step = uniqueStrikes.Count >= 2 ? uniqueStrikes[1] - uniqueStrikes[0] : 50;
 
-            if (uniqueStrikes.Count >= 2) step = uniqueStrikes[1] - uniqueStrikes[0];
-
-            // Store for SignalsOrchestrator and ATM tracking
             _atmStrike = atmStrike;
             _strikeStep = step;
-            _lastPopulatedATM = atmStrike; // Track for fluid re-centering
+            _currentDisplayATM = atmStrike;
+            _lastPopulatedATM = atmStrike;
 
-            var strikesToLoad = new List<int>();
-            for (int i = -10; i <= 10; i++) strikesToLoad.Add(atmStrike + (i * step));
+            // Initialize ComputeService with ALL options
+            // This syncs historical data for all items and starts processors
+            await _computeService.InitializeAsync(evt.SelectedUnderlying, evt.SelectedExpiry, evt.Options);
 
-            var symbolsToSync = new List<string>();
-            var strikeToSymbolMap = new Dictionary<(int strike, string type), string>();
+            // Wire up SignalsOrchestrator to the compute service so it can push updates
+            _computeService.SetSignalsOrchestrator(_signalsOrchestrator);
+            _computeService.SetMarketContext(atmStrike, step, evt.SelectedExpiry, evt.SelectedUnderlying);
 
-            foreach (var strike in strikesToLoad)
-            {
-                var ce = evt.Options.FirstOrDefault(o => o.strike == strike && o.option_type == "CE");
-                var pe = evt.Options.FirstOrDefault(o => o.strike == strike && o.option_type == "PE");
-                if (ce != null) { symbolsToSync.Add(ce.symbol); strikeToSymbolMap[(strike, "CE")] = ce.symbol; }
-                if (pe != null) { symbolsToSync.Add(pe.symbol); strikeToSymbolMap[(strike, "PE")] = pe.symbol; }
-            }
+            // Display rows around ATM
+            RefreshDisplayRows(atmStrike);
 
-            if (symbolsToSync.Count == 0)
-            {
-                await _dispatcher.InvokeAsync(() => {
-                    StatusText = "No symbols found for requested strikes.";
-                    IsBusy = false;
-                });
-                return;
-            }
-
-            // OPTIMIZATION: Reduced timeout and parallel sync with fast-fail
-            var coordinator = HistoricalTickDataCoordinator.Instance;
-            const int SYNC_TIMEOUT_SECONDS = 15; // Reduced from 60s
-
-            var syncTaskList = symbolsToSync.Select(async sym =>
-            {
-                try {
-                    await coordinator.GetInstrumentTickStatusStream(sym)
-                        .Where(s => s.State == TickDataState.Ready || s.State == TickDataState.Failed || s.State == TickDataState.NoData)
-                        .Take(1)
-                        .Timeout(TimeSpan.FromSeconds(SYNC_TIMEOUT_SECONDS))
-                        .ToTask(ct);
-                } catch (OperationCanceledException) {
-                    throw;
-                } catch (TimeoutException) {
-                    // Don't log individual timeouts - just continue
-                } catch (Exception ex) {
-                    _log.Warn($"[OptionSignalsViewModel] Sync error for {sym}: {ex.Message}");
-                }
-            }).ToList();
-
-            try
-            {
-                await Task.WhenAll(syncTaskList);
-                _log.Info($"[OptionSignalsViewModel] Historical sync finished for {evt.SelectedUnderlying}");
-            }
-            catch (OperationCanceledException)
-            {
-                _log.Debug($"[OptionSignalsViewModel] SyncAndPopulateStrikes cancelled");
-                return;
-            }
-            catch (Exception ex)
-            {
-                _log.Error($"[OptionSignalsViewModel] Sync wait failed: {ex.Message}");
-            }
-
-            await _dispatcher.InvokeAsync(() =>
-            {
-                lock (_rowsLock)
-                {
-                    Rows.Clear();
-                    _symbolToRowMap.Clear();
-                    ClearAllVPStates();
-
-                    foreach (var strike in strikesToLoad)
-                    {
-                        var row = new OptionSignalsRow { Strike = strike, IsATM = (strike == (int)evt.ATMStrike) };
-
-                        if (strikeToSymbolMap.TryGetValue((strike, "CE"), out var ceSym))
-                        {
-                            row.CESymbol = ceSym;
-                            _symbolToRowMap[ceSym] = (row, "CE");
-                            CreateVPState(ceSym, strike, "CE", row);
-                        }
-
-                        if (strikeToSymbolMap.TryGetValue((strike, "PE"), out var peSym))
-                        {
-                            row.PESymbol = peSym;
-                            _symbolToRowMap[peSym] = (row, "PE");
-                            CreateVPState(peSym, strike, "PE", row);
-                        }
-
-                        Rows.Add(row);
-                    }
-
-                    StatusText = $"Monitoring {Rows.Count} strikes. (Historical Sync OK)";
-                    IsBusy = false;
-
-                    // Update SignalsOrchestrator with market context (pass underlying for dynamic ATM lookup)
-                    _signalsOrchestrator?.ClearStates();
-                    _signalsOrchestrator?.SetMarketContext(_atmStrike, _strikeStep, _selectedExpiry, _underlying);
-                }
+            await _dispatcher.InvokeAsync(() => {
+                StatusText = $"Monitoring {Rows.Count} strikes. (Historical Sync OK)";
+                IsBusy = false;
             });
-        }
-
-        private void CreateVPState(string symbol, int strike, string type, OptionSignalsRow row)
-        {
-            var instrument = Instrument.GetInstrument(symbol);
-            if (instrument == null)
-            {
-                _log.Warn($"[OptionSignalsViewModel] Instrument not found for {symbol}");
-                return;
-            }
-
-            var state = new OptionVPState
-            {
-                Symbol = symbol,
-                Type = type,
-                Row = row,
-                BarHistory = new OptionBarHistory(symbol, strike, type, 256) // 256-bar circular buffer
-            };
-
-            // Setup Rx pipeline: wait for both tick and range data, then process
-            var bothReadyPipeline = Observable.CombineLatest(
-                state.TickDataReady.Where(r => r),
-                state.RangeBarsReady.Where(r => r),
-                (tickReady, rangeReady) => true
-            )
-            .Take(1)
-            .Subscribe(_ =>
-            {
-                _log.Debug($"[VP] {symbol} both tick and range data ready, processing historical");
-                ProcessHistoricalData(state);
-            });
-
-            state.Subscriptions.Add(bothReadyPipeline);
-
-            // Setup real-time bar update pipeline (only processes after initial data is ready)
-            var realTimeUpdatePipeline = state.RangeBarUpdates
-                .Where(_ => state.LastRangeBarIndex >= 0) // Only after initial processing
-                .Subscribe(e => OnRealTimeBarUpdate(state, e));
-
-            state.Subscriptions.Add(realTimeUpdatePipeline);
-
-            NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
-            {
-                // Determine if we're in simulation mode and need specific date range
-                bool isSimMode = SimulationService.Instance.IsSimulationMode;
-                DateTime? simDate = isSimMode ? SimulationService.Instance.CurrentConfig?.SimulationDate : null;
-
-                BarsRequest tickRequest;
-                BarsRequest rangeRequest;
-
-                if (isSimMode && simDate.HasValue)
-                {
-                    // Simulation mode: Request bars from prior working day through simulation day
-                    DateTime priorDay = HolidayCalendarService.Instance.GetPriorWorkingDay(simDate.Value);
-                    DateTime fromDate = priorDay.Date;
-                    DateTime toDate = simDate.Value.Date.AddDays(1); // Include full simulation day
-
-                    _log.Info($"[OptionSignalsViewModel] {symbol} SimMode: Requesting bars from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}");
-
-                    // Create Tick BarsRequest with date range for simulation
-                    tickRequest = new BarsRequest(instrument, fromDate, toDate);
-                    tickRequest.BarsPeriod = new BarsPeriod
-                    {
-                        BarsPeriodType = BarsPeriodType.Tick,
-                        Value = 1
-                    };
-                    tickRequest.TradingHours = TradingHours.Get("Default 24 x 7");
-
-                    // Create RangeATR BarsRequest with date range for simulation
-                    rangeRequest = new BarsRequest(instrument, fromDate, toDate);
-                    rangeRequest.BarsPeriod = new BarsPeriod
-                    {
-                        BarsPeriodType = (BarsPeriodType)7015, // RangeATR
-                        Value = 1,
-                        Value2 = 3,
-                        BaseBarsPeriodValue = 1
-                    };
-                    rangeRequest.TradingHours = TradingHours.Get("Default 24 x 7");
-                }
-                else
-                {
-                    // Live mode: Request last N bars
-                    tickRequest = new BarsRequest(instrument, 10000);
-                    tickRequest.BarsPeriod = new BarsPeriod
-                    {
-                        BarsPeriodType = BarsPeriodType.Tick,
-                        Value = 1
-                    };
-                    tickRequest.TradingHours = TradingHours.Get("Default 24 x 7");
-
-                    rangeRequest = new BarsRequest(instrument, 100);
-                    rangeRequest.BarsPeriod = new BarsPeriod
-                    {
-                        BarsPeriodType = (BarsPeriodType)7015, // RangeATR
-                        Value = 1,
-                        Value2 = 3,
-                        BaseBarsPeriodValue = 1
-                    };
-                    rangeRequest.TradingHours = TradingHours.Get("Default 24 x 7");
-                }
-
-                // Subscribe to range bar updates (for live mode real-time updates)
-                rangeRequest.Update += (s, e) => state.RangeBarUpdates.OnNext(e);
-
-                // Request tick data
-                tickRequest.Request((r, code, msg) => {
-                    if (code == ErrorCode.NoError)
-                    {
-                        // Comprehensive logging for tick bars
-                        int totalCount = r.Bars.Count;
-                        if (totalCount > 0)
-                        {
-                            DateTime firstTime = r.Bars.GetTime(0);
-                            DateTime lastTime = r.Bars.GetTime(totalCount - 1);
-
-                            // Count bars by date for diagnostics
-                            var barsByDate = new Dictionary<DateTime, int>();
-                            for (int i = 0; i < totalCount; i++)
-                            {
-                                var barDate = r.Bars.GetTime(i).Date;
-                                if (!barsByDate.ContainsKey(barDate))
-                                    barsByDate[barDate] = 0;
-                                barsByDate[barDate]++;
-                            }
-
-                            var dateBreakdown = string.Join(", ", barsByDate.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key:MM-dd}:{kv.Value}"));
-                            _log.Info($"[OptionSignalsViewModel] TickBars OK: {symbol}, total={totalCount}, first={firstTime:MM-dd HH:mm:ss}, last={lastTime:MM-dd HH:mm:ss}, byDate=[{dateBreakdown}]");
-                        }
-                        else
-                        {
-                            _log.Warn($"[OptionSignalsViewModel] TickBars Empty: {symbol}, count=0");
-                        }
-                        state.TickDataReady.OnNext(true);
-                    }
-                    else
-                    {
-                        _log.Warn($"[OptionSignalsViewModel] TickBars FAILED: {symbol} - code={code}, msg={msg}");
-                        state.TickDataReady.OnNext(true); // Signal anyway so we don't block
-                    }
-                });
-
-                state.TickBarsRequest = tickRequest;
-
-                // Request range bar data
-                rangeRequest.Request((r, code, msg) => {
-                    if (code == ErrorCode.NoError)
-                    {
-                        // Comprehensive logging for range bars
-                        int totalCount = r.Bars.Count;
-                        if (totalCount > 0)
-                        {
-                            DateTime firstTime = r.Bars.GetTime(0);
-                            DateTime lastTime = r.Bars.GetTime(totalCount - 1);
-
-                            // Count bars by date for diagnostics
-                            var barsByDate = new Dictionary<DateTime, int>();
-                            for (int i = 0; i < totalCount; i++)
-                            {
-                                var barDate = r.Bars.GetTime(i).Date;
-                                if (!barsByDate.ContainsKey(barDate))
-                                    barsByDate[barDate] = 0;
-                                barsByDate[barDate]++;
-                            }
-
-                            var dateBreakdown = string.Join(", ", barsByDate.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key:MM-dd}:{kv.Value}"));
-                            _log.Info($"[OptionSignalsViewModel] RangeBars OK: {symbol}, total={totalCount}, first={firstTime:MM-dd HH:mm:ss}, last={lastTime:MM-dd HH:mm:ss}, byDate=[{dateBreakdown}]");
-                        }
-                        else
-                        {
-                            _log.Warn($"[OptionSignalsViewModel] RangeBars Empty: {symbol}, count=0");
-                        }
-                        state.RangeBarsReady.OnNext(true);
-                    }
-                    else
-                    {
-                        _log.Warn($"[OptionSignalsViewModel] RangeBars FAILED: {symbol} - code={code}, msg={msg}");
-                        state.RangeBarsReady.OnNext(true); // Signal anyway
-                    }
-                });
-
-                state.RangeBarsRequest = rangeRequest;
-            });
-
-            _vpStates[symbol] = state;
-        }
-
-        /// <summary>
-        /// Process all historical data once both tick and range bars are ready.
-        /// Context-aware: Uses prior working day data if pre-market, today's data otherwise.
-        /// In simulation mode, builds replay data instead of processing immediately.
-        /// </summary>
-        private void ProcessHistoricalData(OptionVPState state)
-        {
-            var rangeBars = state.RangeBarsRequest?.Bars;
-            var tickBars = state.TickBarsRequest?.Bars;
-
-            if (rangeBars == null || rangeBars.Count == 0)
-            {
-                _log.Warn($"[VP] {state.Symbol} no range bars available");
-                return;
-            }
-
-            if (tickBars == null || tickBars.Count == 0)
-            {
-                _log.Warn($"[VP] {state.Symbol} no tick bars available, updating ATR only");
-                // Still update ATR display
-                int lastBarIdx = rangeBars.Count - 1;
-                UpdateAtrDisplay(state, rangeBars.GetClose(lastBarIdx), rangeBars.GetTime(lastBarIdx));
-                state.LastRangeBarIndex = lastBarIdx;
-                state.LastBarCloseTime = rangeBars.GetTime(lastBarIdx);
-                return;
-            }
-
-            // Determine target date based on market phase:
-            // - PreMarket (before 9:15 on trading day): use prior working day
-            // - MarketHours/PostMarket: use today
-            // - Non-trading day (weekend/holiday): use prior working day
-            DateTime targetDate = GetTargetDataDate();
-            bool isSimMode = SimulationService.Instance.IsSimulationMode;
-
-            _log.Info($"[VP] {state.Symbol} ProcessHistoricalData: targetDate={targetDate:yyyy-MM-dd}, isSimMode={isSimMode}, " +
-                $"rangeBars={rangeBars.Count}, tickBars={tickBars.Count}");
-
-            // Count range bars and tick bars by date for diagnostics
-            var rangeDateCounts = new Dictionary<DateTime, int>();
-            for (int i = 0; i < rangeBars.Count; i++)
-            {
-                var d = rangeBars.GetTime(i).Date;
-                if (!rangeDateCounts.ContainsKey(d)) rangeDateCounts[d] = 0;
-                rangeDateCounts[d]++;
-            }
-
-            var tickDateCounts = new Dictionary<DateTime, int>();
-            for (int i = 0; i < tickBars.Count; i++)
-            {
-                var d = tickBars.GetTime(i).Date;
-                if (!tickDateCounts.ContainsKey(d)) tickDateCounts[d] = 0;
-                tickDateCounts[d]++;
-            }
-
-            var rangeBreakdown = string.Join(", ", rangeDateCounts.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key:MM-dd}:{kv.Value}"));
-            var tickBreakdown = string.Join(", ", tickDateCounts.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key:MM-dd}:{kv.Value}"));
-            _log.Info($"[VP] {state.Symbol} RangeBars byDate=[{rangeBreakdown}], TickBars byDate=[{tickBreakdown}]");
-
-            // Build sorted tick time index for target date
-            var tickTimes = new List<(DateTime time, int index)>(tickBars.Count);
-            for (int i = 0; i < tickBars.Count; i++)
-            {
-                var t = tickBars.GetTime(i);
-                if (t.Date == targetDate)
-                    tickTimes.Add((t, i));
-            }
-
-            if (tickTimes.Count == 0)
-            {
-                _log.Warn($"[VP] {state.Symbol} NO TICKS for targetDate={targetDate:yyyy-MM-dd} (available dates: [{tickBreakdown}])");
-                int lastBarIdx = rangeBars.Count - 1;
-                UpdateAtrDisplay(state, rangeBars.GetClose(lastBarIdx), rangeBars.GetTime(lastBarIdx));
-                state.LastRangeBarIndex = lastBarIdx;
-                state.LastBarCloseTime = rangeBars.GetTime(lastBarIdx);
-                return;
-            }
-
-            // Check if we're in simulation mode - if so, build replay data instead of processing now
-            if (isSimMode)
-            {
-                _log.Info($"[VP] {state.Symbol} Entering BuildSimulationReplayData: tickTimes count for {targetDate:MM-dd}={tickTimes.Count}");
-                BuildSimulationReplayData(state, rangeBars, tickTimes, targetDate);
-                return;
-            }
-
-            // Live mode: process all historical bars immediately
-            DateTime prevBarTime = DateTime.MinValue;
-            int barsProcessed = 0;
-            double lastPrice = 0;
-            int tickSearchStart = 0;
-
-            // Process each historical bar with its ticks
-            for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
-            {
-                DateTime barTime = rangeBars.GetTime(barIdx);
-
-                // Skip bars not from target date
-                if (barTime.Date != targetDate)
-                {
-                    prevBarTime = barTime;
-                    continue;
-                }
-
-                double closePrice = rangeBars.GetClose(barIdx);
-
-                // Use pre-built index and track position for O(n) total instead of O(n²)
-                lastPrice = ProcessTicksOptimized(state, tickBars, tickTimes, ref tickSearchStart, prevBarTime, barTime, lastPrice);
-
-                // Update VP close price and expire old rolling data
-                state.SessionVPEngine.SetClosePrice(closePrice);
-                state.RollingVPEngine.SetClosePrice(closePrice);
-                state.RollingVPEngine.ExpireOldData(barTime);
-
-                // Update LastClosePrice BEFORE RecalculateVP so Price Momentum and VWAP Score use current price
-                state.LastClosePrice = closePrice;
-
-                // Recalculate VP and check for trend changes on every bar (accuracy is critical)
-                RecalculateVP(state, barTime);
-
-                prevBarTime = barTime;
-                barsProcessed++;
-            }
-
-            state.LastBarCloseTime = prevBarTime;
-            state.LastRangeBarIndex = rangeBars.Count - 1;
-            state.LastClosePrice = lastPrice;
-
-            // Update ATR display with last bar
-            if (rangeBars.Count > 0)
-            {
-                int lastIdx = rangeBars.Count - 1;
-                UpdateAtrDisplay(state, rangeBars.GetClose(lastIdx), rangeBars.GetTime(lastIdx));
-            }
-
-            _log.Info($"[VP] {state.Symbol} historical processing complete: {barsProcessed} bars");
-        }
-
-        /// <summary>
-        /// Builds simulation replay data structures for deterministic bar-by-bar replay.
-        /// Called when in simulation mode to prepare bars and ticks for progressive replay.
-        /// IMPORTANT: First processes the prior working day's data to populate VP engines with
-        /// historical state before building replay data for the simulation date.
-        /// </summary>
-        private void BuildSimulationReplayData(OptionVPState state, Bars rangeBars,
-            List<(DateTime time, int index)> tickTimes, DateTime targetDate)
-        {
-            var tickBars = state.TickBarsRequest?.Bars;
-
-            // STEP 1: Pre-populate VP engines with prior working day's data
-            // This ensures session metrics (Ses B, Ses S, Ses Tr, etc.) show meaningful values
-            // before simulation starts, just like they would at market open after prior day's trading
-            DateTime priorWorkingDay = HolidayCalendarService.Instance.GetPriorWorkingDay(targetDate);
-
-            // Count range bars for prior working day for diagnostics
-            int priorDayRangeBarCount = 0;
-            int simDayRangeBarCount = 0;
-            for (int i = 0; i < rangeBars.Count; i++)
-            {
-                var barDate = rangeBars.GetTime(i).Date;
-                if (barDate == priorWorkingDay) priorDayRangeBarCount++;
-                else if (barDate == targetDate) simDayRangeBarCount++;
-            }
-
-            _log.Info($"[VP] {state.Symbol} BuildSimReplayData: priorDay={priorWorkingDay:MM-dd}, simDay={targetDate:MM-dd}, " +
-                $"priorDayRangeBars={priorDayRangeBarCount}, simDayRangeBars={simDayRangeBarCount}");
-
-            // Build tick index for prior day
-            var priorDayTickTimes = new List<(DateTime time, int index)>();
-            if (tickBars != null)
-            {
-                for (int i = 0; i < tickBars.Count; i++)
-                {
-                    var t = tickBars.GetTime(i);
-                    if (t.Date == priorWorkingDay)
-                        priorDayTickTimes.Add((t, i));
-                }
-            }
-
-            _log.Info($"[VP] {state.Symbol} priorDayTicks={priorDayTickTimes.Count}, simDayTicks(passedIn)={tickTimes.Count}");
-
-            int priorDayBarsProcessed = 0;
-            double priorDayLastPrice = 0;
-
-            if (priorDayTickTimes.Count > 0)
-            {
-                // Process all prior day bars to populate VP engines
-                DateTime prevBarTime = DateTime.MinValue;
-                int tickSearchStart = 0;
-
-                for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
-                {
-                    DateTime barTime = rangeBars.GetTime(barIdx);
-
-                    // Only process bars from prior working day
-                    if (barTime.Date != priorWorkingDay)
-                    {
-                        prevBarTime = barTime;
-                        continue;
-                    }
-
-                    double closePrice = rangeBars.GetClose(barIdx);
-
-                    // Start new bar for CD momentum engine
-                    state.CDMomoEngine.StartNewBar();
-
-                    // Process ticks for this bar
-                    while (tickSearchStart < priorDayTickTimes.Count)
-                    {
-                        var (tickTime, tickIdx) = priorDayTickTimes[tickSearchStart];
-
-                        if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime)
-                        {
-                            tickSearchStart++;
-                            continue;
-                        }
-
-                        if (tickTime > barTime) break;
-
-                        double price = tickBars.GetClose(tickIdx);
-                        long volume = tickBars.GetVolume(tickIdx);
-                        bool isBuy = price >= priorDayLastPrice;
-
-                        state.SessionVPEngine.AddTick(price, volume, isBuy);
-                        state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
-                        state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
-
-                        priorDayLastPrice = price;
-                        tickSearchStart++;
-                    }
-
-                    // Update VP close price and expire old rolling data
-                    state.SessionVPEngine.SetClosePrice(closePrice);
-                    state.RollingVPEngine.SetClosePrice(closePrice);
-                    state.RollingVPEngine.ExpireOldData(barTime);
-
-                    // Process Price Momentum
-                    state.PriceMomoEngine.ProcessBar(closePrice, barTime);
-
-                    // Close CD momentum bar
-                    state.CDMomoEngine.CloseBar(barTime);
-
-                    prevBarTime = barTime;
-                    priorDayLastPrice = closePrice;
-                    priorDayBarsProcessed++;
-                }
-
-                // After processing prior day, calculate final VP state and update display
-                if (priorDayBarsProcessed > 0)
-                {
-                    // Calculate session VP for final state display
-                    var sessResult = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
-                    var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
-
-                    // Update trend tracking
-                    state.LastSessionTrend = DetermineTrend(sessResult);
-                    state.LastRollingTrend = DetermineTrend(rollResult);
-                    state.LastClosePrice = priorDayLastPrice;
-
-                    // Update the row with prior day's final metrics
-                    HvnTrend sessTrend = state.LastSessionTrend;
-                    HvnTrend rollTrend = state.LastRollingTrend;
-
-                    if (state.Type == "CE")
-                    {
-                        state.Row.CEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
-                        state.Row.CEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
-                        state.Row.CETrendSess = sessTrend;
-                        state.Row.CEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
-                        state.Row.CEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
-                        state.Row.CETrendRoll = rollTrend;
-                    }
-                    else
-                    {
-                        state.Row.PEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
-                        state.Row.PEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
-                        state.Row.PETrendSess = sessTrend;
-                        state.Row.PEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
-                        state.Row.PEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
-                        state.Row.PETrendRoll = rollTrend;
-                    }
-
-                    _log.Info($"[VP] {state.Symbol} prior day {priorWorkingDay:yyyy-MM-dd} processed: {priorDayBarsProcessed} bars, " +
-                        $"SessHVN B={sessResult.HVNBuyCount}/S={sessResult.HVNSellCount}, RollHVN B={rollResult.HVNBuyCount}/S={rollResult.HVNSellCount}");
-                }
-            }
-            else
-            {
-                _log.Warn($"[VP] {state.Symbol} no prior day tick data found for {priorWorkingDay:yyyy-MM-dd}");
-            }
-
-            // STEP 2: Reset VP engines for simulation day (fresh session, but with populated momentum history)
-            // NOTE: Session VP should reset for new trading day (it's a fresh session at 9:15)
-            // Rolling VP intentionally NOT reset - it carries forward 60-min window of data
-            state.SessionVPEngine.Reset(0.50); // Reset session VP for new day
-
-            // Update row to reflect session reset (session is now empty, rolling has carryover)
-            // Session values reset to 0 (fresh day), Rolling values retain prior day's end values
-            if (state.Type == "CE")
-            {
-                state.Row.CEHvnBSess = "0";
-                state.Row.CEHvnSSess = "0";
-                state.Row.CETrendSess = HvnTrend.Neutral;
-                state.Row.CETrendSessTime = "";
-                // Rolling values intentionally kept from prior day processing above
-            }
-            else
-            {
-                state.Row.PEHvnBSess = "0";
-                state.Row.PEHvnSSess = "0";
-                state.Row.PETrendSess = HvnTrend.Neutral;
-                state.Row.PETrendSessTime = "";
-                // Rolling values intentionally kept from prior day processing above
-            }
-
-            // Reset session trend tracking for new day
-            state.LastSessionTrend = HvnTrend.Neutral;
-            state.SessionTrendOnsetTime = null;
-            // Rolling trend tracking intentionally kept
-
-            // Store last price from prior day for determining buy/sell direction on first sim ticks
-            state.SimLastPrice = priorDayLastPrice > 0 ? priorDayLastPrice : 0;
-
-            // STEP 3: Build list of simulation day bars to replay
-            state.SimReplayBars = new List<(DateTime BarTime, double ClosePrice, DateTime PrevBarTime)>();
-            DateTime prevSimBarTime = DateTime.MinValue;
-
-            for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
-            {
-                DateTime barTime = rangeBars.GetTime(barIdx);
-
-                // Skip bars not from target date
-                if (barTime.Date != targetDate)
-                {
-                    prevSimBarTime = barTime;
-                    continue;
-                }
-
-                double closePrice = rangeBars.GetClose(barIdx);
-                state.SimReplayBars.Add((barTime, closePrice, prevSimBarTime));
-                prevSimBarTime = barTime;
-            }
-
-            // Store tick times for replay
-            state.SimTickTimes = tickTimes;
-            state.SimReplayBarIndex = 0;
-            state.SimReplayTickIndex = 0;
-            state.SimDataReady = true;
-
-            _log.Info($"[VP] {state.Symbol} simulation replay data ready: {state.SimReplayBars.Count} bars for {targetDate:yyyy-MM-dd}, " +
-                $"{tickTimes.Count} ticks (prior day pre-populated: {priorDayBarsProcessed} bars)");
-        }
-
-        /// <summary>
-        /// Optimized tick processing using pre-built index and tracking search position.
-        /// Feeds ticks to VP engines and CD Momentum engine.
-        /// </summary>
-        private double ProcessTicksOptimized(OptionVPState state, Bars tickBars,
-            List<(DateTime time, int index)> tickTimes, ref int searchStart,
-            DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
-        {
-            int tickCount = 0;
-
-            // Start new bar for CD momentum engine
-            state.CDMomoEngine.StartNewBar();
-
-            // Scan from last position (O(n) total across all bars instead of O(n²))
-            while (searchStart < tickTimes.Count)
-            {
-                var (tickTime, tickIdx) = tickTimes[searchStart];
-
-                // Skip ticks before or at previous bar close
-                if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime)
-                {
-                    searchStart++;
-                    continue;
-                }
-
-                // Stop if tick is after current bar close time
-                if (tickTime > currentBarTime) break;
-
-                double price = tickBars.GetClose(tickIdx);
-                long volume = tickBars.GetVolume(tickIdx);
-                bool isBuy = price >= lastPrice;
-
-                // Feed to VP engines
-                state.SessionVPEngine.AddTick(price, volume, isBuy);
-                state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
-
-                // Feed to CD Momentum engine
-                state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
-
-                lastPrice = price;
-                tickCount++;
-                searchStart++;
-            }
-
-            state.LastVPTickIndex = searchStart > 0 ? tickTimes[searchStart - 1].index : -1;
-            return lastPrice;
-        }
-
-        /// <summary>
-        /// Process ticks within a time window (between prevBarTime and currentBarTime).
-        /// Returns the last processed price.
-        /// Feeds ticks to VP engines and CD Momentum engine.
-        /// </summary>
-        private double ProcessTicksInWindow(OptionVPState state, Bars tickBars, DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
-        {
-            DateTime today = DateTime.Today;
-            int tickCount = 0;
-            int startIdx = state.LastVPTickIndex + 1;
-            if (startIdx < 0) startIdx = 0;
-
-            // Start new bar for CD momentum engine
-            state.CDMomoEngine.StartNewBar();
-
-            for (int i = startIdx; i < tickBars.Count; i++)
-            {
-                var tickTime = tickBars.GetTime(i);
-
-                // Skip ticks before today
-                if (tickTime.Date < today) continue;
-
-                // Skip ticks before or at previous bar close (already processed)
-                if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime) continue;
-
-                // Stop if tick is after current bar close time
-                if (tickTime > currentBarTime) break;
-
-                double price = tickBars.GetClose(i);
-                long volume = tickBars.GetVolume(i);
-                bool isBuy = price >= lastPrice;
-
-                // Add to both VP engines
-                state.SessionVPEngine.AddTick(price, volume, isBuy);
-                state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
-
-                // Feed to CD Momentum engine
-                state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
-
-                lastPrice = price;
-                tickCount++;
-                state.LastVPTickIndex = i;
-            }
-
-            if (tickCount > 0)
-            {
-                _log.Debug($"[VP] {state.Symbol} processed {tickCount} ticks for bar at {currentBarTime:HH:mm:ss}");
-            }
-
-            return lastPrice;
-        }
-
-        /// <summary>
-        /// Handle real-time bar updates (after initial historical processing).
-        /// </summary>
-        private void OnRealTimeBarUpdate(OptionVPState state, BarsUpdateEventArgs e)
-        {
-            var bars = state.RangeBarsRequest?.Bars;
-            if (bars == null) return;
-
-            int closedBarIndex = e.MaxIndex - 1;
-            if (closedBarIndex < 0 || closedBarIndex <= state.LastRangeBarIndex) return;
-
-            double close = bars.GetClose(closedBarIndex);
-            DateTime barTime = bars.GetTime(closedBarIndex);
-
-            // Update ATR display
-            UpdateAtrDisplay(state, close, barTime);
-
-            // Process ticks from previous bar close to current bar close
-            var tickBars = state.TickBarsRequest?.Bars;
-            if (tickBars != null && tickBars.Count > 0)
-            {
-                ProcessTicksInWindow(state, tickBars, state.LastBarCloseTime, barTime, state.LastClosePrice);
-            }
-
-            // Update VP and recalculate
-            state.SessionVPEngine.SetClosePrice(close);
-            state.RollingVPEngine.SetClosePrice(close);
-            state.RollingVPEngine.ExpireOldData(barTime);
-
-            // Update LastClosePrice with range bar close (used for Price Momentum and VWAP Score)
-            state.LastClosePrice = close;
-
-            RecalculateVP(state, barTime);
-
-            state.LastBarCloseTime = barTime;
-            state.LastRangeBarIndex = closedBarIndex;
-        }
-
-        private void UpdateAtrDisplay(OptionVPState state, double close, DateTime barTime)
-        {
-            string timeStr = barTime.ToString("HH:mm:ss");
-            if (state.Type == "CE")
-            {
-                state.Row.CEAtrLTP = close.ToString("F2");
-                state.Row.CEAtrTime = timeStr;
-            }
-            else
-            {
-                state.Row.PEAtrLTP = close.ToString("F2");
-                state.Row.PEAtrTime = timeStr;
-            }
-        }
-
-        private void RecalculateVP(OptionVPState state, DateTime currentTime)
-        {
-            // Calculate Session VP
-            var sessResult = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
-
-            // Calculate Rolling VP
-            var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
-
-            // Close CD Momentum bar and get result (smaMomentum style: Momentum + Smooth)
-            var cdMomoResult = state.CDMomoEngine.CloseBar(currentTime);
-
-            // Process Price Momentum (using last close price)
-            var priceMomoResult = state.PriceMomoEngine.ProcessBar(state.LastClosePrice, currentTime);
-
-            // Determine HVN trends
-            HvnTrend sessTrend = DetermineTrend(sessResult);
-            HvnTrend rollTrend = DetermineTrend(rollResult);
-
-            // Track HVN trend onset times
-            string sessTrendTime = state.Type == "CE" ? state.Row.CETrendSessTime : state.Row.PETrendSessTime;
-            string rollTrendTime = state.Type == "CE" ? state.Row.CETrendRollTime : state.Row.PETrendRollTime;
-
-            // Update session trend time if changed
-            if (sessTrend != state.LastSessionTrend && sessTrend != HvnTrend.Neutral)
-            {
-                state.SessionTrendOnsetTime = currentTime;
-                sessTrendTime = currentTime.ToString("HH:mm:ss");
-                _log.Info($"[Trend] {state.Symbol} Session trend changed to {sessTrend} at {sessTrendTime}");
-            }
-            state.LastSessionTrend = sessTrend;
-
-            // Update rolling trend time if changed
-            if (rollTrend != state.LastRollingTrend && rollTrend != HvnTrend.Neutral)
-            {
-                state.RollingTrendOnsetTime = currentTime;
-                rollTrendTime = currentTime.ToString("HH:mm:ss");
-                _log.Info($"[Trend] {state.Symbol} Rolling trend changed to {rollTrend} at {rollTrendTime}");
-            }
-            state.LastRollingTrend = rollTrend;
-
-            // Calculate VWAP scores based on current price position relative to SD bands
-            int sessVwapScore = VWAPScoreCalculator.CalculateScore(state.LastClosePrice, sessResult);
-            int rollVwapScore = VWAPScoreCalculator.CalculateScore(state.LastClosePrice, rollResult);
-
-            // Debug logging for first few calculations per symbol to diagnose VWAP score issue
-            if (state.Row.Strike == 23600 && state.Type == "CE")
-            {
-                _log.Debug($"[VWAP Debug] {state.Symbol} Price={state.LastClosePrice:F2}, " +
-                    $"SessVWAP={sessResult.VWAP:F2}, SessSD={sessResult.StdDev:F2}, " +
-                    $"Sess1SD={sessResult.Upper1SD:F2}/{sessResult.Lower1SD:F2}, " +
-                    $"Sess2SD={sessResult.Upper2SD:F2}/{sessResult.Lower2SD:F2}, " +
-                    $"SessScore={sessVwapScore}, RollScore={rollVwapScore}, IsValid={sessResult.IsValid}");
-            }
-
-            // Update row based on type
-            if (state.Type == "CE")
-            {
-                // HVN metrics
-                state.Row.CEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
-                state.Row.CEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
-                state.Row.CETrendSess = sessTrend;
-                state.Row.CETrendSessTime = sessTrendTime;
-
-                state.Row.CEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
-                state.Row.CEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
-                state.Row.CETrendRoll = rollTrend;
-                state.Row.CETrendRollTime = rollTrendTime;
-
-                // CD Momentum metrics (smaMomentum style)
-                state.Row.CECDMomo = FormatMomentum(cdMomoResult.Momentum);
-                state.Row.CECDSmooth = FormatMomentum(cdMomoResult.Smooth);
-
-                // Price Momentum metrics (smaMomentum style)
-                state.Row.CEPriceMomo = FormatMomentum(priceMomoResult.Momentum);
-                state.Row.CEPriceSmooth = FormatMomentum(priceMomoResult.Smooth);
-
-                // VWAP Score metrics
-                state.Row.CEVwapScoreSess = sessVwapScore;
-                state.Row.CEVwapScoreRoll = rollVwapScore;
-            }
-            else
-            {
-                // HVN metrics
-                state.Row.PEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
-                state.Row.PEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
-                state.Row.PETrendSess = sessTrend;
-                state.Row.PETrendSessTime = sessTrendTime;
-
-                state.Row.PEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
-                state.Row.PEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
-                state.Row.PETrendRoll = rollTrend;
-                state.Row.PETrendRollTime = rollTrendTime;
-
-                // CD Momentum metrics (smaMomentum style)
-                state.Row.PECDMomo = FormatMomentum(cdMomoResult.Momentum);
-                state.Row.PECDSmooth = FormatMomentum(cdMomoResult.Smooth);
-
-                // Price Momentum metrics (smaMomentum style)
-                state.Row.PEPriceMomo = FormatMomentum(priceMomoResult.Momentum);
-                state.Row.PEPriceSmooth = FormatMomentum(priceMomoResult.Smooth);
-
-                // VWAP Score metrics
-                state.Row.PEVwapScoreSess = sessVwapScore;
-                state.Row.PEVwapScoreRoll = rollVwapScore;
-            }
-
-            // Store bar snapshot in circular buffer for historical lookups
-            if (state.BarHistory != null)
-            {
-                var barSnapshot = new OptionBarSnapshot
-                {
-                    BarTime = currentTime,
-                    ClosePrice = state.LastClosePrice,
-                    SessHvnB = sessResult.IsValid ? sessResult.HVNBuyCount : 0,
-                    SessHvnS = sessResult.IsValid ? sessResult.HVNSellCount : 0,
-                    SessTrend = sessTrend,
-                    RollHvnB = rollResult.IsValid ? rollResult.HVNBuyCount : 0,
-                    RollHvnS = rollResult.IsValid ? rollResult.HVNSellCount : 0,
-                    RollTrend = rollTrend,
-                    CDMomentum = cdMomoResult.Momentum,
-                    CDSmooth = cdMomoResult.Smooth,
-                    CDBias = cdMomoResult.Bias,
-                    PriceMomentum = priceMomoResult.Momentum,
-                    PriceSmooth = priceMomoResult.Smooth,
-                    PriceBias = priceMomoResult.Bias,
-                    VwapScoreSess = sessVwapScore,
-                    VwapScoreRoll = rollVwapScore,
-                    SessionVWAP = sessResult.VWAP,
-                    RollingVWAP = rollResult.VWAP
-                };
-                state.BarHistory.AddBar(barSnapshot);
-            }
-
-            // Feed snapshot to SignalsOrchestrator for signal evaluation
-            if (_signalsOrchestrator != null)
-            {
-                // Calculate DTE
-                int dte = _selectedExpiry.HasValue ? (_selectedExpiry.Value.Date - DateTime.Today).Days : 0;
-
-                // Determine moneyness relative to ATM
-                Moneyness moneyness = DetermineMoneyness(state.Row.Strike, state.Type);
-
-                var snapshot = new OptionStateSnapshot
-                {
-                    Symbol = state.Symbol,
-                    Strike = state.Row.Strike,
-                    OptionType = state.Type,
-                    Moneyness = moneyness,
-                    DTE = dte,
-                    LastPrice = state.LastClosePrice,
-                    LastPriceTime = currentTime,
-                    RangeBarClosePrice = state.LastClosePrice,
-                    RangeBarCloseTime = currentTime,
-
-                    // VP Session metrics
-                    SessHvnB = sessResult.IsValid ? sessResult.HVNBuyCount : 0,
-                    SessHvnS = sessResult.IsValid ? sessResult.HVNSellCount : 0,
-                    SessTrend = sessTrend,
-                    SessTrendOnsetTime = state.SessionTrendOnsetTime,
-
-                    // VP Rolling metrics
-                    RollHvnB = rollResult.IsValid ? rollResult.HVNBuyCount : 0,
-                    RollHvnS = rollResult.IsValid ? rollResult.HVNSellCount : 0,
-                    RollTrend = rollTrend,
-                    RollTrendOnsetTime = state.RollingTrendOnsetTime,
-
-                    // Momentum metrics
-                    CDMomentum = cdMomoResult.Momentum,
-                    CDSmooth = cdMomoResult.Smooth,
-                    CDBias = cdMomoResult.Bias,
-                    PriceMomentum = priceMomoResult.Momentum,
-                    PriceSmooth = priceMomoResult.Smooth,
-                    PriceBias = priceMomoResult.Bias,
-
-                    // VWAP metrics
-                    VwapScoreSess = sessVwapScore,
-                    VwapScoreRoll = rollVwapScore,
-                    SessionVWAP = sessResult.VWAP,
-                    RollingVWAP = rollResult.VWAP
-                };
-
-                _signalsOrchestrator.UpdateOptionState(snapshot, state.BarHistory);
-            }
-        }
-
-        /// <summary>
-        /// Determines moneyness classification based on strike relative to ATM.
-        /// </summary>
-        private Moneyness DetermineMoneyness(double strike, string optionType)
-        {
-            int strikeDiff = (int)((strike - _atmStrike) / _strikeStep);
-
-            if (optionType == "CE")
-            {
-                // For CE: lower strike = ITM, higher strike = OTM
-                if (strikeDiff == 0) return Moneyness.ATM;
-                if (strikeDiff == -1) return Moneyness.ITM1;
-                if (strikeDiff <= -2 && strikeDiff >= -3) return Moneyness.ITM2;
-                if (strikeDiff < -3) return Moneyness.DeepITM;
-                if (strikeDiff == 1) return Moneyness.OTM1;
-                if (strikeDiff >= 2 && strikeDiff <= 3) return Moneyness.OTM2;
-                return Moneyness.DeepOTM;
-            }
-            else // PE
-            {
-                // For PE: higher strike = ITM, lower strike = OTM
-                if (strikeDiff == 0) return Moneyness.ATM;
-                if (strikeDiff == 1) return Moneyness.ITM1;
-                if (strikeDiff >= 2 && strikeDiff <= 3) return Moneyness.ITM2;
-                if (strikeDiff > 3) return Moneyness.DeepITM;
-                if (strikeDiff == -1) return Moneyness.OTM1;
-                if (strikeDiff <= -2 && strikeDiff >= -3) return Moneyness.OTM2;
-                return Moneyness.DeepOTM;
-            }
-        }
-
-        /// <summary>
-        /// Formats momentum value for display (K for thousands, M for millions).
-        /// </summary>
-        private string FormatMomentum(double momentum)
-        {
-            if (Math.Abs(momentum) >= 1_000_000)
-                return (momentum / 1_000_000.0).ToString("F1") + "M";
-            else if (Math.Abs(momentum) >= 1_000)
-                return (momentum / 1_000.0).ToString("F1") + "K";
-            else
-                return momentum.ToString("F1");
-        }
-
-        private HvnTrend DetermineTrend(VPResult result)
-        {
-            if (!result.IsValid) return HvnTrend.Neutral;
-
-            if (result.HVNBuyCount > result.HVNSellCount)
-                return HvnTrend.Bullish;
-            else if (result.HVNSellCount > result.HVNBuyCount)
-                return HvnTrend.Bearish;
-            else
-                return HvnTrend.Neutral;
         }
 
         private void OnOptionPriceBatch(IList<OptionPriceUpdate> batch)
         {
-            bool isSimulationMode = SimulationService.Instance.IsSimulationActive;
-
             foreach (var update in batch)
             {
-                if (_symbolToRowMap.TryGetValue(update.Symbol, out var map))
-                {
-                    string timeStr = update.Timestamp.ToString("HH:mm:ss");
-                    if (map.type == "CE")
-                    {
-                        map.row.CELTP = update.Price.ToString("F2");
-                        map.row.CETickTime = timeStr;
-                    }
-                    else
-                    {
-                        map.row.PELTP = update.Price.ToString("F2");
-                        map.row.PETickTime = timeStr;
-                    }
+                // Pass updates to compute service for signal generation & VP
+                _computeService.UpdateSignalPrice(update.Symbol, update.Price);
 
-                    // In simulation mode, also process ticks through VP engines
-                    if (isSimulationMode && _vpStates.TryGetValue(update.Symbol, out var vpState))
-                    {
-                        ProcessSimulatedTick(vpState, update.Price, update.Timestamp);
-                    }
+                // Update UI row if present in current display set
+                var row = _computeService.GetRowForSymbol(update.Symbol);
+                if (row == null) continue;
+
+                // Only update if this row is currently being displayed/tracked
+                // Note: GetRowForSymbol returns the master row object, so updating it updates the UI 
+                // if that row is in our ObservableCollection
+                
+                string timeStr = update.Timestamp.ToString("HH:mm:ss");
+
+                if (update.Symbol == row.CESymbol)
+                {
+                    row.CELTP = update.Price.ToString("F2");
+                    row.CETickTime = timeStr;
+                }
+                else if (update.Symbol == row.PESymbol)
+                {
+                    row.PELTP = update.Price.ToString("F2");
+                    row.PETickTime = timeStr;
                 }
             }
-        }
-
-        /// <summary>
-        /// Process a simulated tick - advances through pre-built historical bars as simulation time progresses.
-        /// Uses actual RangeATR bars from NT8 database for deterministic replay.
-        /// </summary>
-        private void ProcessSimulatedTick(OptionVPState state, double price, DateTime tickTime)
-        {
-            // IMPORTANT: Update signal prices on EVERY tick for real-time P&L tracking
-            // This MUST be called before early returns to ensure prices update even when bar data isn't ready
-            _signalsOrchestrator?.UpdateSignalPrice(state.Symbol, price);
-
-            // Check if simulation replay data is ready
-            if (!state.SimDataReady || state.SimReplayBars == null || state.SimReplayBars.Count == 0)
-            {
-                return; // Data not ready yet
-            }
-
-            var tickBars = state.TickBarsRequest?.Bars;
-            if (tickBars == null || state.SimTickTimes == null)
-            {
-                return; // No tick data available
-            }
-
-            // Process all bars that should have closed by tickTime
-            while (state.SimReplayBarIndex < state.SimReplayBars.Count)
-            {
-                var bar = state.SimReplayBars[state.SimReplayBarIndex];
-
-                // Only process bars whose close time has been reached
-                if (bar.BarTime > tickTime)
-                {
-                    break; // Bar hasn't closed yet in simulation time
-                }
-
-                // Start new bar for CD momentum engine
-                state.CDMomoEngine.StartNewBar();
-
-                // Process all ticks within this bar's time window
-                while (state.SimReplayTickIndex < state.SimTickTimes.Count)
-                {
-                    var (tTime, tIdx) = state.SimTickTimes[state.SimReplayTickIndex];
-
-                    // Skip ticks before or at previous bar close
-                    if (bar.PrevBarTime != DateTime.MinValue && tTime <= bar.PrevBarTime)
-                    {
-                        state.SimReplayTickIndex++;
-                        continue;
-                    }
-
-                    // Stop if tick is after current bar close time
-                    if (tTime > bar.BarTime)
-                    {
-                        break;
-                    }
-
-                    // Process this tick
-                    double tPrice = tickBars.GetClose(tIdx);
-                    long tVolume = tickBars.GetVolume(tIdx);
-                    bool isBuy = tPrice >= state.SimLastPrice;
-
-                    // Feed to VP engines
-                    state.SessionVPEngine.AddTick(tPrice, tVolume, isBuy);
-                    state.RollingVPEngine.AddTick(tPrice, tVolume, isBuy, tTime);
-                    state.CDMomoEngine.AddTick(tPrice, tVolume, isBuy, tTime);
-
-                    state.SimLastPrice = tPrice;
-                    state.SimReplayTickIndex++;
-                }
-
-                // Close the bar
-                double closePrice = bar.ClosePrice;
-                DateTime barTime = bar.BarTime;
-
-                // Update ATR display
-                UpdateAtrDisplay(state, closePrice, barTime);
-
-                // Update VP engines
-                state.SessionVPEngine.SetClosePrice(closePrice);
-                state.RollingVPEngine.SetClosePrice(closePrice);
-                state.RollingVPEngine.ExpireOldData(barTime);
-
-                // Update LastClosePrice for Price Momentum and VWAP Score
-                state.LastClosePrice = closePrice;
-
-                // Recalculate VP and check for signals
-                RecalculateVP(state, barTime);
-
-                state.LastBarCloseTime = barTime;
-                state.LastRangeBarIndex = state.SimReplayBarIndex;
-
-                _log.Debug($"[SimReplay] {state.Symbol} Bar {state.SimReplayBarIndex + 1}/{state.SimReplayBars.Count} closed at {barTime:HH:mm:ss}, Close={closePrice:F2}");
-
-                state.SimReplayBarIndex++;
-            }
-        }
-
-        /// <summary>
-        /// Determines which date's data to process based on current market phase:
-        /// - Simulation mode: use simulation date from SimulationService
-        /// - PreMarket (before 9:15 on a trading day): use prior working day
-        /// - MarketHours/PostMarket on a trading day: use today
-        /// - Non-trading day (weekend/holiday): use prior working day
-        /// </summary>
-        private DateTime GetTargetDataDate()
-        {
-            // In simulation mode, use the simulation date
-            if (SimulationService.Instance.IsSimulationMode)
-            {
-                var simConfig = SimulationService.Instance.CurrentConfig;
-                if (simConfig != null)
-                {
-                    _log.Info($"[OptionSignalsViewModel] GetTargetDataDate: Using simulation date {simConfig.SimulationDate:yyyy-MM-dd}");
-                    return simConfig.SimulationDate.Date;
-                }
-            }
-
-            DateTime today = DateTime.Today;
-
-            // If today is not a trading day (weekend or holiday), use prior working day
-            if (DateTimeHelper.IsNonTradingDay(today))
-            {
-                return HolidayCalendarService.Instance.GetPriorWorkingDay(today);
-            }
-
-            // If pre-market (before 9:15 AM), use prior working day
-            if (DateTimeHelper.IsPreMarket())
-            {
-                return HolidayCalendarService.Instance.GetPriorWorkingDay(today);
-            }
-
-            // During market hours or post-market on a trading day, use today
-            return today;
-        }
-
-        private void ClearAllVPStates()
-        {
-            foreach (var state in _vpStates.Values)
-            {
-                try
-                {
-                    state.Dispose();
-                }
-                catch { }
-            }
-            _vpStates.Clear();
         }
 
         public void Dispose()

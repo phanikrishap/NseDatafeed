@@ -1,0 +1,543 @@
+using System;
+using System.Collections.Generic;
+using NinjaTrader.Data;
+using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models;
+using ZerodhaDatafeedAdapter.Helpers;
+using ZerodhaDatafeedAdapter.Logging;
+using ZerodhaDatafeedAdapter.Services;
+using ZerodhaDatafeedAdapter.Services.Analysis;
+using ZerodhaDatafeedAdapter.Services.Analysis.Components;
+
+namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
+{
+    /// <summary>
+    /// Handles VP (Volume Profile) calculation, HVN trends, and momentum processing.
+    /// Extracted from OptionSignalsViewModel for single responsibility.
+    /// </summary>
+    public class OptionVPProcessor
+    {
+        private const double VALUE_AREA_PERCENT = 0.70;
+        private const double HVN_RATIO = 0.25;
+
+        private static readonly ILoggerService _log = LoggerFactory.OpSignals;
+
+        // Reference to orchestrator for signal evaluation
+        public SignalsOrchestrator SignalsOrchestrator { get; set; }
+
+        // Reference to simulation processor for delegation
+        private OptionSimulationProcessor _simProcessor;
+
+        // Market context for signal evaluation
+        private double _atmStrike;
+        private int _strikeStep = 50;
+        private DateTime? _selectedExpiry;
+        private string _underlying = "NIFTY";
+
+        public void SetSimulationProcessor(OptionSimulationProcessor simProcessor)
+        {
+            _simProcessor = simProcessor;
+        }
+
+        public void SetMarketContext(double atmStrike, int strikeStep, DateTime? expiry, string underlying)
+        {
+            _atmStrike = atmStrike;
+            _strikeStep = strikeStep;
+            _selectedExpiry = expiry;
+            _underlying = underlying;
+        }
+
+        /// <summary>
+        /// Process historical data for a VP state.
+        /// Called when both tick and range data are ready.
+        /// </summary>
+        public void ProcessHistoricalData(OptionVPState state)
+        {
+            var rangeBars = state.RangeBarsRequest?.Bars;
+            var tickBars = state.TickBarsRequest?.Bars;
+
+            if (rangeBars == null || rangeBars.Count == 0)
+            {
+                _log.Warn($"[VPProcessor] {state.Symbol} no range bars available");
+                return;
+            }
+
+            if (tickBars == null || tickBars.Count == 0)
+            {
+                _log.Warn($"[VPProcessor] {state.Symbol} no tick bars available, updating ATR only");
+                int lastBarIdx = rangeBars.Count - 1;
+                UpdateAtrDisplay(state, rangeBars.GetClose(lastBarIdx), rangeBars.GetTime(lastBarIdx));
+                state.LastRangeBarIndex = lastBarIdx;
+                state.LastBarCloseTime = rangeBars.GetTime(lastBarIdx);
+                return;
+            }
+
+            // Determine target date
+            DateTime targetDate = GetTargetDataDate();
+            bool isSimMode = SimulationService.Instance.IsSimulationMode;
+
+            _log.Info($"[VPProcessor] {state.Symbol} ProcessHistoricalData: targetDate={targetDate:yyyy-MM-dd}, isSimMode={isSimMode}, rangeBars={rangeBars.Count}, tickBars={tickBars.Count}");
+
+            // Build tick time index for target date
+            var tickTimes = BuildTickTimeIndex(tickBars, targetDate);
+
+            if (tickTimes.Count == 0)
+            {
+                _log.Warn($"[VPProcessor] {state.Symbol} no ticks for targetDate={targetDate:yyyy-MM-dd}");
+                int lastBarIdx = rangeBars.Count - 1;
+                UpdateAtrDisplay(state, rangeBars.GetClose(lastBarIdx), rangeBars.GetTime(lastBarIdx));
+                state.LastRangeBarIndex = lastBarIdx;
+                state.LastBarCloseTime = rangeBars.GetTime(lastBarIdx);
+                return;
+            }
+
+            if (isSimMode && _simProcessor != null)
+            {
+                _log.Info($"[VPProcessor] {state.Symbol} Delegating to SimulationProcessor for replay data");
+                _simProcessor.BuildReplayData(state, rangeBars, tickTimes, targetDate);
+                return;
+            }
+
+            // Live mode: process all historical bars
+            ProcessHistoricalBars(state, rangeBars, tickBars, tickTimes, targetDate);
+        }
+
+        /// <summary>
+        /// Process historical bars for live mode.
+        /// </summary>
+        private void ProcessHistoricalBars(OptionVPState state, Bars rangeBars, Bars tickBars,
+            List<(DateTime time, int index)> tickTimes, DateTime targetDate)
+        {
+            DateTime prevBarTime = DateTime.MinValue;
+            int barsProcessed = 0;
+            double lastPrice = 0;
+            int tickSearchStart = 0;
+
+            for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
+            {
+                DateTime barTime = rangeBars.GetTime(barIdx);
+
+                if (barTime.Date != targetDate)
+                {
+                    prevBarTime = barTime;
+                    continue;
+                }
+
+                double closePrice = rangeBars.GetClose(barIdx);
+
+                // Process ticks for this bar
+                lastPrice = ProcessTicksOptimized(state, tickBars, tickTimes, ref tickSearchStart, prevBarTime, barTime, lastPrice);
+
+                // Update VP close price and expire old rolling data
+                state.SessionVPEngine.SetClosePrice(closePrice);
+                state.RollingVPEngine.SetClosePrice(closePrice);
+                state.RollingVPEngine.ExpireOldData(barTime);
+                state.LastClosePrice = closePrice;
+
+                // Recalculate VP
+                RecalculateVP(state, barTime);
+
+                prevBarTime = barTime;
+                barsProcessed++;
+            }
+
+            state.LastBarCloseTime = prevBarTime;
+            state.LastRangeBarIndex = rangeBars.Count - 1;
+            state.LastClosePrice = lastPrice;
+
+            if (rangeBars.Count > 0)
+            {
+                int lastIdx = rangeBars.Count - 1;
+                UpdateAtrDisplay(state, rangeBars.GetClose(lastIdx), rangeBars.GetTime(lastIdx));
+            }
+
+            _log.Info($"[VPProcessor] {state.Symbol} historical processing complete: {barsProcessed} bars");
+        }
+
+        /// <summary>
+        /// Handle real-time bar update.
+        /// </summary>
+        public void ProcessRealTimeBar(OptionVPState state, BarsUpdateEventArgs e)
+        {
+            var bars = state.RangeBarsRequest?.Bars;
+            if (bars == null) return;
+
+            int closedBarIndex = e.MaxIndex - 1;
+            if (closedBarIndex < 0 || closedBarIndex <= state.LastRangeBarIndex) return;
+
+            double close = bars.GetClose(closedBarIndex);
+            DateTime barTime = bars.GetTime(closedBarIndex);
+
+            // Update ATR display
+            UpdateAtrDisplay(state, close, barTime);
+
+            // Process ticks from previous bar close to current bar close
+            var tickBars = state.TickBarsRequest?.Bars;
+            if (tickBars != null && tickBars.Count > 0)
+            {
+                ProcessTicksInWindow(state, tickBars, state.LastBarCloseTime, barTime, state.LastClosePrice);
+            }
+
+            // Update VP and recalculate
+            state.SessionVPEngine.SetClosePrice(close);
+            state.RollingVPEngine.SetClosePrice(close);
+            state.RollingVPEngine.ExpireOldData(barTime);
+            state.LastClosePrice = close;
+
+            RecalculateVP(state, barTime);
+
+            state.LastBarCloseTime = barTime;
+            state.LastRangeBarIndex = closedBarIndex;
+        }
+
+        /// <summary>
+        /// Recalculate VP metrics and update row.
+        /// </summary>
+        public void RecalculateVP(OptionVPState state, DateTime currentTime)
+        {
+            // Calculate Session VP
+            var sessResult = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+            var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+
+            // Get momentum results
+            var cdMomoResult = state.CDMomoEngine.CloseBar(currentTime);
+            var priceMomoResult = state.PriceMomoEngine.ProcessBar(state.LastClosePrice, currentTime);
+
+            // Determine trends
+            HvnTrend sessTrend = DetermineTrend(sessResult);
+            HvnTrend rollTrend = DetermineTrend(rollResult);
+
+            // Calculate VWAP scores
+            int sessVwapScore = VWAPScoreCalculator.CalculateScore(state.LastClosePrice, sessResult);
+            int rollVwapScore = VWAPScoreCalculator.CalculateScore(state.LastClosePrice, rollResult);
+
+            // Track trend times
+            string sessTrendTime = state.Type == "CE" ? state.Row.CETrendSessTime : state.Row.PETrendSessTime;
+            string rollTrendTime = state.Type == "CE" ? state.Row.CETrendRollTime : state.Row.PETrendRollTime;
+
+            if (sessTrend != state.LastSessionTrend && sessTrend != HvnTrend.Neutral)
+            {
+                state.SessionTrendOnsetTime = currentTime;
+                sessTrendTime = currentTime.ToString("HH:mm:ss");
+                _log.Info($"[VPProcessor] {state.Symbol} Session trend changed to {sessTrend} at {sessTrendTime}");
+            }
+            state.LastSessionTrend = sessTrend;
+
+            if (rollTrend != state.LastRollingTrend && rollTrend != HvnTrend.Neutral)
+            {
+                state.RollingTrendOnsetTime = currentTime;
+                rollTrendTime = currentTime.ToString("HH:mm:ss");
+                _log.Info($"[VPProcessor] {state.Symbol} Rolling trend changed to {rollTrend} at {rollTrendTime}");
+            }
+            state.LastRollingTrend = rollTrend;
+
+            // Update row metrics based on type
+            UpdateRowMetrics(state, sessResult, rollResult, cdMomoResult, priceMomoResult,
+                            sessTrend, rollTrend, sessTrendTime, rollTrendTime, sessVwapScore, rollVwapScore);
+
+            // Store bar snapshot
+            StoreBarSnapshot(state, sessResult, rollResult, cdMomoResult, priceMomoResult,
+                            sessTrend, rollTrend, sessVwapScore, rollVwapScore, currentTime);
+
+            // Feed to SignalsOrchestrator
+            NotifySignalsOrchestrator(state, sessResult, rollResult, cdMomoResult, priceMomoResult,
+                                     sessTrend, rollTrend, sessVwapScore, rollVwapScore, currentTime);
+        }
+
+        /// <summary>
+        /// Process a simulated tick - delegates to simulation processor.
+        /// </summary>
+        public void ProcessSimulatedTick(OptionVPState state, double price, DateTime tickTime)
+        {
+            if (_simProcessor != null)
+            {
+                _simProcessor.ProcessSimulatedTick(state, price, tickTime);
+            }
+        }
+
+        #region Helper Methods
+
+        private List<(DateTime time, int index)> BuildTickTimeIndex(Bars tickBars, DateTime targetDate)
+        {
+            var tickTimes = new List<(DateTime time, int index)>(tickBars?.Count ?? 0);
+            if (tickBars == null) return tickTimes;
+
+            for (int i = 0; i < tickBars.Count; i++)
+            {
+                var t = tickBars.GetTime(i);
+                if (t.Date == targetDate)
+                    tickTimes.Add((t, i));
+            }
+            return tickTimes;
+        }
+
+        private double ProcessTicksOptimized(OptionVPState state, Bars tickBars,
+            List<(DateTime time, int index)> tickTimes, ref int searchStart,
+            DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
+        {
+            // Start new bar for CD momentum engine
+            state.CDMomoEngine.StartNewBar();
+
+            while (searchStart < tickTimes.Count)
+            {
+                var (tickTime, tickIdx) = tickTimes[searchStart];
+
+                if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime)
+                {
+                    searchStart++;
+                    continue;
+                }
+
+                if (tickTime > currentBarTime) break;
+
+                double price = tickBars.GetClose(tickIdx);
+                long volume = tickBars.GetVolume(tickIdx);
+                bool isBuy = price >= lastPrice;
+
+                state.SessionVPEngine.AddTick(price, volume, isBuy);
+                state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+                state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
+
+                lastPrice = price;
+                searchStart++;
+            }
+
+            state.LastVPTickIndex = searchStart > 0 ? tickTimes[searchStart - 1].index : -1;
+            return lastPrice;
+        }
+
+        private void ProcessTicksInWindow(OptionVPState state, Bars tickBars, DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
+        {
+            DateTime today = DateTime.Today;
+            int startIdx = state.LastVPTickIndex + 1;
+            if (startIdx < 0) startIdx = 0;
+
+            state.CDMomoEngine.StartNewBar();
+
+            for (int i = startIdx; i < tickBars.Count; i++)
+            {
+                var tickTime = tickBars.GetTime(i);
+
+                if (tickTime.Date < today) continue;
+                if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime) continue;
+                if (tickTime > currentBarTime) break;
+
+                double price = tickBars.GetClose(i);
+                long volume = tickBars.GetVolume(i);
+                bool isBuy = price >= lastPrice;
+
+                state.SessionVPEngine.AddTick(price, volume, isBuy);
+                state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+                state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
+
+                lastPrice = price;
+                state.LastVPTickIndex = i;
+            }
+
+            state.LastClosePrice = lastPrice;
+        }
+
+        private void UpdateAtrDisplay(OptionVPState state, double close, DateTime barTime)
+        {
+            string timeStr = barTime.ToString("HH:mm:ss");
+            if (state.Type == "CE")
+            {
+                state.Row.CEAtrLTP = close.ToString("F2");
+                state.Row.CEAtrTime = timeStr;
+            }
+            else
+            {
+                state.Row.PEAtrLTP = close.ToString("F2");
+                state.Row.PEAtrTime = timeStr;
+            }
+        }
+
+        private HvnTrend DetermineTrend(VPResult result)
+        {
+            if (!result.IsValid) return HvnTrend.Neutral;
+            if (result.HVNBuyCount > result.HVNSellCount) return HvnTrend.Bullish;
+            if (result.HVNSellCount > result.HVNBuyCount) return HvnTrend.Bearish;
+            return HvnTrend.Neutral;
+        }
+
+        private void UpdateRowMetrics(OptionVPState state, VPResult sessResult, VPResult rollResult,
+            MomentumResult cdMomoResult, MomentumResult priceMomoResult,
+            HvnTrend sessTrend, HvnTrend rollTrend, string sessTrendTime, string rollTrendTime,
+            int sessVwapScore, int rollVwapScore)
+        {
+            var row = state.Row;
+
+            if (state.Type == "CE")
+            {
+                row.CEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
+                row.CEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
+                row.CETrendSess = sessTrend;
+                row.CETrendSessTime = sessTrendTime;
+                row.CEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
+                row.CEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
+                row.CETrendRoll = rollTrend;
+                row.CETrendRollTime = rollTrendTime;
+                row.CECDMomo = FormatMomentum(cdMomoResult.Momentum);
+                row.CECDSmooth = FormatMomentum(cdMomoResult.Smooth);
+                row.CEPriceMomo = FormatMomentum(priceMomoResult.Momentum);
+                row.CEPriceSmooth = FormatMomentum(priceMomoResult.Smooth);
+                row.CEVwapScoreSess = sessVwapScore;
+                row.CEVwapScoreRoll = rollVwapScore;
+            }
+            else
+            {
+                row.PEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
+                row.PEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
+                row.PETrendSess = sessTrend;
+                row.PETrendSessTime = sessTrendTime;
+                row.PEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
+                row.PEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
+                row.PETrendRoll = rollTrend;
+                row.PETrendRollTime = rollTrendTime;
+                row.PECDMomo = FormatMomentum(cdMomoResult.Momentum);
+                row.PECDSmooth = FormatMomentum(cdMomoResult.Smooth);
+                row.PEPriceMomo = FormatMomentum(priceMomoResult.Momentum);
+                row.PEPriceSmooth = FormatMomentum(priceMomoResult.Smooth);
+                row.PEVwapScoreSess = sessVwapScore;
+                row.PEVwapScoreRoll = rollVwapScore;
+            }
+        }
+
+        private void StoreBarSnapshot(OptionVPState state, VPResult sessResult, VPResult rollResult,
+            MomentumResult cdMomoResult, MomentumResult priceMomoResult,
+            HvnTrend sessTrend, HvnTrend rollTrend, int sessVwapScore, int rollVwapScore, DateTime currentTime)
+        {
+            if (state.BarHistory == null) return;
+
+            var snapshot = new OptionBarSnapshot
+            {
+                BarTime = currentTime,
+                ClosePrice = state.LastClosePrice,
+                SessHvnB = sessResult.IsValid ? sessResult.HVNBuyCount : 0,
+                SessHvnS = sessResult.IsValid ? sessResult.HVNSellCount : 0,
+                SessTrend = sessTrend,
+                RollHvnB = rollResult.IsValid ? rollResult.HVNBuyCount : 0,
+                RollHvnS = rollResult.IsValid ? rollResult.HVNSellCount : 0,
+                RollTrend = rollTrend,
+                CDMomentum = cdMomoResult.Momentum,
+                CDSmooth = cdMomoResult.Smooth,
+                CDBias = cdMomoResult.Bias,
+                PriceMomentum = priceMomoResult.Momentum,
+                PriceSmooth = priceMomoResult.Smooth,
+                PriceBias = priceMomoResult.Bias,
+                VwapScoreSess = sessVwapScore,
+                VwapScoreRoll = rollVwapScore,
+                SessionVWAP = sessResult.VWAP,
+                RollingVWAP = rollResult.VWAP
+            };
+
+            state.BarHistory.AddBar(snapshot);
+        }
+
+        private void NotifySignalsOrchestrator(OptionVPState state, VPResult sessResult, VPResult rollResult,
+            MomentumResult cdMomoResult, MomentumResult priceMomoResult,
+            HvnTrend sessTrend, HvnTrend rollTrend, int sessVwapScore, int rollVwapScore, DateTime currentTime)
+        {
+            if (SignalsOrchestrator == null) return;
+
+            int dte = _selectedExpiry.HasValue ? (_selectedExpiry.Value.Date - DateTime.Today).Days : 0;
+            Moneyness moneyness = DetermineMoneyness(state.Row.Strike, state.Type);
+
+            var snapshot = new OptionStateSnapshot
+            {
+                Symbol = state.Symbol,
+                Strike = state.Row.Strike,
+                OptionType = state.Type,
+                Moneyness = moneyness,
+                DTE = dte,
+                LastPrice = state.LastClosePrice,
+                LastPriceTime = currentTime,
+                RangeBarClosePrice = state.LastClosePrice,
+                RangeBarCloseTime = currentTime,
+                SessHvnB = sessResult.IsValid ? sessResult.HVNBuyCount : 0,
+                SessHvnS = sessResult.IsValid ? sessResult.HVNSellCount : 0,
+                SessTrend = sessTrend,
+                SessTrendOnsetTime = state.SessionTrendOnsetTime,
+                RollHvnB = rollResult.IsValid ? rollResult.HVNBuyCount : 0,
+                RollHvnS = rollResult.IsValid ? rollResult.HVNSellCount : 0,
+                RollTrend = rollTrend,
+                RollTrendOnsetTime = state.RollingTrendOnsetTime,
+                CDMomentum = cdMomoResult.Momentum,
+                CDSmooth = cdMomoResult.Smooth,
+                CDBias = cdMomoResult.Bias,
+                PriceMomentum = priceMomoResult.Momentum,
+                PriceSmooth = priceMomoResult.Smooth,
+                PriceBias = priceMomoResult.Bias,
+                VwapScoreSess = sessVwapScore,
+                VwapScoreRoll = rollVwapScore,
+                SessionVWAP = sessResult.VWAP,
+                RollingVWAP = rollResult.VWAP
+            };
+
+            SignalsOrchestrator.UpdateOptionState(snapshot, state.BarHistory);
+        }
+
+        private Moneyness DetermineMoneyness(double strike, string optionType)
+        {
+            int strikeDiff = (int)((strike - _atmStrike) / _strikeStep);
+
+            if (optionType == "CE")
+            {
+                if (strikeDiff == 0) return Moneyness.ATM;
+                if (strikeDiff == -1) return Moneyness.ITM1;
+                if (strikeDiff <= -2 && strikeDiff >= -3) return Moneyness.ITM2;
+                if (strikeDiff < -3) return Moneyness.DeepITM;
+                if (strikeDiff == 1) return Moneyness.OTM1;
+                if (strikeDiff >= 2 && strikeDiff <= 3) return Moneyness.OTM2;
+                return Moneyness.DeepOTM;
+            }
+            else
+            {
+                if (strikeDiff == 0) return Moneyness.ATM;
+                if (strikeDiff == 1) return Moneyness.ITM1;
+                if (strikeDiff >= 2 && strikeDiff <= 3) return Moneyness.ITM2;
+                if (strikeDiff > 3) return Moneyness.DeepITM;
+                if (strikeDiff == -1) return Moneyness.OTM1;
+                if (strikeDiff <= -2 && strikeDiff >= -3) return Moneyness.OTM2;
+                return Moneyness.DeepOTM;
+            }
+        }
+
+        private string FormatMomentum(double momentum)
+        {
+            if (Math.Abs(momentum) >= 1_000_000)
+                return (momentum / 1_000_000.0).ToString("F1") + "M";
+            else if (Math.Abs(momentum) >= 1_000)
+                return (momentum / 1_000.0).ToString("F1") + "K";
+            else
+                return momentum.ToString("F1");
+        }
+
+        private DateTime GetTargetDataDate()
+        {
+            if (SimulationService.Instance.IsSimulationMode)
+            {
+                var simConfig = SimulationService.Instance.CurrentConfig;
+                if (simConfig != null)
+                {
+                    return simConfig.SimulationDate.Date;
+                }
+            }
+
+            DateTime today = DateTime.Today;
+
+            if (DateTimeHelper.IsNonTradingDay(today))
+            {
+                return HolidayCalendarService.Instance.GetPriorWorkingDay(today);
+            }
+
+            if (DateTimeHelper.IsPreMarket())
+            {
+                return HolidayCalendarService.Instance.GetPriorWorkingDay(today);
+            }
+
+            return today;
+        }
+
+        #endregion
+    }
+}

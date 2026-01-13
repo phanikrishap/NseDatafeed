@@ -303,6 +303,11 @@
     <Compile Include="AddOns\OptionSignals\Models\UnderlyingBarHistory.cs" />
     <Compile Include="AddOns\OptionSignals\OptionSignalsViewModel.cs" />
     <Compile Include="AddOns\OptionSignals\OptionSignalsWindow.cs" />
+    <Compile Include="AddOns\OptionSignals\Models\OptionVPState.cs" />
+    <Compile Include="AddOns\OptionSignals\Services\OptionSignalsComputeService.cs" />
+    <Compile Include="AddOns\OptionSignals\Services\OptionDataSynchronizer.cs" />
+    <Compile Include="AddOns\OptionSignals\Services\OptionVPProcessor.cs" />
+    <Compile Include="AddOns\OptionSignals\Services\OptionSimulationProcessor.cs" />
     <!-- Telegram Integration -->
     <Compile Include="Models\TelegramSettings.cs" />
     <Compile Include="Services\Telegram\TelegramAlertService.cs" />
