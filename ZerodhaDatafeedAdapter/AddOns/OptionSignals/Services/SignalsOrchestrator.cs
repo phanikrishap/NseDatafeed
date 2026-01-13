@@ -278,7 +278,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 Strike = option.Strike,
                 OptionType = option.OptionType,
                 Moneyness = moneyness,
-                Direction = SignalDirection.Long,
+                Direction = SignalDirection.Short, // Selling CE option (short entry)
                 Status = SignalStatus.Active,
                 Quantity = quantity,
                 EntryPrice = entryPrice,
@@ -303,8 +303,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         private SignalRow EvaluatePEOption(OptionStateSnapshot option, Moneyness moneyness,
             DateTime currentTime, IReadOnlyList<SignalRow> existingSignals)
         {
-            // Strategy condition: Session HVN Sell > Session HVN Buy for PE (bearish accumulation)
-            bool conditionMet = option.SessHvnS > option.SessHvnB && option.SessHvnS >= 1;
+            // Strategy condition: Session HVN Buy > Session HVN Sell (bullish accumulation on option volume)
+            // Same condition as CE - HVN metrics are on the option itself, not underlying
+            bool conditionMet = option.SessHvnB > option.SessHvnS && option.SessHvnB >= 1;
             string stateKey = $"PE_{option.Symbol}";
 
             if (_isReplayMode)
@@ -358,14 +359,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 Strike = option.Strike,
                 OptionType = option.OptionType,
                 Moneyness = moneyness,
-                Direction = SignalDirection.Long, // Buying puts
+                Direction = SignalDirection.Short, // Selling PE option (short entry)
                 Status = SignalStatus.Active,
                 Quantity = quantity,
                 EntryPrice = entryPrice,
                 EntryTime = currentTime,
                 CurrentPrice = option.RangeBarClosePrice, // Current price for P&L tracking
                 StrategyName = Name,
-                SignalReason = $"Sess HVN S({option.SessHvnS}) > B({option.SessHvnB})",
+                SignalReason = $"Sess HVN B({option.SessHvnB}) > S({option.SessHvnS})",
                 DTE = option.DTE,
                 SessHvnB = option.SessHvnB,
                 SessHvnS = option.SessHvnS,

@@ -130,7 +130,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
             set { if (_direction != value) { _direction = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirectionStr)); } }
         }
 
-        public string DirectionStr => _direction == SignalDirection.Long ? "BUY" : "SELL";
+        public string DirectionStr => _direction == SignalDirection.Long ? "BUY" : "SHORT";
 
         public SignalStatus Status
         {

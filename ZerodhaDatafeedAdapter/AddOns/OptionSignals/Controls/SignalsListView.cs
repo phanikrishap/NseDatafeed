@@ -232,6 +232,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Controls
             dataGrid.Columns.Add(CreateFilterTextColumn("Entry", "EntryPriceStr", COL_PRICE, headerStyle, cellStyle));
             dataGrid.Columns.Add(CreateFilterTextColumn("Current", "CurrentPriceStr", COL_PRICE, headerStyle, cellStyle));
             dataGrid.Columns.Add(CreateFilterTextColumn("Exit", "ExitPriceStr", COL_PRICE, headerStyle, cellStyle));
+            dataGrid.Columns.Add(CreateFilterTextColumn("ExitTime", "ExitTimeStr", 65, headerStyle, cellStyle));
             dataGrid.Columns.Add(CreatePnLTemplateColumn("Unreal P&L", "UnrealizedPnL", COL_PNL, headerStyle));
             dataGrid.Columns.Add(CreatePnLTemplateColumn("Real P&L", "RealizedPnL", COL_PNL, headerStyle));
             dataGrid.Columns.Add(CreateFilterTextColumn("Strategy", "StrategyName", COL_STRATEGY, headerStyle, cellStyle));
