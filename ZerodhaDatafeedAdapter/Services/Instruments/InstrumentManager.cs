@@ -144,11 +144,7 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
         public (long token, string symbol) LookupOptionDetailsInSqlite(string seg, string und, string exp, double str, string typ)
             => _dbService.LookupOptionDetails(seg, und, exp, str, typ);
 
-        /// <summary>
-        /// Looks up futures contract details (token and tradingsymbol) for a given segment/underlying.
-        /// Returns the nearest expiry futures contract (expiry >= today).
-        /// </summary>
-        public (long token, string symbol) LookupFuturesInSqlite(string segment, string underlying, DateTime today)
+        public (long token, string symbol, DateTime expiry) LookupFuturesInSqlite(string segment, string underlying, DateTime today)
             => _dbService.LookupFutures(segment, underlying, today);
 
         private async Task EnsureDatabaseExists()

@@ -60,8 +60,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private readonly VPEngine _vpEngine = new VPEngine();
         private readonly RollingVolumeProfileEngine _rollingVpEngine = new RollingVolumeProfileEngine(60);
         private readonly VPRelativeMetricsEngine _relMetrics = new VPRelativeMetricsEngine();
-        private readonly CompositeProfileEngine _compositeEngine = new CompositeProfileEngine();
-        private InternalTickToBarMapper _tickMapper;
+        private CompositeProfileEngine _compositeEngine = new CompositeProfileEngine();
+        
+        // Replaced _tickMapper with sequential index tracking
+        private int _simTickIndex = 0;
 
         private DateTime _lastMinuteBarTime = DateTime.MinValue;
         private double _currentDayHigh = double.MinValue;
@@ -268,9 +270,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 // Apply uptick/downtick rule
                 _metricsCalculator.ApplyUptickDowntickRule(_historicalTicks);
 
-                // Build tick map for prior data
-                _tickMapper = _metricsCalculator.BuildTickToBarMapping(_historicalRangeATRBars, _historicalTicks);
-
                 // Process prior historical VP to populate circular buffers (but NOT the simulation day)
                 ProcessHistoricalVolumeProfileForPriorDays(simulationDate);
 
@@ -302,8 +301,20 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 // Apply uptick/downtick to new ticks
                 _metricsCalculator.ApplyUptickDowntickRule(simDateTicks);
 
-                // Rebuild tick mapper with simulation date data included
-                _tickMapper = _metricsCalculator.BuildTickToBarMapping(_historicalRangeATRBars, _historicalTicks);
+                // Initialize sim tick index to start of simulation day
+                // History ticks contain everything now. We need index of first sim tick.
+                _simTickIndex = _historicalRangeATRBars.Count - simDateBars.Count <= 0 ? 0 : 
+                    _historicalTicks.Count - simDateTicks.Count; // Approximate start?
+                
+                // Safer: Find index of first tick >= simulationDate
+                for(int i = Math.Max(0, _historicalTicks.Count - simDateTicks.Count - 1000); i < _historicalTicks.Count; i++)
+                {
+                    if (_historicalTicks[i].Time >= simulationDate.Date)
+                    {
+                        _simTickIndex = i;
+                        break;
+                    }
+                }
 
                 // Build replay bar list for simulation date
                 _simReplayBars = simDateBars.Select(b => (b.Time, b.Close, b.Index)).ToList();
@@ -350,6 +361,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfileForPriorDays(): Found {sessionGroups.Count} prior sessions");
 
             int totalMinuteSamples = 0;
+            
+            // Shared search index
+            int searchStartTickIndex = 0;
 
             // Build historical averages for RelMetrics from prior sessions
             foreach (var sessionGroup in sessionGroups)
@@ -361,19 +375,22 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 _sessionStart = sessionBars.First().Time;
 
                 DateTime lastMinuteSampled = DateTime.MinValue;
+                DateTime prevBarTime = DateTime.MinValue;
 
                 foreach (var bar in sessionBars)
                 {
-                    var ticksForBar = _tickMapper.GetTicksForBar(bar.Index);
-
-                    if (ticksForBar.Count > 0)
-                    {
-                        foreach (var tick in ticksForBar)
+                    // Use optimized tick processing
+                    VolumeProfileLogic.ProcessTicksOptimized(
+                        _historicalTicks,
+                        ref searchStartTickIndex,
+                        prevBarTime,
+                        bar.Time,
+                        bar.Close,
+                        (price, volume, isBuy, tickTime) =>
                         {
-                            _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
-                            _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
-                        }
-                    }
+                            _vpEngine.AddTick(price, volume, isBuy);
+                            _rollingVpEngine.AddTick(price, volume, isBuy, tickTime);
+                        });
 
                     _rollingVpEngine.ExpireOldData(bar.Time);
                     _vpEngine.SetClosePrice(bar.Close);
@@ -399,6 +416,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             totalMinuteSamples++;
                         }
                     }
+                    
+                    prevBarTime = bar.Time;
                 }
             }
 
@@ -410,6 +429,21 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 .Take(10)
                 .OrderBy(g => g.Key)
                 .ToList();
+                
+            // Find start tick index for composite sessions
+            int compositeSearchStart = 0;
+            if (recentSessions.Count > 0)
+            {
+                DateTime firstCompositeTime = recentSessions.First().First().Time.Date;
+                for(int i=0; i<_historicalTicks.Count; i++)
+                {
+                    if (_historicalTicks[i].Time >= firstCompositeTime)
+                    {
+                        compositeSearchStart = i;
+                        break;
+                    }
+                }
+            }
 
             foreach (var sessionGroup in recentSessions)
             {
@@ -417,14 +451,23 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 DateTime sessionDate = sessionGroup.Key;
 
                 _compositeEngine.StartSession(sessionDate);
+                
+                DateTime prevBarTime = DateTime.MinValue;
 
                 foreach (var bar in sessionBars)
                 {
-                    var ticksForBar = _tickMapper.GetTicksForBar(bar.Index);
-                    foreach (var tick in ticksForBar)
-                    {
-                        _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
-                    }
+                    VolumeProfileLogic.ProcessTicksOptimized(
+                        _historicalTicks,
+                        ref compositeSearchStart,
+                        prevBarTime,
+                        bar.Time,
+                        0,
+                        (price, volume, isBuy, tickTime) =>
+                        {
+                            _compositeEngine.AddTick(price, volume, isBuy, tickTime);
+                        });
+                    
+                    prevBarTime = bar.Time;
                 }
 
                 _compositeEngine.FinalizeCurrentSession();
@@ -477,29 +520,30 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 if (bar.BarTime > tickTime)
                     break;
 
-                // Find the RangeATRBar with matching index to get full data
-                var rangeBar = _historicalRangeATRBars.FirstOrDefault(b => b.Index == bar.BarIndex);
-                if (rangeBar == null)
-                {
-                    _simReplayBarIndex++;
-                    continue;
-                }
+                // Process ticks for this bar using sequential index
+                double lastPrice = bar.ClosePrice;
+                DateTime prevBarTime = _lastBarCloseTime; 
+                if (prevBarTime == DateTime.MinValue && _simReplayBarIndex > 0)
+                     prevBarTime = _simReplayBars[_simReplayBarIndex-1].BarTime;
 
-                // Get ticks for this bar
-                var ticksForBar = _tickMapper.GetTicksForBar(bar.BarIndex);
+                // Use optimized tick processing
+                VolumeProfileLogic.ProcessTicksOptimized(
+                    _historicalTicks,
+                    ref _simTickIndex,
+                    prevBarTime,
+                    bar.BarTime,
+                    lastPrice, // Fallback
+                    (price, volume, isBuy, tTime) =>
+                    {
+                        _vpEngine.AddTick(price, volume, isBuy);
+                        _rollingVpEngine.AddTick(price, volume, isBuy, tTime);
+                        _compositeEngine.AddTick(price, volume, isBuy, tTime);
 
-                // Process ticks
-                foreach (var tick in ticksForBar)
-                {
-                    _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
-                    _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
-                    _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
-
-                    // Track day high/low
-                    if (tick.Price > _currentDayHigh) _currentDayHigh = tick.Price;
-                    if (tick.Price < _currentDayLow) _currentDayLow = tick.Price;
-                    _lastPrice = tick.Price;
-                }
+                        // Track day high/low
+                        if (price > _currentDayHigh) _currentDayHigh = price;
+                        if (price < _currentDayLow) _currentDayLow = price;
+                        _lastPrice = price;
+                    });
 
                 _rollingVpEngine.ExpireOldData(bar.BarTime);
                 _vpEngine.SetClosePrice(bar.ClosePrice);
@@ -555,9 +599,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             // Apply uptick/downtick rule
             _metricsCalculator.ApplyUptickDowntickRule(_historicalTicks);
-
-            // Build tick map
-            _tickMapper = _metricsCalculator.BuildTickToBarMapping(_historicalRangeATRBars, _historicalTicks);
 
             // Process historical VP
             ProcessHistoricalVolumeProfile();
@@ -630,6 +671,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             RangeBarLogger.Info($"[HISTORICAL_SESSIONS] Processing {sessionGroups.Count} sessions, {_historicalRangeATRBars.Count} total bars");
 
             int totalMinuteSamples = 0;
+            
+            // Shared search index for sequential processing
+            int searchStartTickIndex = 0;
 
             // First pass: Build historical averages for RelMetrics
             foreach (var sessionGroup in sessionGroups)
@@ -641,19 +685,24 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 _sessionStart = sessionBars.First().Time;
 
                 DateTime lastMinuteSampled = DateTime.MinValue;
+                DateTime prevBarTime = DateTime.MinValue;
 
                 foreach (var bar in sessionBars)
                 {
-                    var ticksForBar = _tickMapper.GetTicksForBar(bar.Index);
-
-                    if (ticksForBar.Count > 0)
-                    {
-                        foreach (var tick in ticksForBar)
+                    double lastPrice = bar.Close; // Fallback if no ticks
+                    
+                    // Use optimized tick processing
+                    double updatedPrice = VolumeProfileLogic.ProcessTicksOptimized(
+                        _historicalTicks,
+                        ref searchStartTickIndex,
+                        prevBarTime,
+                        bar.Time,
+                        _lastPrice, // Use class-level last price or tracked price? Re-using bar.Close/Open might be safer if gaps.
+                        (price, volume, isBuy, tickTime) =>
                         {
-                            _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
-                            _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
-                        }
-                    }
+                            _vpEngine.AddTick(price, volume, isBuy);
+                            _rollingVpEngine.AddTick(price, volume, isBuy, tickTime);
+                        });
 
                     _rollingVpEngine.ExpireOldData(bar.Time);
 
@@ -680,6 +729,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                             totalMinuteSamples++;
                         }
                     }
+                    
+                    prevBarTime = bar.Time;
+                    _lastPrice = bar.Close;
                 }
             }
 
@@ -687,9 +739,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             // ═══════════════════════════════════════════════════════════════════
             // COMPOSITE PROFILE: Feed historical ticks to composite engine
-            // Use the same tick data we already have (last 10 sessions for composite)
+            // Use sequential scanning for the last 10 sessions
             // ═══════════════════════════════════════════════════════════════════
-            // Get last 10 sessions, excluding today (today's session stays open for live ticks)
             var recentSessions = sessionGroups
                 .Where(g => g.Key.Date < DateTime.Today)  // Exclude today
                 .OrderByDescending(g => g.Key)
@@ -698,6 +749,22 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 .ToList();
 
             Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfile(): Building composite profiles from {recentSessions.Count} prior sessions");
+
+            // Find start tick index for composite sessions efficiently
+            int compositeSearchStart = 0;
+            if (recentSessions.Count > 0)
+            {
+                DateTime firstCompositeTime = recentSessions.First().First().Time.Date; // Start of first day
+                // Simple search to find the start index
+                for(int i=0; i<_historicalTicks.Count; i++)
+                {
+                    if (_historicalTicks[i].Time >= firstCompositeTime)
+                    {
+                        compositeSearchStart = i;
+                        break;
+                    }
+                }
+            }
 
             foreach (var sessionGroup in recentSessions)
             {
@@ -708,14 +775,24 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 _compositeEngine.StartSession(sessionDate);
 
                 int ticksProcessed = 0;
+                DateTime prevBarTime = DateTime.MinValue;
+
                 foreach (var bar in sessionBars)
                 {
-                    var ticksForBar = _tickMapper.GetTicksForBar(bar.Index);
-                    foreach (var tick in ticksForBar)
-                    {
-                        _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
-                        ticksProcessed++;
-                    }
+                    // Use optimized tick processing
+                    VolumeProfileLogic.ProcessTicksOptimized(
+                        _historicalTicks,
+                        ref compositeSearchStart,
+                        prevBarTime,
+                        bar.Time,
+                        0, // Price doesn't matter for counting ticks here, but we pass 0
+                        (price, volume, isBuy, tickTime) =>
+                        {
+                            _compositeEngine.AddTick(price, volume, isBuy, tickTime);
+                            ticksProcessed++;
+                        });
+                    
+                    prevBarTime = bar.Time;
                 }
 
                 // Finalize the session (stores the profile for composite aggregation)
@@ -734,19 +811,16 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             // Second pass: Process target session through RelMetrics to accumulate cumulative values
             var todaysBars = _historicalRangeATRBars.Where(b => b.Time.Date == DateTime.Today).ToList();
             List<RangeATRBar> targetSessionBars;
-            DateTime targetSessionDate;
-
+            
             if (todaysBars.Count > 0)
             {
                 targetSessionBars = todaysBars;
-                targetSessionDate = DateTime.Today;
                 Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfile(): Final state from today's {todaysBars.Count} bars");
             }
             else
             {
                 var lastSession = sessionGroups.Last();
                 targetSessionBars = lastSession.ToList();
-                targetSessionDate = lastSession.Key;
                 Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfile(): Final state from last session {lastSession.Key:yyyy-MM-dd} ({lastSession.Count()} bars)");
             }
 
@@ -755,25 +829,52 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             _rollingVpEngine.Reset(VP_PRICE_INTERVAL);
             _sessionStart = targetSessionBars.First().Time;
             _relMetrics.StartSession(_sessionStart);
+            
+            // Find start index for target session
+            int targetSearchStart = 0;
+            if (targetSessionBars.Count > 0)
+            {
+                // Can optimize: if target is "today", we might be able to start search from end of "composite" loop? 
+                // But safer to just find it again or continue from where "First Pass" left off?
+                // Actually "First Pass" went through EVERYTHING including today.
+                // So First Pass `searchStartTickIndex` is at the end.
+                // We need to rewind.
+                DateTime targetStartTime = targetSessionBars.First().Time.AddMinutes(-10); // buffer
+                 // Search for start index
+                for(int i=0; i<_historicalTicks.Count; i++)
+                {
+                    if (_historicalTicks[i].Time >= targetSessionBars.First().Time.Date) // Start of day
+                    {
+                        targetSearchStart = i;
+                        break;
+                    }
+                }
+            }
 
             DateTime lastMinuteSampledForCumul = DateTime.MinValue;
+            DateTime prevTargetBarTime = DateTime.MinValue;
 
             foreach (var bar in targetSessionBars)
             {
-                var ticksForBar = _tickMapper.GetTicksForBar(bar.Index);
-                foreach (var tick in ticksForBar)
-                {
-                    _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
-                    _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+               VolumeProfileLogic.ProcessTicksOptimized(
+                    _historicalTicks,
+                    ref targetSearchStart,
+                    prevTargetBarTime,
+                    bar.Time,
+                    _lastPrice,
+                    (price, volume, isBuy, tickTime) =>
+                    {
+                        _vpEngine.AddTick(price, volume, isBuy);
+                        _rollingVpEngine.AddTick(price, volume, isBuy, tickTime);
 
-                    // Also feed to composite engine (for today's current session)
-                    _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+                        // Also feed to composite engine (for today's current session)
+                        _compositeEngine.AddTick(price, volume, isBuy, tickTime);
 
-                    // Track current day high/low
-                    if (tick.Price > _currentDayHigh) _currentDayHigh = tick.Price;
-                    if (tick.Price < _currentDayLow) _currentDayLow = tick.Price;
-                    _lastPrice = tick.Price;
-                }
+                        // Track current day high/low
+                        if (price > _currentDayHigh) _currentDayHigh = price;
+                        if (price < _currentDayLow) _currentDayLow = price;
+                        _lastPrice = price;
+                    });
 
                 _rollingVpEngine.ExpireOldData(bar.Time);
 
@@ -799,17 +900,16 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         lastMinuteSampledForCumul = minuteBoundary;
                     }
                 }
+                
+                prevTargetBarTime = bar.Time;
             }
 
             // Log cumulative tracking details
             var sessionTotals = _relMetrics.GetSessionTotals();
-            Logger.Info($"[NiftyFuturesMetricsService] ProcessHistoricalVolumeProfile(): Cumulative tracking - " +
-                $"CumHVNBuy={sessionTotals.cumHVNBuy:F1}/Ref={sessionTotals.refHVNBuy:F1}, " +
-                $"CumHVNSell={sessionTotals.cumHVNSell:F1}/Ref={sessionTotals.refHVNSell:F1}, " +
-                $"CumValW={sessionTotals.cumValWidth:F1}/Ref={sessionTotals.refValWidth:F1}");
+            Logger.Info($"[NiftyFuturesMetricsService] Historical VP Cumulative: Buy={sessionTotals.cumHVNBuy:F1}, Sell={sessionTotals.cumHVNSell:F1}");
 
             // Publish final metrics - skip RelMetrics update since we already processed the session
-            RecalculateAndPublishMetrics(skipRelMetricsUpdate: true);
+            RecalculateAndPublishMetrics(true);
         }
 
         private async Task SetupLiveUpdateHandler()

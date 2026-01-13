@@ -200,7 +200,7 @@
     <Compile Include="Services\Analysis\NiftySymbolResolver.cs" />
     <Compile Include="Services\Analysis\NiftyHistoricalDataLoader.cs" />
     <Compile Include="Services\Analysis\MetricsCalculator.cs" />
-    <Compile Include="Services\Analysis\Components\InternalTickToBarMapper.cs" />
+    <Compile Include="Services\Analysis\Components\VolumeProfileLogic.cs" />
     <Compile Include="Services\Analysis\Components\VPEngine.cs" />
     <Compile Include="Services\Analysis\Components\RollingVolumeProfileEngine.cs" />
     <Compile Include="Services\Analysis\Components\VPRelativeMetricsEngine.cs" />
@@ -265,7 +265,7 @@
     <Compile Include="AddOns\TBSManager\Controls\TBSTrancheRowControl.cs" />
     <Compile Include="AddOns\TBSManager\TBSStyles.cs" />
     <!-- Phase 7: Modular components for MarketAnalyzerLogic -->
-    <Compile Include="Services\Analysis\MarketDataHub.cs" />
+
     <Compile Include="Services\Analysis\OptionGenerationService.cs" />
     <!-- Reactive Architecture: Single source of truth for market data streams -->
     <Compile Include="Models\Reactive\IndexPriceUpdate.cs" />

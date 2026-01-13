@@ -28,7 +28,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 try
                 {
                     // Query SQLite for NFO-FUT segment, NIFTY underlying, nearest expiry
-                    var (token, tradingSymbol) = InstrumentManager.Instance.LookupFuturesInSqlite(
+                    var (token, tradingSymbol, _) = InstrumentManager.Instance.LookupFuturesInSqlite(
                         "NFO-FUT",
                         "NIFTY",
                         DateTime.Today);

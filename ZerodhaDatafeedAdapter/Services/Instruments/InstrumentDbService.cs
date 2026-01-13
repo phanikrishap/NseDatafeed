@@ -571,14 +571,14 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
         }
 
         /// <summary>
-        /// Looks up futures contract details (token and tradingsymbol) for a given segment/underlying.
+        /// Looks up futures contract details (token, tradingsymbol, expiry) for a given segment/underlying.
         /// Returns the nearest expiry futures contract (expiry >= today).
         /// Used by NiftyFuturesMetricsService to resolve NIFTY Futures symbol.
         /// </summary>
-        public (long token, string symbol) LookupFutures(string segment, string underlying, DateTime today)
+        public (long token, string symbol, DateTime expiry) LookupFutures(string segment, string underlying, DateTime today)
         {
             if (string.IsNullOrEmpty(_dbPath) || !File.Exists(_dbPath))
-                return (0, null);
+                return (0, null, DateTime.MinValue);
 
             try
             {
@@ -587,7 +587,7 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                     conn.Open();
 
                     // Query for futures contract with nearest expiry >= today
-                    string sql = @"SELECT instrument_token, tradingsymbol FROM instruments
+                    string sql = @"SELECT instrument_token, tradingsymbol, expiry FROM instruments
                                    WHERE segment = @seg
                                    AND underlying = @und
                                    AND instrument_type = 'FUT'
@@ -607,8 +607,11 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                             {
                                 long token = reader.GetInt64(0);
                                 string tradingSymbol = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                                Logger.Info($"[IDB] Found futures {tradingSymbol} (token={token}) for {underlying}");
-                                return (token, tradingSymbol);
+                                string expiryStr = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                                DateTime.TryParse(expiryStr, out DateTime expiry);
+
+                                Logger.Info($"[IDB] Found futures {tradingSymbol} (token={token}, expiry={expiry:yyyy-MM-dd}) for {underlying}");
+                                return (token, tradingSymbol, expiry);
                             }
                         }
                     }
@@ -629,8 +632,11 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
                                 {
                                     long token = reader.GetInt64(0);
                                     string tradingSymbol = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                                    Logger.Info($"[IDB] Found futures {tradingSymbol} (token={token}) for {underlying} (quoted)");
-                                    return (token, tradingSymbol);
+                                    string expiryStr = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                                    DateTime.TryParse(expiryStr, out DateTime expiry);
+                                    
+                                    Logger.Info($"[IDB] Found futures {tradingSymbol} (token={token}, expiry={expiry:yyyy-MM-dd}) for {underlying} (quoted)");
+                                    return (token, tradingSymbol, expiry);
                                 }
                             }
                         }
@@ -642,7 +648,7 @@ namespace ZerodhaDatafeedAdapter.Services.Instruments
             {
                 Logger.Error($"[IDB] Futures lookup failed for {segment}/{underlying}:", ex);
             }
-            return (0, null);
+            return (0, null, DateTime.MinValue);
         }
 
         public string GetSegmentForToken(long token)

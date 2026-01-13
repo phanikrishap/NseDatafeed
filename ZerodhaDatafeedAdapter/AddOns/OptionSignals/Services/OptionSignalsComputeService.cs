@@ -130,15 +130,23 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             _vpProcessor.SetMarketContext(atmStrike, _strikeStep, expiry, underlying);
 
             // Sync historical data for all symbols using the data synchronizer
+            // Reduced timeout from 30s to 10s for faster initialization - partial data is OK
             _log.Info($"[ComputeService] Starting historical sync for {allOptions.Count} symbols");
-            var syncResult = await _dataSynchronizer.SynchronizeAsync(allOptions, CancellationToken.None, 30);
+            var syncResult = await _dataSynchronizer.SynchronizeAsync(allOptions, CancellationToken.None, 10);
             _log.Info($"[ComputeService] Historical sync complete: {syncResult.SuccessCount}/{syncResult.TotalSymbols} in {syncResult.Duration.TotalSeconds:F1}s");
 
-            // Create VP states for all options
-            foreach (var option in allOptions)
-            {
-                if (string.IsNullOrEmpty(option.symbol) || !option.strike.HasValue) continue;
+            // Sort options by distance from ATM - process nearest strikes first for faster UI display
+            var sortedOptions = allOptions
+                .Where(o => !string.IsNullOrEmpty(o.symbol) && o.strike.HasValue)
+                .OrderBy(o => Math.Abs((int)o.strike.Value - (int)atmStrike))
+                .ThenBy(o => o.option_type) // CE before PE at same strike
+                .ToList();
 
+            _log.Info($"[ComputeService] Processing {sortedOptions.Count} options, ATM-first ordering (ATM={atmStrike})");
+
+            // Create VP states for all options - ATM strikes processed first
+            foreach (var option in sortedOptions)
+            {
                 int strike = (int)option.strike.Value;
                 string type = option.option_type;
 
@@ -357,7 +365,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 }
                 else
                 {
-                    tickRequest = new BarsRequest(instrument, 10000);
+                    // Reduced tick count for faster loading - 2000 ticks is enough for today's session VP
+                    tickRequest = new BarsRequest(instrument, 2000);
                     tickRequest.BarsPeriod = new BarsPeriod
                     {
                         BarsPeriodType = BarsPeriodType.Tick,
@@ -365,7 +374,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     };
                     tickRequest.TradingHours = TradingHours.Get("Default 24 x 7");
 
-                    rangeRequest = new BarsRequest(instrument, 100);
+                    // Reduced range bar count for faster loading
+                    rangeRequest = new BarsRequest(instrument, 50);
                     rangeRequest.BarsPeriod = new BarsPeriod
                     {
                         BarsPeriodType = (BarsPeriodType)7015, // RangeATR
@@ -386,38 +396,18 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     }
                 };
 
-                // Request tick data
+                // Request tick data - signal ready immediately on callback
                 tickRequest.Request((r, code, msg) =>
                 {
-                    if (code == ErrorCode.NoError)
-                    {
-                        int totalCount = r.Bars.Count;
-                        if (totalCount > 0)
-                        {
-                            DateTime firstTime = r.Bars.GetTime(0);
-                            DateTime lastTime = r.Bars.GetTime(totalCount - 1);
-                            _log.Debug($"[ComputeService] TickBars OK: {symbol}, total={totalCount}, first={firstTime:MM-dd HH:mm:ss}, last={lastTime:MM-dd HH:mm:ss}");
-                        }
-                    }
-                    state.TickDataReady.OnNext(true);
+                    state.TickDataReady.OnNext(code == ErrorCode.NoError);
                 });
 
                 state.TickBarsRequest = tickRequest;
 
-                // Request range bar data
+                // Request range bar data - signal ready immediately on callback
                 rangeRequest.Request((r, code, msg) =>
                 {
-                    if (code == ErrorCode.NoError)
-                    {
-                        int totalCount = r.Bars.Count;
-                        if (totalCount > 0)
-                        {
-                            DateTime firstTime = r.Bars.GetTime(0);
-                            DateTime lastTime = r.Bars.GetTime(totalCount - 1);
-                            _log.Debug($"[ComputeService] RangeBars OK: {symbol}, total={totalCount}, first={firstTime:MM-dd HH:mm:ss}, last={lastTime:MM-dd HH:mm:ss}");
-                        }
-                    }
-                    state.RangeBarsReady.OnNext(true);
+                    state.RangeBarsReady.OnNext(code == ErrorCode.NoError);
                 });
 
                 state.RangeBarsRequest = rangeRequest;

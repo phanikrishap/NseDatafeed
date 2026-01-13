@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models.MarketData;
-using ZerodhaDatafeedAdapter.Services.Analysis.Components;
+
 
 namespace ZerodhaDatafeedAdapter.Services.Analysis
 {
@@ -50,13 +50,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             Logger.Info($"[MetricsCalculator] Tick classification: Buy={buyCount}, Sell={sellCount} ({ticks.Count} total)");
         }
 
-        public InternalTickToBarMapper BuildTickToBarMapping(List<RangeATRBar> bars, List<HistoricalTick> ticks)
-        {
-            Logger.Info("[MetricsCalculator] Building tick-to-bar index...");
-            var mapper = new InternalTickToBarMapper(bars, ticks);
-            mapper.BuildIndex();
-            Logger.Info($"[MetricsCalculator] Index built. Mapped {mapper.MappedBarsCount} bars");
-            return mapper;
-        }
+
     }
 }

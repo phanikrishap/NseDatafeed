@@ -3,8 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Data.SQLite;
-using System.IO;
+
 using System.Linq;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
@@ -107,6 +106,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private readonly Dictionary<string, int> _cachedLotSizes = new Dictionary<string, int>();
         private readonly object _expiryLock = new object();
         private readonly object _lotSizeLock = new object();
+        // Internal price cache to replace legacy MarketDataHub
+        private readonly ConcurrentDictionary<string, double> _priceCache = new ConcurrentDictionary<string, double>();
 
         private MarketAnalyzerLogic()
         {
@@ -122,117 +123,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             // Uses Rx to await the InstrumentDbReadyStream - fires once when DB is loaded
             SubscribeToInstrumentDbReadyForFuturesResolution();
 
-            MarketDataHub.Instance.PriceUpdated += (s, p) =>
-            {
-                // Don't re-invoke UpdatePrice here - it causes recursion
-                // Just fire external events
-                OptionPriceUpdated?.Invoke(s, p);
-                PriceUpdated?.Invoke(s, p);
-            };
-
             // Setup System.Reactive pipeline for projected opens calculation
             // This fires ONCE when all required data is available (GIFT change% + NIFTY/SENSEX prior close)
             SetupReactiveProjectedOpensPipeline();
         }
 
-        #region SQLite Retry Helper
 
-        /// <summary>
-        /// Executes a SQLite operation with retry logic for database busy/locked errors.
-        /// Uses exponential backoff with jitter to handle concurrent access during startup.
-        /// </summary>
-        /// <typeparam name="T">Return type of the operation</typeparam>
-        /// <param name="operation">The database operation to execute</param>
-        /// <param name="operationName">Name for logging</param>
-        /// <param name="maxRetries">Maximum number of retries (default 3)</param>
-        /// <returns>Result of the operation, or default(T) if all retries fail</returns>
-        private T ExecuteWithSqliteRetry<T>(Func<T> operation, string operationName, int maxRetries = 3)
-        {
-            int attempt = 0;
-            Exception lastException = null;
-
-            while (attempt < maxRetries)
-            {
-                try
-                {
-                    return operation();
-                }
-                catch (SQLiteException ex) when (ex.ResultCode == SQLiteErrorCode.Busy || ex.ResultCode == SQLiteErrorCode.Locked)
-                {
-                    attempt++;
-                    lastException = ex;
-
-                    if (attempt >= maxRetries)
-                    {
-                        Logger.Error($"[MarketAnalyzerLogic] {operationName}: SQLite busy/locked after {maxRetries} retries - {ex.Message}");
-                        break;
-                    }
-
-                    // Exponential backoff with jitter: 100ms, 200ms, 400ms + random 0-50ms
-                    int baseDelayMs = 100 * (int)Math.Pow(2, attempt - 1);
-                    int jitterMs = new Random().Next(0, 50);
-                    int delayMs = baseDelayMs + jitterMs;
-
-                    Logger.Warn($"[MarketAnalyzerLogic] {operationName}: SQLite busy, retry {attempt}/{maxRetries} in {delayMs}ms");
-                    Thread.Sleep(delayMs);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[MarketAnalyzerLogic] {operationName}: Non-retryable error - {ex.Message}");
-                    lastException = ex;
-                    break;
-                }
-            }
-
-            Logger.Error($"[MarketAnalyzerLogic] {operationName}: Failed after {attempt} attempts. Last error: {lastException?.Message}");
-            return default;
-        }
-
-        /// <summary>
-        /// Async version of ExecuteWithSqliteRetry for async operations.
-        /// </summary>
-        private async Task<T> ExecuteWithSqliteRetryAsync<T>(Func<Task<T>> operation, string operationName, int maxRetries = 3)
-        {
-            int attempt = 0;
-            Exception lastException = null;
-
-            while (attempt < maxRetries)
-            {
-                try
-                {
-                    return await operation();
-                }
-                catch (SQLiteException ex) when (ex.ResultCode == SQLiteErrorCode.Busy || ex.ResultCode == SQLiteErrorCode.Locked)
-                {
-                    attempt++;
-                    lastException = ex;
-
-                    if (attempt >= maxRetries)
-                    {
-                        Logger.Error($"[MarketAnalyzerLogic] {operationName}: SQLite busy/locked after {maxRetries} retries - {ex.Message}");
-                        break;
-                    }
-
-                    int baseDelayMs = 100 * (int)Math.Pow(2, attempt - 1);
-                    int jitterMs = new Random().Next(0, 50);
-                    int delayMs = baseDelayMs + jitterMs;
-
-                    Logger.Warn($"[MarketAnalyzerLogic] {operationName}: SQLite busy, retry {attempt}/{maxRetries} in {delayMs}ms");
-                    await Task.Delay(delayMs);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[MarketAnalyzerLogic] {operationName}: Non-retryable error - {ex.Message}");
-                    lastException = ex;
-                    break;
-                }
-            }
-
-            Logger.Error($"[MarketAnalyzerLogic] {operationName}: Failed after {attempt} attempts. Last error: {lastException?.Message}");
-            return default;
-        }
-
-        #endregion
 
         /// <summary>
         /// Subscribes to InstrumentDbReadyStream to resolve NIFTY futures when DB is ready.
@@ -265,75 +161,22 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Resolves the current month's NIFTY Futures contract from the instrument database.
-        /// Query: segment='NFO-FUT', name='NIFTY', expiry >= today, order by expiry ASC, take first
-        /// Uses SQLite retry logic to handle database busy/locked during concurrent access.
+        /// Resolves the current month's NIFTY Futures contract using InstrumentManager.
         /// </summary>
         private void ResolveNiftyFuturesContract()
         {
-            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "ZerodhaAdapter");
-            string dbPath = Path.Combine(folder, "InstrumentMasters.db");
+            var result = InstrumentManager.Instance.LookupFuturesInSqlite("NFO-FUT", "NIFTY", DateTime.Today);
 
-            if (!File.Exists(dbPath))
-            {
-                Logger.Warn("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Database not found, will retry later");
-                return;
-            }
-
-            // Use retry helper to handle SQLite busy/locked during startup
-            var result = ExecuteWithSqliteRetry(() =>
-            {
-                using (var conn = new SQLiteConnection($"Data Source={dbPath};Version=3;Read Only=True;"))
-                {
-                    conn.Open();
-                    // Query: NFO-FUT segment, underlying='NIFTY' or '"NIFTY"', expiry >= today, earliest expiry first
-                    // Note: underlying column may have quoted values like "NIFTY" (with quotes) due to CSV import
-                    string sql = @"SELECT instrument_token, tradingsymbol, expiry
-                                   FROM instruments
-                                   WHERE segment = 'NFO-FUT'
-                                   AND (underlying = 'NIFTY' OR underlying = '""NIFTY""')
-                                   AND expiry >= @today
-                                   ORDER BY expiry ASC
-                                   LIMIT 1";
-
-                    using (var cmd = new SQLiteCommand(sql, conn))
-                    {
-                        cmd.Parameters.AddWithValue("@today", DateTime.Today.ToString("yyyy-MM-dd"));
-                        using (var reader = cmd.ExecuteReader())
-                        {
-                            if (reader.Read())
-                            {
-                                return (
-                                    token: reader.GetInt64(0),
-                                    symbol: reader.GetString(1),
-                                    expiry: reader.GetString(2),
-                                    found: true
-                                );
-                            }
-                            return (token: 0L, symbol: "", expiry: "", found: false);
-                        }
-                    }
-                }
-            }, "ResolveNiftyFuturesContract");
-
-            if (result.found)
+            if (result.token > 0)
             {
                 NiftyFuturesToken = result.token;
                 NiftyFuturesSymbol = result.symbol;
-                if (DateTime.TryParse(result.expiry, out var expiryDate))
-                {
-                    NiftyFuturesExpiry = expiryDate;
-                }
+                NiftyFuturesExpiry = result.expiry;
 
                 // Add the trading symbol to aliases for matching
                 _niftyFuturesAliases.Add(NiftyFuturesSymbol);
 
                 Logger.Info($"[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Resolved NIFTY_I -> {NiftyFuturesSymbol} (token={NiftyFuturesToken}, expiry={NiftyFuturesExpiry:yyyy-MM-dd})");
-            }
-            else if (result.symbol == null)
-            {
-                // ExecuteWithSqliteRetry returned default - all retries failed
-                Logger.Error("[MarketAnalyzerLogic] ResolveNiftyFuturesContract(): Failed to query database after retries");
             }
             else
             {
@@ -407,7 +250,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         public void UpdateOptionPrice(string symbol, decimal price, DateTime timestamp)
         {
-            MarketDataHub.Instance.UpdatePrice(symbol, (double)price, timestamp);
+            _priceCache[symbol] = (double)price;
             CheckAndFirePriceSyncReady();
         }
 
@@ -471,8 +314,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 Logger.Debug($"[MarketAnalyzerLogic] UpdatePrice(): Symbol '{symbol}' not a tracked index");
             }
 
-            // Also store price in MarketDataHub (for option chain and other lookups)
-            MarketDataHub.Instance.UpdatePrice(symbol, price, DateTime.Now);
+            // Also store price in internal cache (for option chain and other lookups)
+            _priceCache[symbol] = price;
 
             CheckAndFirePriceSyncReady();
             CheckAndCalculate();
@@ -564,11 +407,33 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public void SetATMStrike(string underlying, decimal strike) => OptionGenerationService.Instance.SetATMStrike(underlying, strike);
         public decimal GetATMStrike(string underlying) => OptionGenerationService.Instance.GetATMStrike(underlying);
 
-        public double GetPrice(string symbol) => MarketDataHub.Instance.GetPrice(symbol);
+        public double GetPrice(string symbol)
+        {
+            return _priceCache.TryGetValue(symbol, out double price) ? price : 0;
+        }
+
+        /// <summary>
+        /// Checks if the market is currently open for trading.
+        /// Wrapper around DateTimeHelper.IsMarketOpen for convenience.
+        /// </summary>
+        public bool IsMarketOpen() => Helpers.DateTimeHelper.IsMarketOpen();
+
+        /// <summary>
+        /// Gets the projected open price for the specified underlying.
+        /// </summary>
+        public double GetProjectedOpen(string underlying)
+        {
+            if (string.IsNullOrEmpty(underlying)) return 0;
+            if (underlying.Equals("NIFTY", StringComparison.OrdinalIgnoreCase))
+                return ProjectedNiftyOpenPrice;
+            if (underlying.Equals("SENSEX", StringComparison.OrdinalIgnoreCase))
+                return ProjectedSensexOpenPrice;
+            return 0;
+        }
 
         public void Reset()
         {
-            MarketDataHub.Instance.Clear();
+            _priceCache.Clear();
             _priceSyncFired = false;
             System.Threading.Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
 

@@ -160,6 +160,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             // Subscribe to ATM changes for fluid strike grid re-centering
             OptionGenerationService.Instance.ATMChanged += OnATMChanged;
 
+            // Subscribe to compute service updates for diagnostic/UI refresh
+            _computeService.StrikeDataUpdated += OnStrikeDataUpdated;
+
             // Initialize replay mode based on current simulation state
             if (SimulationService.Instance.IsSimulationMode)
             {
@@ -223,9 +226,21 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             _log.Info("[OptionSignalsViewModel] Stopping services");
             SimulationService.Instance.StateChanged -= OnSimulationStateChanged;
             OptionGenerationService.Instance.ATMChanged -= OnATMChanged;
+            _computeService.StrikeDataUpdated -= OnStrikeDataUpdated;
             _subscriptions?.Clear();
             // DON'T clear ComputeService - it's a singleton shared across instances if any
             // but we can ensure it stops processing if needed, though typically it runs for the session
+        }
+
+        /// <summary>
+        /// Handles strike data updates from compute service.
+        /// Row properties use INotifyPropertyChanged so WPF binding auto-updates.
+        /// This handler is mainly for diagnostics/explicit refresh if needed.
+        /// </summary>
+        private void OnStrikeDataUpdated(object sender, StrikeDataUpdatedEventArgs e)
+        {
+            // Row properties already implement INotifyPropertyChanged
+            // WPF binding should auto-update, but we can force refresh if needed
         }
 
         /// <summary>
@@ -351,18 +366,28 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             });
 
             // Determine ATM and step
-            // Use dynamic ATM from MarketAnalyzerLogic if available (calculated from straddle prices)
-            decimal dynamicAtm = MarketAnalyzerLogic.Instance.GetATMStrike(evt.SelectedUnderlying);
-            int atmStrike = dynamicAtm > 0 ? (int)dynamicAtm : (int)evt.ATMStrike;
-
-            if (dynamicAtm > 0 && (int)dynamicAtm != (int)evt.ATMStrike)
-            {
-                _log.Info($"[OptionSignalsViewModel] Using dynamic ATM={atmStrike} (event ATM was {evt.ATMStrike})");
-            }
-            
+            // Priority: 1) Projected open strike (non-market hours), 2) Event ATM (market hours)
             var uniqueStrikes = evt.Options.Where(o => o.strike.HasValue)
                 .Select(o => (int)o.strike.Value).Distinct().OrderBy(s => s).ToList();
             int step = uniqueStrikes.Count >= 2 ? uniqueStrikes[1] - uniqueStrikes[0] : 50;
+
+            // Check if market is open - use projected open during pre-market
+            bool isMarketOpen = MarketAnalyzerLogic.Instance.IsMarketOpen();
+            double projectedOpen = MarketAnalyzerLogic.Instance.GetProjectedOpen(evt.SelectedUnderlying);
+
+            int atmStrike;
+            if (!isMarketOpen && projectedOpen > 0)
+            {
+                // Non-market hours: use projected open rounded to nearest strike
+                atmStrike = ((int)Math.Round(projectedOpen / step)) * step;
+                _log.Info($"[OptionSignalsViewModel] Pre-market: using projected open strike={atmStrike} (projected={projectedOpen:F2})");
+            }
+            else
+            {
+                // Market hours: use event ATM
+                atmStrike = (int)evt.ATMStrike;
+                _log.Info($"[OptionSignalsViewModel] Market hours: using event ATM={atmStrike}");
+            }
 
             _atmStrike = atmStrike;
             _strikeStep = step;

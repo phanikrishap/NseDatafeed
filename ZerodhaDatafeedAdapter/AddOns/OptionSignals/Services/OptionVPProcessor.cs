@@ -258,16 +258,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
         private List<(DateTime time, int index)> BuildTickTimeIndex(Bars tickBars, DateTime targetDate)
         {
-            var tickTimes = new List<(DateTime time, int index)>(tickBars?.Count ?? 0);
-            if (tickBars == null) return tickTimes;
-
-            for (int i = 0; i < tickBars.Count; i++)
-            {
-                var t = tickBars.GetTime(i);
-                if (t.Date == targetDate)
-                    tickTimes.Add((t, i));
-            }
-            return tickTimes;
+            return VolumeProfileLogic.BuildTickTimeIndex(tickBars, targetDate);
         }
 
         private double ProcessTicksOptimized(OptionVPState state, Bars tickBars,
@@ -277,63 +268,36 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             // Start new bar for CD momentum engine
             state.CDMomoEngine.StartNewBar();
 
-            while (searchStart < tickTimes.Count)
-            {
-                var (tickTime, tickIdx) = tickTimes[searchStart];
-
-                if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime)
+            double updatedPrice = VolumeProfileLogic.ProcessTicksOptimized(
+                tickBars, tickTimes, ref searchStart, prevBarTime, currentBarTime, lastPrice,
+                (price, volume, isBuy, tickTime) =>
                 {
-                    searchStart++;
-                    continue;
-                }
-
-                if (tickTime > currentBarTime) break;
-
-                double price = tickBars.GetClose(tickIdx);
-                long volume = tickBars.GetVolume(tickIdx);
-                bool isBuy = price >= lastPrice;
-
-                state.SessionVPEngine.AddTick(price, volume, isBuy);
-                state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
-                state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
-
-                lastPrice = price;
-                searchStart++;
-            }
+                    state.SessionVPEngine.AddTick(price, volume, isBuy);
+                    state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+                    state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
+                });
 
             state.LastVPTickIndex = searchStart > 0 ? tickTimes[searchStart - 1].index : -1;
-            return lastPrice;
+            return updatedPrice;
         }
 
         private void ProcessTicksInWindow(OptionVPState state, Bars tickBars, DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
         {
-            DateTime today = DateTime.Today;
-            int startIdx = state.LastVPTickIndex + 1;
-            if (startIdx < 0) startIdx = 0;
-
             state.CDMomoEngine.StartNewBar();
 
-            for (int i = startIdx; i < tickBars.Count; i++)
-            {
-                var tickTime = tickBars.GetTime(i);
+            int lastIndex;
+            double updatedPrice = VolumeProfileLogic.ProcessTicksInWindow(
+                tickBars, state.LastVPTickIndex, prevBarTime, currentBarTime, lastPrice,
+                (price, volume, isBuy, tickTime) =>
+                {
+                    state.SessionVPEngine.AddTick(price, volume, isBuy);
+                    state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
+                    state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
+                },
+                out lastIndex);
 
-                if (tickTime.Date < today) continue;
-                if (prevBarTime != DateTime.MinValue && tickTime <= prevBarTime) continue;
-                if (tickTime > currentBarTime) break;
-
-                double price = tickBars.GetClose(i);
-                long volume = tickBars.GetVolume(i);
-                bool isBuy = price >= lastPrice;
-
-                state.SessionVPEngine.AddTick(price, volume, isBuy);
-                state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
-                state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
-
-                lastPrice = price;
-                state.LastVPTickIndex = i;
-            }
-
-            state.LastClosePrice = lastPrice;
+            state.LastClosePrice = updatedPrice;
+            state.LastVPTickIndex = lastIndex;
         }
 
         private void UpdateAtrDisplay(OptionVPState state, double close, DateTime barTime)
