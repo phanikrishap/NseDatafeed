@@ -11,6 +11,10 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Services.Instruments;
+using ZerodhaDatafeedAdapter.Core;
+using ZerodhaDatafeedAdapter.Services.Historical.Providers;
+using ZerodhaDatafeedAdapter.Services.Historical.Persistence;
+using ZerodhaDatafeedAdapter.Services.Historical.Adapters;
 
 namespace ZerodhaDatafeedAdapter.Services.Historical
 {
@@ -53,6 +57,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         private bool _isInitialized;
         private int _daysToFetch = DEFAULT_DAYS_TO_FETCH;
         private readonly object _initLock = new object();
+
+        // New architecture dependencies
+        private IHistoricalDataProvider _provider;
+        private ITickDataPersistence _persistence;
+        private INT8BarsRequestAdapter _nt8Adapter;
 
         #endregion
 
@@ -111,6 +120,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                 // Create API client
                 _apiClient = new AccelpixApiClient(_apiKey);
+
+                // Initialize new architecture dependencies
+                _provider = ServiceFactory.GetAccelpixProvider();
+                _persistence = ServiceFactory.GetTickPersistence();
+                _nt8Adapter = ServiceFactory.GetNT8Adapter();
 
                 // Subscribe to request queues for processing
                 SubscribeToInstrumentQueue();
@@ -362,6 +376,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         /// <summary>
         /// Process an Accelpix request with pre-built symbols (no parsing needed).
+        /// Uses new architecture: provider, persistence, and NT8 adapter.
         /// </summary>
         private async Task ProcessAccelpixRequestAsync(AccelpixInstrumentRequest request)
         {
@@ -381,7 +396,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 var age = DateTime.Now - request.QueuedAt;
                 if (age.TotalMinutes > 10)
                 {
-                    HistoricalTickLogger.Warn($"[ACCELPIX-QUEUE] Skipping stale request for {zerodhaSymbol} (age={age.TotalMinutes:F1}min)");
+                    HistoricalTickLogger.Warn($"[NEW-ARCH] Skipping stale request for {zerodhaSymbol} (age={age.TotalMinutes:F1}min)");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
@@ -393,52 +408,37 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                 // Determine days to fetch
                 var daysToFetch = GetDaysToFetch();
-                HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] {zerodhaSymbol} -> {accelpixSymbol}: Fetching {daysToFetch.Count} days");
+                HistoricalTickLogger.Info($"[NEW-ARCH] {zerodhaSymbol} -> {accelpixSymbol}: Fetching {daysToFetch.Count} days");
 
-                // Check if all days are cached in SQLite
-                bool allDaysCached = daysToFetch.All(d => IciciTickCacheDb.Instance.HasCachedData(zerodhaSymbol, d));
-
-                if (allDaysCached)
+                // Check cache first
+                bool allCached = true;
+                foreach (var day in daysToFetch)
                 {
-                    int totalTicks = 0;
-                    foreach (var date in daysToFetch)
+                    if (!await _persistence.HasCachedDataAsync(zerodhaSymbol, day))
                     {
-                        var cached = IciciTickCacheDb.Instance.GetCachedTicks(zerodhaSymbol, date);
-                        if (cached != null) totalTicks += cached.Count;
+                        allCached = false;
+                        break;
                     }
+                }
 
-                    HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] SQLITE CACHE HIT: {zerodhaSymbol} has {totalTicks} ticks across {daysToFetch.Count} day(s)");
+                if (allCached)
+                {
+                    var cached = await _persistence.GetCachedTicksAsync(zerodhaSymbol, daysToFetch.First(), daysToFetch.Last());
+                    HistoricalTickLogger.Info($"[NEW-ARCH] CACHE HIT: {zerodhaSymbol} has {cached.Count} ticks from persistence");
+
+                    await _nt8Adapter.TriggerBarsRequestAsync(zerodhaSymbol, cached);
+
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Ready,
                         TradeDate = daysToFetch.Last(),
-                        TickCount = totalTicks
+                        TickCount = cached.Count
                     });
                     return;
                 }
 
-                // Check if NT8 already has tick data persisted (from previous session)
-                // This avoids re-downloading data that NT8 already has
-                // We check EACH day individually to ensure complete coverage
-                if (daysToFetch.Count > 0)
-                {
-                    bool nt8HasAllDays = await CheckNT8HasTickDataForDaysAsync(zerodhaSymbol, daysToFetch);
-                    if (nt8HasAllDays)
-                    {
-                        HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] NT8 DB HIT: {zerodhaSymbol} - skipping download (all {daysToFetch.Count} days already persisted)");
-                        statusSubject.OnNext(new InstrumentTickDataStatus
-                        {
-                            ZerodhaSymbol = zerodhaSymbol,
-                            State = TickDataState.Ready,
-                            TradeDate = daysToFetch.Last(),
-                            TickCount = -1 // Unknown count, but data exists
-                        });
-                        return;
-                    }
-                }
-
-                // Update status
+                // Update status to downloading
                 statusSubject.OnNext(new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = zerodhaSymbol,
@@ -446,41 +446,31 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     TradeDate = daysToFetch.LastOrDefault()
                 });
 
-                int totalDownloaded = 0;
-                int totalFiltered = 0;
-                var allCandles = new List<HistoricalCandle>();
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                // Download each day, store to SQLite cache, then trigger NT8 BarsRequest
+                // Fetch from provider
+                var allTicks = new List<Models.HistoricalCandle>();
                 foreach (var tradeDate in daysToFetch)
                 {
-                    HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Fetching from Accelpix as {accelpixSymbol}...");
+                    HistoricalTickLogger.Info($"[NEW-ARCH] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Fetching via provider...");
 
-                    var accelpixTicks = await _apiClient.GetTickDataAsync(accelpixSymbol, tradeDate);
-                    totalDownloaded += accelpixTicks?.Count ?? 0;
-
-                    if (accelpixTicks != null && accelpixTicks.Count > 0)
+                    var ticks = await _provider.FetchTickDataAsync(accelpixSymbol, tradeDate, tradeDate);
+                    if (ticks != null && ticks.Count > 0)
                     {
-                        // Convert with delta volume calculation (cumulative qty -> per-tick volume)
-                        var candles = AccelpixApiClient.ConvertToHistoricalCandles(accelpixTicks);
-                        var filteredCandles = candles.Where(c => c.Volume > 0).ToList();
-                        int removed = candles.Count - filteredCandles.Count;
-
-                        HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Downloaded {accelpixTicks.Count} ticks, {filteredCandles.Count} with volume (removed {removed} zero-volume)");
-
-                        if (filteredCandles.Count > 0)
+                        var candles = ticks.Select(t => new Models.HistoricalCandle
                         {
-                            // Store to SQLite cache per day - BarsWorker will read from here
-                            TickCacheDb.Instance.CacheTicks(zerodhaSymbol, tradeDate, filteredCandles);
-                            HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Cached {filteredCandles.Count} ticks to SQLite");
+                            DateTime = t.DateTime,
+                            Open = t.Open,
+                            High = t.High,
+                            Low = t.Low,
+                            Close = t.Close,
+                            Volume = t.Volume
+                        }).Where(c => c.Volume > 0).ToList();
 
-                            allCandles.AddRange(filteredCandles);
-                            totalFiltered += filteredCandles.Count;
+                        if (candles.Count > 0)
+                        {
+                            await _persistence.CacheTicksAsync(zerodhaSymbol, tradeDate, candles);
+                            allTicks.AddRange(candles);
+                            HistoricalTickLogger.Info($"[NEW-ARCH] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Cached {candles.Count} ticks");
                         }
-                    }
-                    else
-                    {
-                        HistoricalTickLogger.Warn($"[ACCELPIX-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: No data from Accelpix API");
                     }
 
                     if (daysToFetch.Count > 1)
@@ -489,38 +479,34 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     }
                 }
 
-                sw.Stop();
-
-                if (totalFiltered > 0 && allCandles.Count > 0)
+                if (allTicks.Count > 0)
                 {
-                    HistoricalTickLogger.LogDownloadComplete("ACCELPIX", zerodhaSymbol, daysToFetch.Last(), totalFiltered, sw.ElapsedMilliseconds);
-
-                    // Trigger NT8 BarsRequest - it will call BarsWorker which reads from SQLite cache
-                    await TriggerNT8BarsRequestAsync(zerodhaSymbol, allCandles);
+                    await _nt8Adapter.TriggerBarsRequestAsync(zerodhaSymbol, allTicks);
 
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Ready,
                         TradeDate = daysToFetch.Last(),
-                        TickCount = totalFiltered
+                        TickCount = allTicks.Count
                     });
+
+                    HistoricalTickLogger.Info($"[NEW-ARCH] {zerodhaSymbol}: SUCCESS - {allTicks.Count} ticks processed");
                 }
                 else
                 {
-                    HistoricalTickLogger.Warn($"[ACCELPIX-QUEUE] {zerodhaSymbol}: No data after filtering (downloaded {totalDownloaded})");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.NoData,
                         TradeDate = daysToFetch.LastOrDefault(),
-                        ErrorMessage = totalDownloaded > 0 ? "All ticks had zero volume" : "No data from Accelpix API"
+                        ErrorMessage = "No data from provider"
                     });
                 }
             }
             catch (Exception ex)
             {
-                HistoricalTickLogger.Error($"[ACCELPIX-QUEUE] Error processing {zerodhaSymbol}: {ex.Message}", ex);
+                HistoricalTickLogger.Error($"[NEW-ARCH] Error processing {zerodhaSymbol}: {ex.Message}", ex);
                 statusSubject.OnNext(new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = zerodhaSymbol,
@@ -532,7 +518,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         /// <summary>
         /// Process a single instrument tick data request.
-        /// Downloads from Accelpix and persists directly to NT8 database (no local cache).
+        /// Uses new architecture: provider, persistence, and NT8 adapter.
         /// </summary>
         private async Task ProcessInstrumentRequestAsync(InstrumentTickDataRequest request)
         {
@@ -541,14 +527,13 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
             string zerodhaSymbol = request.ZerodhaSymbol;
 
-            // Get or create status subject
             var statusSubject = _instrumentStatusSubjects.GetOrAdd(zerodhaSymbol,
                 _ => new BehaviorSubject<InstrumentTickDataStatus>(
                     new InstrumentTickDataStatus { ZerodhaSymbol = zerodhaSymbol, State = TickDataState.Pending }));
 
             try
             {
-                // Check if request is stale (older than 10 minutes)
+                // Check if request is stale
                 var age = DateTime.Now - request.QueuedAt;
                 if (age.TotalMinutes > 10)
                 {
@@ -576,27 +561,36 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     return;
                 }
 
-                // Determine which days to fetch
+                // Determine days to fetch
                 var daysToFetch = GetDaysToFetch();
                 HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol} -> {accelpixSymbol}: Fetching {daysToFetch.Count} days");
 
-                // Check if NT8 already has tick data persisted (from previous session)
-                // We check EACH day individually to ensure complete coverage
-                if (daysToFetch.Count > 0)
+                // Check cache first
+                bool allCached = true;
+                foreach (var day in daysToFetch)
                 {
-                    bool nt8HasAllDays = await CheckNT8HasTickDataForDaysAsync(zerodhaSymbol, daysToFetch);
-                    if (nt8HasAllDays)
+                    if (!await _persistence.HasCachedDataAsync(zerodhaSymbol, day))
                     {
-                        HistoricalTickLogger.Info($"[INST-QUEUE] NT8 DB HIT: {zerodhaSymbol} - skipping download (all {daysToFetch.Count} days already persisted)");
-                        statusSubject.OnNext(new InstrumentTickDataStatus
-                        {
-                            ZerodhaSymbol = zerodhaSymbol,
-                            State = TickDataState.Ready,
-                            TradeDate = daysToFetch.Last(),
-                            TickCount = -1
-                        });
-                        return;
+                        allCached = false;
+                        break;
                     }
+                }
+
+                if (allCached)
+                {
+                    var cached = await _persistence.GetCachedTicksAsync(zerodhaSymbol, daysToFetch.First(), daysToFetch.Last());
+                    HistoricalTickLogger.Info($"[INST-QUEUE] CACHE HIT: {zerodhaSymbol} has {cached.Count} ticks");
+
+                    await _nt8Adapter.TriggerBarsRequestAsync(zerodhaSymbol, cached);
+
+                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    {
+                        ZerodhaSymbol = zerodhaSymbol,
+                        State = TickDataState.Ready,
+                        TradeDate = daysToFetch.Last(),
+                        TickCount = cached.Count
+                    });
+                    return;
                 }
 
                 // Update status to downloading
@@ -607,78 +601,61 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     TradeDate = daysToFetch.LastOrDefault()
                 });
 
-                int totalDownloaded = 0;
-                int totalFiltered = 0;
-                var allCandles = new List<HistoricalCandle>();
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                // Download each day, store to SQLite cache, then trigger NT8 BarsRequest
+                // Fetch from provider
+                var allTicks = new List<Models.HistoricalCandle>();
                 foreach (var tradeDate in daysToFetch)
                 {
-                    HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Fetching from Accelpix...");
+                    HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Fetching via provider...");
 
-                    // Fetch from Accelpix API
-                    var accelpixTicks = await _apiClient.GetTickDataAsync(accelpixSymbol, tradeDate);
-                    totalDownloaded += accelpixTicks?.Count ?? 0;
-
-                    if (accelpixTicks != null && accelpixTicks.Count > 0)
+                    var ticks = await _provider.FetchTickDataAsync(accelpixSymbol, tradeDate, tradeDate);
+                    if (ticks != null && ticks.Count > 0)
                     {
-                        // Convert with delta volume calculation (cumulative qty -> per-tick volume)
-                        var candles = AccelpixApiClient.ConvertToHistoricalCandles(accelpixTicks);
-                        var filteredCandles = candles.Where(c => c.Volume > 0).ToList();
-                        int removed = candles.Count - filteredCandles.Count;
-
-                        HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Downloaded {accelpixTicks.Count} ticks, {filteredCandles.Count} with volume (removed {removed} zero-volume)");
-
-                        if (filteredCandles.Count > 0)
+                        var candles = ticks.Select(t => new Models.HistoricalCandle
                         {
-                            // Store to SQLite cache per day - BarsWorker will read from here
-                            TickCacheDb.Instance.CacheTicks(zerodhaSymbol, tradeDate, filteredCandles);
-                            HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Cached {filteredCandles.Count} ticks to SQLite");
+                            DateTime = t.DateTime,
+                            Open = t.Open,
+                            High = t.High,
+                            Low = t.Low,
+                            Close = t.Close,
+                            Volume = t.Volume
+                        }).Where(c => c.Volume > 0).ToList();
 
-                            allCandles.AddRange(filteredCandles);
-                            totalFiltered += filteredCandles.Count;
+                        if (candles.Count > 0)
+                        {
+                            await _persistence.CacheTicksAsync(zerodhaSymbol, tradeDate, candles);
+                            allTicks.AddRange(candles);
+                            HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Cached {candles.Count} ticks");
                         }
                     }
-                    else
-                    {
-                        HistoricalTickLogger.Warn($"[INST-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: No data from Accelpix API");
-                    }
 
-                    // Small delay between requests
                     if (daysToFetch.Count > 1)
                     {
                         await Task.Delay(RATE_LIMIT_DELAY_MS);
                     }
                 }
 
-                sw.Stop();
-
-                // Final status update
-                if (totalFiltered > 0 && allCandles.Count > 0)
+                if (allTicks.Count > 0)
                 {
-                    HistoricalTickLogger.LogDownloadComplete("ACCELPIX", zerodhaSymbol, daysToFetch.Last(), totalFiltered, sw.ElapsedMilliseconds);
-
-                    // Trigger NT8 BarsRequest - it will call BarsWorker which reads from SQLite cache
-                    await TriggerNT8BarsRequestAsync(zerodhaSymbol, allCandles);
+                    await _nt8Adapter.TriggerBarsRequestAsync(zerodhaSymbol, allTicks);
 
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Ready,
                         TradeDate = daysToFetch.Last(),
-                        TickCount = totalFiltered
+                        TickCount = allTicks.Count
                     });
+
+                    HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol}: SUCCESS - {allTicks.Count} ticks processed");
                 }
                 else
                 {
-                    HistoricalTickLogger.Warn($"[INST-QUEUE] {zerodhaSymbol}: No data after filtering (downloaded {totalDownloaded})");
                     statusSubject.OnNext(new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.NoData,
                         TradeDate = daysToFetch.LastOrDefault(),
-                        ErrorMessage = totalDownloaded > 0 ? "All ticks had zero volume" : "No data from Accelpix API"
+                        ErrorMessage = "No data from provider"
                     });
                 }
             }
@@ -742,189 +719,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             TimeZoneInfo istZone = TimeZoneInfo.FindSystemTimeZoneById(Classes.Constants.IndianTimeZoneId);
             return TimeZoneInfo.ConvertTime(DateTime.Now, istZone);
-        }
-
-        /// <summary>
-        /// Check if NT8 already has tick data for the most recent day.
-        /// If the most recent day has >500 ticks, consider the instrument up-to-date.
-        /// This is a quick check to avoid unnecessary API downloads.
-        /// </summary>
-        private async Task<bool> CheckNT8HasTickDataForDaysAsync(string zerodhaSymbol, List<DateTime> daysToCheck)
-        {
-            if (daysToCheck == null || daysToCheck.Count == 0)
-                return false;
-
-            try
-            {
-                // Only check the most recent day - if it has data, skip backfill
-                var mostRecentDay = daysToCheck.Last();
-                var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
-                {
-                    try
-                    {
-                        var ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
-                        if (ntInstrument == null)
-                        {
-                            tcs.TrySetResult(0);
-                            return;
-                        }
-
-                        DateTime fromDate = mostRecentDay.Date.AddHours(9).AddMinutes(15);  // 09:15 IST
-                        DateTime toDate = mostRecentDay.Date.AddHours(15).AddMinutes(30);   // 15:30 IST
-
-                        // Create a BarsRequest to probe NT8's database
-                        var barsRequest = new BarsRequest(ntInstrument, 500);
-                        barsRequest.BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Tick, Value = 1 };
-                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
-                        barsRequest.FromLocal = fromDate.ToLocalTime();
-                        barsRequest.ToLocal = toDate.ToLocalTime();
-
-                        barsRequest.Request((barsResult, errorCode, errorMessage) =>
-                        {
-                            if (errorCode == ErrorCode.NoError && barsResult?.Bars != null)
-                            {
-                                tcs.TrySetResult(barsResult.Bars.Count);
-                            }
-                            else
-                            {
-                                tcs.TrySetResult(0);
-                            }
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        HistoricalTickLogger.Debug($"[NT8-CHECK] {zerodhaSymbol}: Exception: {ex.Message}");
-                        tcs.TrySetResult(0);
-                    }
-                });
-
-                // Wait for the BarsRequest callback with timeout
-                var timeoutTask = Task.Delay(2000);
-                var completedTask = await Task.WhenAny(tcs.Task, timeoutTask);
-
-                int tickCount = 0;
-                if (completedTask == tcs.Task)
-                {
-                    tickCount = tcs.Task.Result;
-                }
-
-                // If most recent day has >500 ticks, consider up-to-date
-                bool hasData = tickCount >= 500;
-                if (hasData)
-                {
-                    HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: NT8 has {tickCount} ticks for {mostRecentDay:MM-dd} - skipping download");
-                }
-
-                return hasData;
-            }
-            catch (Exception ex)
-            {
-                HistoricalTickLogger.Debug($"[NT8-CHECK] {zerodhaSymbol}: Error: {ex.Message}");
-                return false;
-            }
-        }
-
-        #endregion
-
-        #region NT8 BarsRequest Trigger
-
-        /// <summary>
-        /// Triggers NT8 BarsRequest to read cached tick data via BarsWorker.
-        /// Flow: BarsRequest -> NT8 calls BarsWorker -> BarsWorker reads from SQLite cache -> NT8 persists to tick db
-        /// </summary>
-        private async Task TriggerNT8BarsRequestAsync(string zerodhaSymbol, List<HistoricalCandle> candles)
-        {
-            if (string.IsNullOrEmpty(zerodhaSymbol) || candles == null || candles.Count == 0)
-                return;
-
-            try
-            {
-                var firstCandle = candles.First();
-                var lastCandle = candles.Last();
-                HistoricalTickLogger.Info($"[NT8-TRIGGER] START {zerodhaSymbol}: {candles.Count} ticks cached, triggering BarsRequest for range {firstCandle.DateTime.ToLocalTime():yyyy-MM-dd HH:mm:ss} to {lastCandle.DateTime.ToLocalTime():HH:mm:ss}");
-
-                // Get or create the NT instrument on the UI thread
-                Instrument ntInstrument = null;
-                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
-                {
-                    ntInstrument = Instrument.GetInstrument(zerodhaSymbol);
-                    if (ntInstrument == null)
-                    {
-                        HistoricalTickLogger.Info($"[NT8-TRIGGER] {zerodhaSymbol}: Instrument not found, attempting to create...");
-                        var mapping = InstrumentManager.Instance.GetMappingByNtSymbol(zerodhaSymbol);
-                        if (mapping != null)
-                        {
-                            string ntName;
-                            NinjaTraderHelper.CreateNTInstrumentFromMapping(mapping, out ntName);
-                            ntInstrument = Instrument.GetInstrument(ntName);
-                            HistoricalTickLogger.Info($"[NT8-TRIGGER] {zerodhaSymbol}: Created instrument, ntName={ntName}");
-                        }
-                        else
-                        {
-                            HistoricalTickLogger.Warn($"[NT8-TRIGGER] {zerodhaSymbol}: No mapping found in InstrumentManager");
-                        }
-                    }
-                });
-
-                if (ntInstrument == null)
-                {
-                    HistoricalTickLogger.Warn($"[NT8-TRIGGER] {zerodhaSymbol}: Cannot trigger - instrument not available in NT");
-                    return;
-                }
-
-                // Trigger BarsRequest - NT8 will call our BarsWorker which reads from SQLite cache
-                await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
-                {
-                    try
-                    {
-                        // Create a BarsRequest for tick data
-                        // NT8 will call BarsWorker -> GetTickDataFromIciciCache -> serves from SQLite -> NT8 persists
-                        var barsRequest = new BarsRequest(ntInstrument, candles.Count);
-                        barsRequest.BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Tick, Value = 1 };
-                        barsRequest.TradingHours = TradingHours.Get("Default 24 x 7");
-                        barsRequest.FromLocal = firstCandle.DateTime.ToLocalTime();
-                        barsRequest.ToLocal = lastCandle.DateTime.ToLocalTime();
-                        barsRequest.IsResetOnNewTradingDay = false;
-
-                        HistoricalTickLogger.Info($"[NT8-TRIGGER] {zerodhaSymbol}: BarsRequest created - Type=Tick, From={barsRequest.FromLocal:HH:mm:ss}, To={barsRequest.ToLocal:HH:mm:ss}");
-
-                        barsRequest.Request((barsResult, errorCode, errorMessage) =>
-                        {
-                            if (errorCode == ErrorCode.NoError)
-                            {
-                                int barsCount = barsResult?.Bars?.Count ?? 0;
-                                HistoricalTickLogger.Info($"[NT8-TRIGGER] {zerodhaSymbol}: BarsRequest callback SUCCESS - BarsWorker served {barsCount} bars from cache");
-
-                                // Delete SQLite cache after NT8 has persisted the data
-                                if (barsCount > 0)
-                                {
-                                    Task.Run(() =>
-                                    {
-                                        int deleted = TickCacheDb.Instance.DeleteCacheForSymbol(zerodhaSymbol);
-                                        HistoricalTickLogger.Info($"[NT8-TRIGGER] {zerodhaSymbol}: Cleaned up SQLite cache ({deleted} ticks removed)");
-                                    });
-                                }
-                            }
-                            else
-                            {
-                                HistoricalTickLogger.Warn($"[NT8-TRIGGER] {zerodhaSymbol}: BarsRequest callback FAILED - ErrorCode={errorCode}, Message={errorMessage}");
-                            }
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        HistoricalTickLogger.Error($"[NT8-TRIGGER] {zerodhaSymbol}: Exception creating BarsRequest: {ex.Message}");
-                    }
-                });
-
-                HistoricalTickLogger.Info($"[NT8-TRIGGER] END {zerodhaSymbol}: BarsRequest triggered");
-            }
-            catch (Exception ex)
-            {
-                HistoricalTickLogger.Error($"[AccelpixHistoricalTickDataService] TriggerNT8BarsRequestAsync error: {ex.Message}");
-            }
         }
 
         #endregion
