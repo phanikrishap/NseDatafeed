@@ -127,7 +127,9 @@
     <Compile Include="ZerodhaAdapter.MarketData.cs" />
     <Compile Include="ZerodhaAdapter.Historical.cs" />
     <Compile Include="ZerodhaAdapter.Synthetic.cs" />
-    <Compile Include="ZerodhaAdapterAddOn\Styles.cs" />
+    <Compile Include="ZerodhaAdapterAddOn\Styles.cs">
+      <DependentUpon>Styles.xaml</DependentUpon>
+    </Compile>
     <Compile Include="ZerodhaAdapterAddOn\ViewModels\LoadViewModel.cs" />
     <Compile Include="ZerodhaConnectorOptions.cs" />
     <Compile Include="Classes\Record.cs" />
@@ -358,4 +360,5 @@
     <WCFMetadata Include="Connected Services\" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Import Project="$(MSBuildToolsPath)\Microsoft.WinFX.targets" />
 </Project>

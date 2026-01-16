@@ -269,8 +269,8 @@ namespace TokenGeneratorTest
                 // Find nearby strikes
                 var nearbyWeekly = _cachedMasters.Where(m =>
                 {
-                    return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX" || m.Underlying.Contains("SENSEX")) &&
-                           m.ExpiryDate.StartsWith(weeklyExpiry) &&
+                    return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX" || (m.Underlying?.Contains("SENSEX") ?? false)) &&
+                           (m.ExpiryDate?.StartsWith(weeklyExpiry) ?? false) &&
                            m.StrikePrice >= 84000 && m.StrikePrice <= 86000;
                 }).OrderBy(m => m.StrikePrice).Take(10).ToList();
 
@@ -291,7 +291,7 @@ namespace TokenGeneratorTest
             var monthlyOptions = _cachedMasters.Where(m =>
             {
                 return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX") &&
-                       m.ExpiryDate.StartsWith(monthlyExpiry) &&
+                       (m.ExpiryDate?.StartsWith(monthlyExpiry) ?? false) &&
                        m.StrikePrice == targetStrike;
             }).ToList();
 
@@ -302,8 +302,8 @@ namespace TokenGeneratorTest
 
                 var nearbyMonthly = _cachedMasters.Where(m =>
                 {
-                    return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX" || m.Underlying.Contains("SENSEX")) &&
-                           m.ExpiryDate.StartsWith(monthlyExpiry) &&
+                    return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX" || (m.Underlying?.Contains("SENSEX") ?? false)) &&
+                           (m.ExpiryDate?.StartsWith(monthlyExpiry) ?? false) &&
                            m.StrikePrice >= 84000 && m.StrikePrice <= 86000;
                 }).OrderBy(m => m.StrikePrice).Take(10).ToList();
 
@@ -323,8 +323,8 @@ namespace TokenGeneratorTest
             // Show all SENSEX expiries in January 2026
             Console.WriteLine("\n    All SENSEX expiries in January 2026:");
             var sensexJanExpiries = _cachedMasters
-                .Where(m => (m.Underlying == "SENSEX" || m.Underlying.Contains("SENSEX")) &&
-                           m.ExpiryDate.StartsWith("2026-01"))
+                .Where(m => (m.Underlying == "SENSEX" || (m.Underlying?.Contains("SENSEX") ?? false)) &&
+                           (m.ExpiryDate?.StartsWith("2026-01") ?? false))
                 .Select(m => m.ExpiryDate)
                 .Distinct()
                 .OrderBy(e => e)
@@ -372,8 +372,8 @@ namespace TokenGeneratorTest
                 // Find a SENSEX option ticker to test
                 var sensexOption = _cachedMasters.FirstOrDefault(m =>
                 {
-                    return m.Underlying.Contains("SENSEX") &&
-                           m.ExpiryDate.StartsWith("2026-01") &&
+                    return (m.Underlying?.Contains("SENSEX") ?? false) &&
+                           (m.ExpiryDate?.StartsWith("2026-01") ?? false) &&
                            m.StrikePrice >= 84000 && m.StrikePrice <= 86000;
                 });
 
