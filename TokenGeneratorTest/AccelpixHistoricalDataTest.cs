@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ZerodhaDatafeedAdapter.Services.Historical;
 
 namespace TokenGeneratorTest
 {
@@ -19,7 +20,7 @@ namespace TokenGeneratorTest
             AppDomain.CurrentDomain.BaseDirectory, "..", "..", "config", "accelpixCred.json");
 
         // Cached master data to avoid multiple downloads
-        private static List<JObject> _cachedMasters = null;
+        private static List<AccelpixSymbolMaster> _cachedMasters = null;
 
         public static async Task RunTestAsync()
         {
@@ -57,7 +58,7 @@ namespace TokenGeneratorTest
                 Console.WriteLine($"    API Expiry: {apiExpiry}");
                 Console.WriteLine();
 
-                using (var client = new AccelpixApiClient(apiKey))
+                using (var client = new AccelpixApiClient(apiKey, logger: (lvl, msg) => Console.WriteLine($"[{lvl}] {msg}")))
                 {
                     // Step 2: Test connection
                     Console.WriteLine("[2] Testing API connection...");
@@ -121,16 +122,14 @@ namespace TokenGeneratorTest
                 return;
             }
 
-            var masterJson = await client.GetMasterDataAsync(includeLotSize: true);
+            _cachedMasters = await client.GetMasterDataAsync(includeLotSize: true);
 
-            if (string.IsNullOrEmpty(masterJson))
+            if (_cachedMasters == null || _cachedMasters.Count == 0)
             {
                 Console.WriteLine("    ERROR: No master data received");
                 return;
             }
 
-            Console.WriteLine($"    Received {masterJson.Length:N0} bytes");
-            _cachedMasters = JsonConvert.DeserializeObject<List<JObject>>(masterJson);
             Console.WriteLine($"    Total symbols: {_cachedMasters?.Count:N0}");
         }
 
@@ -151,33 +150,23 @@ namespace TokenGeneratorTest
             // Find weekly options at strike 26000
             var weeklyOptions = _cachedMasters.Where(m =>
             {
-                var underlying = m["utkr"]?.ToString() ?? "";
-                var expiry = m["exp"]?.ToString() ?? "";
-                var strike = m["sp"]?.Value<decimal>() ?? 0;
-
-                return underlying == "NIFTY" &&
-                       expiry.StartsWith(weeklyExpiry) &&
-                       strike == targetStrike;
+                return m.Underlying == "NIFTY" &&
+                       m.ExpiryDate.StartsWith(weeklyExpiry) &&
+                       m.StrikePrice == targetStrike;
             }).ToList();
 
             Console.WriteLine($"\n    WEEKLY ({weeklyExpiry}) options at strike {targetStrike}:");
             foreach (var opt in weeklyOptions)
             {
-                var ticker = opt["tkr"]?.ToString();
-                var a3tkr = opt["a3tkr"]?.ToString();
-                Console.WriteLine($"      Ticker: {ticker,-25} Alt: {a3tkr}");
+                Console.WriteLine($"      Ticker: {opt.Ticker,-25}");
             }
 
             // Find monthly options at strike 26000
             var monthlyOptions = _cachedMasters.Where(m =>
             {
-                var underlying = m["utkr"]?.ToString() ?? "";
-                var expiry = m["exp"]?.ToString() ?? "";
-                var strike = m["sp"]?.Value<decimal>() ?? 0;
-
-                return underlying == "NIFTY" &&
-                       expiry.StartsWith(monthlyExpiry) &&
-                       strike == targetStrike;
+                return m.Underlying == "NIFTY" &&
+                       m.ExpiryDate.StartsWith(monthlyExpiry) &&
+                       m.StrikePrice == targetStrike;
             }).ToList();
 
             Console.WriteLine($"\n    MONTHLY ({monthlyExpiry}) options at strike {targetStrike}:");
@@ -188,13 +177,9 @@ namespace TokenGeneratorTest
                 // Search for NIFTY26JAN format
                 var monthlyYYMMM = _cachedMasters.Where(m =>
                 {
-                    var ticker = m["tkr"]?.ToString() ?? "";
-                    var underlying = m["utkr"]?.ToString() ?? "";
-                    var strike = m["sp"]?.Value<decimal>() ?? 0;
-
-                    return underlying == "NIFTY" &&
-                           ticker.Contains("26JAN") &&
-                           strike == targetStrike;
+                    return m.Underlying == "NIFTY" &&
+                           m.Ticker.Contains("26JAN") &&
+                           m.StrikePrice == targetStrike;
                 }).ToList();
 
                 if (monthlyYYMMM.Count > 0)
@@ -202,10 +187,7 @@ namespace TokenGeneratorTest
                     Console.WriteLine($"      Found {monthlyYYMMM.Count} options with YYMMM format:");
                     foreach (var opt in monthlyYYMMM)
                     {
-                        var ticker = opt["tkr"]?.ToString();
-                        var a3tkr = opt["a3tkr"]?.ToString();
-                        var expiry = opt["exp"]?.ToString();
-                        Console.WriteLine($"        Ticker: {ticker,-25} Expiry: {expiry} Alt: {a3tkr}");
+                        Console.WriteLine($"        Ticker: {opt.Ticker,-25} Expiry: {opt.ExpiryDate}");
                     }
                 }
             }
@@ -213,22 +195,15 @@ namespace TokenGeneratorTest
             {
                 foreach (var opt in monthlyOptions)
                 {
-                    var ticker = opt["tkr"]?.ToString();
-                    var a3tkr = opt["a3tkr"]?.ToString();
-                    Console.WriteLine($"      Ticker: {ticker,-25} Alt: {a3tkr}");
+                    Console.WriteLine($"      Ticker: {opt.Ticker,-25}");
                 }
             }
 
             // Show all NIFTY expiries in January 2026 to understand the pattern
             Console.WriteLine("\n    All NIFTY expiries in January 2026:");
             var niftyJanExpiries = _cachedMasters
-                .Where(m =>
-                {
-                    var underlying = m["utkr"]?.ToString() ?? "";
-                    var expiry = m["exp"]?.ToString() ?? "";
-                    return underlying == "NIFTY" && expiry.StartsWith("2026-01");
-                })
-                .Select(m => m["exp"]?.ToString())
+                .Where(m => m.Underlying == "NIFTY" && m.ExpiryDate.StartsWith("2026-01"))
+                .Select(m => m.ExpiryDate)
                 .Distinct()
                 .OrderBy(e => e)
                 .ToList();
@@ -242,13 +217,13 @@ namespace TokenGeneratorTest
             Console.WriteLine("\n    NAMING PATTERN ANALYSIS:");
             if (weeklyOptions.Count > 0)
             {
-                var sample = weeklyOptions.First()["tkr"]?.ToString() ?? "";
+                var sample = weeklyOptions.First().Ticker;
                 Console.WriteLine($"      Weekly format:  {sample}");
                 Console.WriteLine($"                      NIFTY + YYMMDD + Strike + CE/PE");
             }
             if (monthlyOptions.Count > 0)
             {
-                var sample = monthlyOptions.First()["tkr"]?.ToString() ?? "";
+                var sample = monthlyOptions.First().Ticker;
                 Console.WriteLine($"      Monthly format: {sample}");
                 Console.WriteLine($"                      NIFTY + YYMMDD + Strike + CE/PE (same pattern)");
             }
@@ -270,13 +245,8 @@ namespace TokenGeneratorTest
 
             // First, let's find what underlying names are used for SENSEX
             var sensexUnderlyings = _cachedMasters
-                .Where(m =>
-                {
-                    var ticker = m["tkr"]?.ToString() ?? "";
-                    var underlying = m["utkr"]?.ToString() ?? "";
-                    return ticker.Contains("SENSEX") || underlying.Contains("SENSEX");
-                })
-                .Select(m => m["utkr"]?.ToString())
+                .Where(m => m.Ticker.Contains("SENSEX") || m.Underlying.Contains("SENSEX"))
+                .Select(m => m.Underlying)
                 .Distinct()
                 .Take(5)
                 .ToList();
@@ -286,13 +256,9 @@ namespace TokenGeneratorTest
             // Find weekly options at strike 85000
             var weeklyOptions = _cachedMasters.Where(m =>
             {
-                var underlying = m["utkr"]?.ToString() ?? "";
-                var expiry = m["exp"]?.ToString() ?? "";
-                var strike = m["sp"]?.Value<decimal>() ?? 0;
-
-                return (underlying == "SENSEX" || underlying == "BSE SENSEX") &&
-                       expiry.StartsWith(weeklyExpiry) &&
-                       strike == targetStrike;
+                return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX") &&
+                       m.ExpiryDate.StartsWith(weeklyExpiry) &&
+                       m.StrikePrice == targetStrike;
             }).ToList();
 
             Console.WriteLine($"\n    WEEKLY ({weeklyExpiry}) options at strike {targetStrike}:");
@@ -303,43 +269,30 @@ namespace TokenGeneratorTest
                 // Find nearby strikes
                 var nearbyWeekly = _cachedMasters.Where(m =>
                 {
-                    var underlying = m["utkr"]?.ToString() ?? "";
-                    var expiry = m["exp"]?.ToString() ?? "";
-                    var strike = m["sp"]?.Value<decimal>() ?? 0;
-
-                    return (underlying == "SENSEX" || underlying == "BSE SENSEX" || underlying.Contains("SENSEX")) &&
-                           expiry.StartsWith(weeklyExpiry) &&
-                           strike >= 84000 && strike <= 86000;
-                }).OrderBy(m => m["sp"]?.Value<decimal>() ?? 0).Take(10).ToList();
+                    return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX" || m.Underlying.Contains("SENSEX")) &&
+                           m.ExpiryDate.StartsWith(weeklyExpiry) &&
+                           m.StrikePrice >= 84000 && m.StrikePrice <= 86000;
+                }).OrderBy(m => m.StrikePrice).Take(10).ToList();
 
                 foreach (var opt in nearbyWeekly)
                 {
-                    var ticker = opt["tkr"]?.ToString();
-                    var strike = opt["sp"]?.Value<decimal>() ?? 0;
-                    var a3tkr = opt["a3tkr"]?.ToString();
-                    Console.WriteLine($"      Ticker: {ticker,-30} Strike: {strike} Alt: {a3tkr}");
+                    Console.WriteLine($"      Ticker: {opt.Ticker,-30} Strike: {opt.StrikePrice}");
                 }
             }
             else
             {
                 foreach (var opt in weeklyOptions)
                 {
-                    var ticker = opt["tkr"]?.ToString();
-                    var a3tkr = opt["a3tkr"]?.ToString();
-                    Console.WriteLine($"      Ticker: {ticker,-25} Alt: {a3tkr}");
+                    Console.WriteLine($"      Ticker: {opt.Ticker,-25}");
                 }
             }
 
             // Find monthly options at strike 85000
             var monthlyOptions = _cachedMasters.Where(m =>
             {
-                var underlying = m["utkr"]?.ToString() ?? "";
-                var expiry = m["exp"]?.ToString() ?? "";
-                var strike = m["sp"]?.Value<decimal>() ?? 0;
-
-                return (underlying == "SENSEX" || underlying == "BSE SENSEX") &&
-                       expiry.StartsWith(monthlyExpiry) &&
-                       strike == targetStrike;
+                return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX") &&
+                       m.ExpiryDate.StartsWith(monthlyExpiry) &&
+                       m.StrikePrice == targetStrike;
             }).ToList();
 
             Console.WriteLine($"\n    MONTHLY ({monthlyExpiry}) options at strike {targetStrike}:");
@@ -349,44 +302,30 @@ namespace TokenGeneratorTest
 
                 var nearbyMonthly = _cachedMasters.Where(m =>
                 {
-                    var underlying = m["utkr"]?.ToString() ?? "";
-                    var expiry = m["exp"]?.ToString() ?? "";
-                    var strike = m["sp"]?.Value<decimal>() ?? 0;
-
-                    return (underlying == "SENSEX" || underlying == "BSE SENSEX" || underlying.Contains("SENSEX")) &&
-                           expiry.StartsWith(monthlyExpiry) &&
-                           strike >= 84000 && strike <= 86000;
-                }).OrderBy(m => m["sp"]?.Value<decimal>() ?? 0).Take(10).ToList();
+                    return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX" || m.Underlying.Contains("SENSEX")) &&
+                           m.ExpiryDate.StartsWith(monthlyExpiry) &&
+                           m.StrikePrice >= 84000 && m.StrikePrice <= 86000;
+                }).OrderBy(m => m.StrikePrice).Take(10).ToList();
 
                 foreach (var opt in nearbyMonthly)
                 {
-                    var ticker = opt["tkr"]?.ToString();
-                    var strike = opt["sp"]?.Value<decimal>() ?? 0;
-                    var a3tkr = opt["a3tkr"]?.ToString();
-                    Console.WriteLine($"      Ticker: {ticker,-30} Strike: {strike} Alt: {a3tkr}");
+                    Console.WriteLine($"      Ticker: {opt.Ticker,-30} Strike: {opt.StrikePrice}");
                 }
             }
             else
             {
                 foreach (var opt in monthlyOptions)
                 {
-                    var ticker = opt["tkr"]?.ToString();
-                    var a3tkr = opt["a3tkr"]?.ToString();
-                    Console.WriteLine($"      Ticker: {ticker,-25} Alt: {a3tkr}");
+                    Console.WriteLine($"      Ticker: {opt.Ticker,-25}");
                 }
             }
 
             // Show all SENSEX expiries in January 2026
             Console.WriteLine("\n    All SENSEX expiries in January 2026:");
             var sensexJanExpiries = _cachedMasters
-                .Where(m =>
-                {
-                    var underlying = m["utkr"]?.ToString() ?? "";
-                    var expiry = m["exp"]?.ToString() ?? "";
-                    return (underlying == "SENSEX" || underlying.Contains("SENSEX")) &&
-                           expiry.StartsWith("2026-01");
-                })
-                .Select(m => m["exp"]?.ToString())
+                .Where(m => (m.Underlying == "SENSEX" || m.Underlying.Contains("SENSEX")) &&
+                           m.ExpiryDate.StartsWith("2026-01"))
+                .Select(m => m.ExpiryDate)
                 .Distinct()
                 .OrderBy(e => e)
                 .ToList();
@@ -433,18 +372,14 @@ namespace TokenGeneratorTest
                 // Find a SENSEX option ticker to test
                 var sensexOption = _cachedMasters.FirstOrDefault(m =>
                 {
-                    var underlying = m["utkr"]?.ToString() ?? "";
-                    var expiry = m["exp"]?.ToString() ?? "";
-                    var strike = m["sp"]?.Value<decimal>() ?? 0;
-
-                    return underlying.Contains("SENSEX") &&
-                           expiry.StartsWith("2026-01") &&
-                           strike >= 84000 && strike <= 86000;
+                    return m.Underlying.Contains("SENSEX") &&
+                           m.ExpiryDate.StartsWith("2026-01") &&
+                           m.StrikePrice >= 84000 && m.StrikePrice <= 86000;
                 });
 
                 if (sensexOption != null)
                 {
-                    var sensexTicker = sensexOption["tkr"]?.ToString();
+                    var sensexTicker = sensexOption.Ticker;
                     Console.WriteLine($"\n    SENSEX option tick data (sample: {sensexTicker}):");
                     await TestSingleTicker(client, sensexTicker, testDate);
                 }
@@ -455,26 +390,11 @@ namespace TokenGeneratorTest
         {
             Console.Write($"      {ticker,-30} -> ");
 
-            var rawData = await client.GetTickDataRawAsync(ticker, testDate);
+            var ticks = await client.GetTickDataAsync(ticker, testDate);
 
-            if (!string.IsNullOrEmpty(rawData) && rawData != "[]")
+            if (ticks != null && ticks.Count > 0)
             {
-                try
-                {
-                    var ticks = JsonConvert.DeserializeObject<List<JObject>>(rawData);
-                    if (ticks != null && ticks.Count > 0)
-                    {
-                        Console.WriteLine($"{ticks.Count:N0} ticks ({rawData.Length:N0} bytes)");
-                    }
-                    else
-                    {
-                        Console.WriteLine("Empty response");
-                    }
-                }
-                catch
-                {
-                    Console.WriteLine($"{rawData.Length:N0} bytes (parse error)");
-                }
+                Console.WriteLine($"{ticks.Count:N0} ticks");
             }
             else
             {

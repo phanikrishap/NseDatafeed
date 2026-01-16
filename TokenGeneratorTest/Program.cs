@@ -5,6 +5,9 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ZerodhaDatafeedAdapter.Services.Auth;
 
+using ZerodhaDatafeedAdapter.Helpers;
+using ZerodhaDatafeedAdapter.Services.Historical;
+
 namespace TokenGeneratorTest
 {
     /// <summary>

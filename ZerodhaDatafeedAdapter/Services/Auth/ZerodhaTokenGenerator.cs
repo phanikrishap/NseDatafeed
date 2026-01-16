@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ZerodhaDatafeedAdapter.Helpers;
 
 namespace ZerodhaDatafeedAdapter.Services.Auth
 {
@@ -621,90 +622,6 @@ namespace ZerodhaDatafeedAdapter.Services.Auth
             Message = message;
             IsError = isError;
             Timestamp = DateTime.Now;
-        }
-    }
-
-    /// <summary>
-    /// TOTP (Time-based One-Time Password) Generator
-    /// RFC 6238 compliant implementation
-    /// </summary>
-    public static class TotpGenerator
-    {
-        private const int DIGITS = 6;
-        private const int TIME_STEP = 30;
-
-        /// <summary>
-        /// Generate a TOTP code from a Base32 encoded secret
-        /// </summary>
-        public static string GenerateTotp(string base32Secret)
-        {
-            var key = Base32Decode(base32Secret);
-            var counter = GetCurrentCounter();
-            var hash = ComputeHmacSha1(key, GetCounterBytes(counter));
-            var code = TruncateHash(hash);
-            return code.ToString().PadLeft(DIGITS, '0');
-        }
-
-        private static long GetCurrentCounter()
-        {
-            var unixTime = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
-            return unixTime / TIME_STEP;
-        }
-
-        private static byte[] GetCounterBytes(long counter)
-        {
-            var bytes = BitConverter.GetBytes(counter);
-            if (BitConverter.IsLittleEndian)
-                Array.Reverse(bytes);
-            return bytes;
-        }
-
-        private static byte[] ComputeHmacSha1(byte[] key, byte[] data)
-        {
-            using (var hmac = new System.Security.Cryptography.HMACSHA1(key))
-            {
-                return hmac.ComputeHash(data);
-            }
-        }
-
-        private static int TruncateHash(byte[] hash)
-        {
-            var offset = hash[hash.Length - 1] & 0x0F;
-            var binary = ((hash[offset] & 0x7F) << 24)
-                       | ((hash[offset + 1] & 0xFF) << 16)
-                       | ((hash[offset + 2] & 0xFF) << 8)
-                       | (hash[offset + 3] & 0xFF);
-            return binary % (int)Math.Pow(10, DIGITS);
-        }
-
-        private static byte[] Base32Decode(string base32)
-        {
-            // Remove padding and convert to uppercase
-            base32 = base32.TrimEnd('=').ToUpperInvariant();
-
-            var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-            var output = new List<byte>();
-            var bits = 0;
-            var value = 0;
-
-            foreach (var c in base32)
-            {
-                var index = alphabet.IndexOf(c);
-                if (index < 0)
-                    continue; // Skip invalid characters
-
-                value = (value << 5) | index;
-                bits += 5;
-
-                if (bits >= 8)
-                {
-                    bits -= 8;
-                    output.Add((byte)(value >> bits));
-                    value &= (1 << bits) - 1;
-                }
-            }
-
-            return output.ToArray();
         }
     }
 }

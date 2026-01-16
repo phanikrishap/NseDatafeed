@@ -24,7 +24,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
     /// - 3 prior working days + current day (vs ICICI's 1 prior day)
     /// - Uses same SQLite cache (IciciTickCacheDb) for storage
     /// </summary>
-    public class AccelpixHistoricalTickDataService : IHistoricalTickDataSource, IDisposable
+    public class AccelpixHistoricalTickDataService : BaseHistoricalTickDataService
     {
         private static readonly Lazy<AccelpixHistoricalTickDataService> _instance =
             new Lazy<AccelpixHistoricalTickDataService>(() => new AccelpixHistoricalTickDataService());
@@ -42,20 +42,9 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #endregion
 
-        #region Rx Subjects
-
-        // Per-instrument tick data request queue (for BarsWorker fallback - parses symbol)
-        private readonly ReplaySubject<InstrumentTickDataRequest> _instrumentRequestQueue;
-        private IDisposable _instrumentQueueSubscription;
-
         // Accelpix-specific request queue (for batch downloads - uses pre-built symbols)
         private readonly ReplaySubject<AccelpixInstrumentRequest> _accelpixRequestQueue;
         private IDisposable _accelpixQueueSubscription;
-
-        private readonly ConcurrentDictionary<string, BehaviorSubject<InstrumentTickDataStatus>> _instrumentStatusSubjects
-            = new ConcurrentDictionary<string, BehaviorSubject<InstrumentTickDataStatus>>();
-
-        #endregion
 
         #region State
 
@@ -69,12 +58,12 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #region Properties
 
-        public bool IsInitialized => _isInitialized;
+        public override bool IsInitialized => _isInitialized;
 
         /// <summary>
         /// True when service is fully ready to process requests (initialized AND has valid API key)
         /// </summary>
-        public bool IsReady => _isInitialized && _apiClient != null && !string.IsNullOrEmpty(_apiKey);
+        public override bool IsReady => _isInitialized && _apiClient != null && !string.IsNullOrEmpty(_apiKey);
 
         /// <summary>
         /// Number of prior working days to fetch (configurable via config.json)
@@ -85,10 +74,8 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #region Constructor
 
-        private AccelpixHistoricalTickDataService()
+        private AccelpixHistoricalTickDataService() : base(bufferSize: 200)
         {
-            // ReplaySubject with buffer size for requests until service is ready
-            _instrumentRequestQueue = new ReplaySubject<InstrumentTickDataRequest>(bufferSize: 200);
             _accelpixRequestQueue = new ReplaySubject<AccelpixInstrumentRequest>(bufferSize: 500);
 
             HistoricalTickLogger.Info("[AccelpixHistoricalTickDataService] Singleton instance created");
@@ -101,7 +88,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         /// <summary>
         /// Initialize the service - loads API key from config and sets up request queue processing.
         /// </summary>
-        public void Initialize()
+        public override void Initialize()
         {
             if (_isInitialized)
             {
@@ -134,75 +121,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
         }
 
-        /// <summary>
-        /// Queue a single instrument tick data request.
-        /// </summary>
-        public IObservable<InstrumentTickDataStatus> QueueInstrumentTickRequest(string zerodhaSymbol, DateTime tradeDate)
-        {
-            if (string.IsNullOrEmpty(zerodhaSymbol))
-            {
-                HistoricalTickLogger.Warn("[INST-QUEUE] Cannot queue null/empty symbol");
-                return Observable.Return(new InstrumentTickDataStatus
-                {
-                    ZerodhaSymbol = zerodhaSymbol,
-                    State = TickDataState.Failed,
-                    ErrorMessage = "Symbol is null or empty"
-                });
-            }
-
-            // Get or create status subject
-            var statusSubject = _instrumentStatusSubjects.GetOrAdd(zerodhaSymbol,
-                _ => new BehaviorSubject<InstrumentTickDataStatus>(
-                    new InstrumentTickDataStatus { ZerodhaSymbol = zerodhaSymbol, State = TickDataState.Pending }));
-
-            // Check current state
-            var currentStatus = statusSubject.Value;
-            if (currentStatus.State == TickDataState.Ready)
-            {
-                HistoricalTickLogger.Debug($"[INST-QUEUE] {zerodhaSymbol} already ready, returning cached status");
-                return statusSubject.AsObservable();
-            }
-
-            if (currentStatus.State == TickDataState.Downloading)
-            {
-                HistoricalTickLogger.Debug($"[INST-QUEUE] {zerodhaSymbol} already downloading, returning status stream");
-                return statusSubject.AsObservable();
-            }
-
-            // Queue the request
-            var request = new InstrumentTickDataRequest
-            {
-                ZerodhaSymbol = zerodhaSymbol,
-                TradeDate = tradeDate,
-                QueuedAt = DateTime.Now
-            };
-
-            HistoricalTickLogger.Info($"[INST-QUEUE] Queueing {zerodhaSymbol} for {tradeDate:yyyy-MM-dd} (IsReady={IsReady})");
-
-            // Update status to queued
-            statusSubject.OnNext(new InstrumentTickDataStatus
-            {
-                ZerodhaSymbol = zerodhaSymbol,
-                State = TickDataState.Queued,
-                TradeDate = tradeDate
-            });
-
-            // Push to the queue
-            _instrumentRequestQueue.OnNext(request);
-
-            return statusSubject.AsObservable();
-        }
-
-        /// <summary>
-        /// Get observable for a specific instrument's tick data status.
-        /// </summary>
-        public IObservable<InstrumentTickDataStatus> GetInstrumentTickStatusStream(string zerodhaSymbol)
-        {
-            var subject = _instrumentStatusSubjects.GetOrAdd(zerodhaSymbol,
-                _ => new BehaviorSubject<InstrumentTickDataStatus>(
-                    new InstrumentTickDataStatus { ZerodhaSymbol = zerodhaSymbol, State = TickDataState.Pending }));
-            return subject.AsObservable();
-        }
+        #region Queue Processing
 
         /// <summary>
         /// Queue batch download request using context (preferred method).
@@ -354,7 +273,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
         }
 
-        private void SubscribeToInstrumentQueue()
+        protected override void SubscribeToInstrumentQueue()
         {
             if (_instrumentQueueSubscription != null)
             {
@@ -1005,19 +924,12 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #region IDisposable
 
-        public void Dispose()
+        public override void Dispose()
         {
-            _instrumentQueueSubscription?.Dispose();
             _accelpixQueueSubscription?.Dispose();
-            _instrumentRequestQueue?.Dispose();
             _accelpixRequestQueue?.Dispose();
             _apiClient?.Dispose();
-
-            foreach (var subject in _instrumentStatusSubjects.Values)
-            {
-                subject?.Dispose();
-            }
-            _instrumentStatusSubjects.Clear();
+            base.Dispose();
 
             HistoricalTickLogger.Info("[AccelpixHistoricalTickDataService] Disposed");
         }
@@ -1056,4 +968,5 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             return $"{ZerodhaSymbol} -> {AccelpixSymbol} for {TradeDate:yyyy-MM-dd}";
         }
     }
+    #endregion
 }

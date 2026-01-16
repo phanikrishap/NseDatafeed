@@ -29,7 +29,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
     /// Implements center-out strike propagation and parallel fetching.
     /// Implements IHistoricalTickDataSource for unified tick data access.
     /// </summary>
-    public class HistoricalTickDataService : IHistoricalTickDataSource, IDisposable
+    public class HistoricalTickDataService : BaseHistoricalTickDataService
     {
         private static readonly Lazy<HistoricalTickDataService> _instance =
             new Lazy<HistoricalTickDataService>(() => new HistoricalTickDataService());
@@ -69,8 +69,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #endregion
 
-        #region Rx Subjects
-
         // Per-strike historical data availability signals
         private readonly ConcurrentDictionary<string, BehaviorSubject<StrikeHistoricalDataStatus>> _strikeStatusSubjects
             = new ConcurrentDictionary<string, BehaviorSubject<StrikeHistoricalDataStatus>>();
@@ -84,14 +82,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         private readonly ReplaySubject<HistoricalDownloadRequest> _requestQueue;
         private IDisposable _requestQueueSubscription;
         private readonly object _queueLock = new object();
-
-        // Per-instrument tick data request queue (queued when cache misses and ICICI not ready)
-        private readonly ReplaySubject<InstrumentTickDataRequest> _instrumentRequestQueue;
-        private IDisposable _instrumentQueueSubscription;
-        private readonly ConcurrentDictionary<string, BehaviorSubject<InstrumentTickDataStatus>> _instrumentStatusSubjects
-            = new ConcurrentDictionary<string, BehaviorSubject<InstrumentTickDataStatus>>();
-
-        #endregion
 
         #region State
 
@@ -138,35 +128,21 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             return subject.AsObservable();
         }
 
-        /// <summary>
-        /// Get observable for a specific instrument's tick data status.
-        /// Subscribe to this to get notified when tick data becomes available.
-        /// </summary>
-        public IObservable<InstrumentTickDataStatus> GetInstrumentTickStatusStream(string zerodhaSymbol)
-        {
-            var subject = _instrumentStatusSubjects.GetOrAdd(zerodhaSymbol,
-                _ => new BehaviorSubject<InstrumentTickDataStatus>(
-                    new InstrumentTickDataStatus { ZerodhaSymbol = zerodhaSymbol, State = TickDataState.Pending }));
-            return subject.AsObservable();
-        }
-
-        #endregion
-
         #region Properties
 
-        public bool IsInitialized => _isInitialized;
+        public override bool IsInitialized => _isInitialized;
         public bool IsDownloading => _isDownloading;
 
         /// <summary>
         /// True when service is fully ready to process requests (initialized AND has valid session token)
         /// </summary>
-        public bool IsReady => _isInitialized && !string.IsNullOrEmpty(_base64SessionToken);
+        public override bool IsReady => _isInitialized && !string.IsNullOrEmpty(_base64SessionToken);
 
         #endregion
 
         #region Constructor
 
-        private HistoricalTickDataService()
+        private HistoricalTickDataService() : base(bufferSize: 200)
         {
             _serviceStatusSubject = new BehaviorSubject<HistoricalDataServiceStatus>(
                 new HistoricalDataServiceStatus { State = HistoricalDataState.NotInitialized });
@@ -174,9 +150,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
             // ReplaySubject with buffer size of 10 - stores up to 10 requests until service is ready
             _requestQueue = new ReplaySubject<HistoricalDownloadRequest>(bufferSize: 10);
-
-            // Per-instrument request queue - uses ReplaySubject to buffer requests until ICICI is ready
-            _instrumentRequestQueue = new ReplaySubject<InstrumentTickDataRequest>(bufferSize: 200);
 
             HistoricalTickLogger.Info("[HistoricalTickDataService] Singleton instance created");
         }
@@ -188,7 +161,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         /// <summary>
         /// Initialize the service - subscribes to ICICI broker availability
         /// </summary>
-        public void Initialize()
+        public override void Initialize()
         {
             if (_isInitialized)
             {
@@ -318,7 +291,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         /// Processes 3 instruments at a time with rate limiting.
         /// Called when service becomes ready.
         /// </summary>
-        private void SubscribeToInstrumentQueue()
+        protected override void SubscribeToInstrumentQueue()
         {
             lock (_queueLock)
             {
@@ -525,7 +498,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         /// <param name="zerodhaSymbol">Zerodha trading symbol (e.g., SENSEX2610884200CE)</param>
         /// <param name="tradeDate">Date to fetch tick data for</param>
         /// <returns>Observable that signals when tick data is available</returns>
-        public IObservable<InstrumentTickDataStatus> QueueInstrumentTickRequest(string zerodhaSymbol, DateTime tradeDate)
+        public override IObservable<InstrumentTickDataStatus> QueueInstrumentTickRequest(string zerodhaSymbol, DateTime tradeDate)
         {
             if (string.IsNullOrEmpty(zerodhaSymbol))
             {
@@ -2001,15 +1974,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
         #endregion
 
-        #region IDisposable
-
-        public void Dispose()
+        public override void Dispose()
         {
             _iciciStatusSubscription?.Dispose();
             _requestQueueSubscription?.Dispose();
-            _instrumentQueueSubscription?.Dispose();
             _requestQueue?.Dispose();
-            _instrumentRequestQueue?.Dispose();
             _serviceStatusSubject?.Dispose();
             _progressSubject?.Dispose();
 
@@ -2019,11 +1988,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
             _strikeStatusSubjects.Clear();
 
-            foreach (var subject in _instrumentStatusSubjects.Values)
-            {
-                subject?.Dispose();
-            }
-            _instrumentStatusSubjects.Clear();
+            base.Dispose();
 
             HistoricalTickLogger.Info("[HistoricalTickDataService] Disposed");
         }
@@ -2033,150 +1998,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
     #region Models
 
-    /// <summary>
-    /// State of the historical data service
-    /// </summary>
-    public enum HistoricalDataState
-    {
-        NotInitialized,
-        WaitingForBroker,
-        Ready,
-        Downloading,
-        Error
-    }
-
-    /// <summary>
-    /// Overall service status
-    /// </summary>
-    public class HistoricalDataServiceStatus
-    {
-        public HistoricalDataState State { get; set; }
-        public string Message { get; set; }
-    }
-
-    /// <summary>
-    /// Download progress update
-    /// </summary>
-    public class HistoricalDataDownloadProgress
-    {
-        public int TotalStrikes { get; set; }
-        public int CompletedStrikes { get; set; }
-        public List<int> CurrentBatch { get; set; }
-        public double PercentComplete { get; set; }
-    }
-
-    /// <summary>
-    /// Per-strike historical data status
-    /// </summary>
-    public class StrikeHistoricalDataStatus
-    {
-        public string StrikeKey { get; set; }
-        public bool IsAvailable { get; set; }
-        public int CandleCount { get; set; }
-        public DateTime FirstTimestamp { get; set; }
-        public DateTime LastTimestamp { get; set; }
-        public string ZerodhaSymbol { get; set; }
-    }
-
-    /// <summary>
-    /// Response from historical data API
-    /// </summary>
-    public class HistoricalDataResponse
-    {
-        public bool Success { get; set; }
-        public string Error { get; set; }
-        public List<HistoricalCandle> Data { get; set; }
-    }
-
-    /// <summary>
-    /// Single candle/bar of historical data
-    /// </summary>
-    public class HistoricalCandle
-    {
-        public DateTime DateTime { get; set; }
-        public decimal Open { get; set; }
-        public decimal High { get; set; }
-        public decimal Low { get; set; }
-        public decimal Close { get; set; }
-        public long Volume { get; set; }
-        public long OpenInterest { get; set; }
-
-        public override string ToString()
-        {
-            return $"{DateTime:yyyy-MM-dd HH:mm:ss} | O:{Open:F2} H:{High:F2} L:{Low:F2} C:{Close:F2} V:{Volume}";
-        }
-    }
-
-    /// <summary>
-    /// Request model for queued historical data downloads.
-    /// Encapsulates all parameters needed to download option chain history.
-    /// </summary>
-    public class HistoricalDownloadRequest
-    {
-        public string Underlying { get; set; }
-        public DateTime Expiry { get; set; }
-        public int ProjectedAtmStrike { get; set; }
-        public List<int> Strikes { get; set; }
-        public Dictionary<(int strike, string optionType), string> ZerodhaSymbolMap { get; set; }
-        public DateTime? HistoricalDate { get; set; }
-        public DateTime QueuedAt { get; set; } = DateTime.Now;
-
-        public override string ToString()
-        {
-            return $"{Underlying} {Expiry:dd-MMM-yy} ATM={ProjectedAtmStrike} Strikes={Strikes?.Count ?? 0}";
-        }
-    }
-
-    /// <summary>
-    /// Request model for per-instrument tick data download.
-    /// Used by BarsWorker when cache misses to queue background download.
-    /// </summary>
-    public class InstrumentTickDataRequest
-    {
-        public string ZerodhaSymbol { get; set; }
-        public DateTime TradeDate { get; set; }
-        public DateTime QueuedAt { get; set; } = DateTime.Now;
-
-        public override string ToString()
-        {
-            return $"{ZerodhaSymbol} for {TradeDate:yyyy-MM-dd}";
-        }
-    }
-
-    /// <summary>
-    /// State of per-instrument tick data download
-    /// </summary>
-    public enum TickDataState
-    {
-        Pending,
-        Queued,
-        Downloading,
-        Ready,
-        NoData,
-        Failed
-    }
-
-    /// <summary>
-    /// Status of per-instrument tick data download.
-    /// Subscribe to GetInstrumentTickStatusStream() to receive updates.
-    /// </summary>
-    public class InstrumentTickDataStatus
-    {
-        public string ZerodhaSymbol { get; set; }
-        public TickDataState State { get; set; }
-        public DateTime TradeDate { get; set; }
-        public int TickCount { get; set; }
-        public string ErrorMessage { get; set; }
-
-        public override string ToString()
-        {
-            return $"{ZerodhaSymbol}: {State} ({TickCount} ticks)";
-        }
-    }
-
-    /// <summary>
-    /// Parsed option symbol information
-    /// </summary>
+    // (Internal) Parsed option symbol information
     internal class OptionSymbolInfo
     {
         public string Underlying { get; set; }

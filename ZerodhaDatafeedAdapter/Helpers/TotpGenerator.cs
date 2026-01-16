@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 
-namespace TokenGeneratorTest
+namespace ZerodhaDatafeedAdapter.Helpers
 {
     /// <summary>
     /// TOTP (Time-based One-Time Password) Generator
-    /// Implements RFC 6238 for generating TOTP codes from Base32 secrets
+    /// RFC 6238 compliant implementation for two-factor authentication
     /// </summary>
     public static class TotpGenerator
     {
@@ -19,6 +21,9 @@ namespace TokenGeneratorTest
         /// </summary>
         public static string GenerateTotp(string base32Secret)
         {
+            if (string.IsNullOrEmpty(base32Secret))
+                return string.Empty;
+
             var key = Base32Decode(base32Secret);
             var counter = GetCurrentCounter();
             var hash = ComputeHmacSha1(key, GetCounterBytes(counter));
@@ -50,61 +55,43 @@ namespace TokenGeneratorTest
 
         private static int TruncateHash(byte[] hash)
         {
-            int offset = hash[hash.Length - 1] & 0x0F;
-            int binary =
-                ((hash[offset] & 0x7F) << 24) |
-                ((hash[offset + 1] & 0xFF) << 16) |
-                ((hash[offset + 2] & 0xFF) << 8) |
-                (hash[offset + 3] & 0xFF);
-
-            int otp = binary % (int)Math.Pow(10, DIGITS);
-            return otp;
+            var offset = hash[hash.Length - 1] & 0x0F;
+            var binary = ((hash[offset] & 0x7F) << 24)
+                       | ((hash[offset + 1] & 0xFF) << 16)
+                       | ((hash[offset + 2] & 0xFF) << 8)
+                       | (hash[offset + 3] & 0xFF);
+            return binary % (int)Math.Pow(10, DIGITS);
         }
 
-        /// <summary>
-        /// Decode a Base32-encoded string to bytes
-        /// </summary>
         private static byte[] Base32Decode(string base32)
         {
-            // Clean input: remove spaces, hyphens, and convert to uppercase
-            base32 = base32.Replace(" ", "").Replace("-", "").ToUpperInvariant();
-
-            // Remove any padding
-            base32 = base32.TrimEnd('=');
+            // Remove spaces, hyphens and padding, then convert to uppercase
+            base32 = base32.Replace(" ", "").Replace("-", "").TrimEnd('=').ToUpperInvariant();
 
             if (string.IsNullOrEmpty(base32))
                 return new byte[0];
 
-            // Calculate output length (5 bits per Base32 character)
-            int outputLength = base32.Length * 5 / 8;
-            var result = new byte[outputLength];
-
+            var output = new List<byte>();
             int buffer = 0;
             int bitsInBuffer = 0;
-            int resultIndex = 0;
 
-            foreach (char c in base32)
+            foreach (var c in base32)
             {
-                int value = BASE32_ALPHABET.IndexOf(c);
-                if (value < 0)
+                var index = BASE32_ALPHABET.IndexOf(c);
+                if (index < 0)
                     continue; // Skip invalid characters
 
-                // Add 5 bits to buffer
-                buffer = (buffer << 5) | value;
+                buffer = (buffer << 5) | index;
                 bitsInBuffer += 5;
 
-                // If we have 8 or more bits, extract a byte
                 if (bitsInBuffer >= 8)
                 {
                     bitsInBuffer -= 8;
-                    if (resultIndex < outputLength)
-                    {
-                        result[resultIndex++] = (byte)(buffer >> bitsInBuffer);
-                    }
+                    output.Add((byte)(buffer >> bitsInBuffer));
                 }
             }
 
-            return result;
+            return output.ToArray();
         }
     }
 }

@@ -25,5 +25,19 @@ namespace ZerodhaDatafeedAdapter.Classes
         public const string FOMappingsFileName = "fo_mappings.json";             // F&O - recreated on startup
         public const string MappedInstrumentsFileName = "mapped_instruments.json"; // Legacy - to be removed
         public const string InstrumentDbFileName = "InstrumentMasters.db";
+
+        /// <summary>
+        /// Gets the full path to the ZerodhaAdapter data folder or a subpath within it.
+        /// </summary>
+        public static string GetFolderPath(params string[] subPaths)
+        {
+            var baseDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "ZerodhaAdapter");
+            if (subPaths == null || subPaths.Length == 0) return baseDir;
+            
+            var paths = new string[subPaths.Length + 1];
+            paths[0] = baseDir;
+            Array.Copy(subPaths, 0, paths, 1, subPaths.Length);
+            return System.IO.Path.Combine(paths);
+        }
     }
 }

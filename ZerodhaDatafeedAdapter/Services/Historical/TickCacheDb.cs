@@ -52,9 +52,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         private TickCacheDb()
         {
             // Store in ZerodhaAdapter folder alongside logs
-            string adapterFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                "NinjaTrader 8", "ZerodhaAdapter", "Cache");
+            string adapterFolder = Classes.Constants.GetFolderPath("Cache");
 
             Directory.CreateDirectory(adapterFolder);
             _dbPath = Path.Combine(adapterFolder, "tick_cache_v2.db");

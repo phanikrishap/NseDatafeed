@@ -13,6 +13,7 @@
     <LangVersion>13</LangVersion>
     <FileAlignment>512</FileAlignment>
     <Deterministic>true</Deterministic>
+    <ProjectTypeGuids>{60dc8134-eba5-43b8-bcc9-bb4bc16c2548};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
     <NuGetPackageImportStamp>
     </NuGetPackageImportStamp>
   </PropertyGroup>
@@ -119,9 +120,6 @@
     <Reference Include="FilterDataGrid">
       <HintPath>..\References\FilterDataGrid.dll</HintPath>
     </Reference>
-    <Reference Include="Telegram.Bot">
-      <HintPath>..\References\Telegram.Bot.dll</HintPath>
-    </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="AssemblyInfo.cs" />
@@ -169,6 +167,8 @@
     <Compile Include="Logging\LoggerFactory.cs" />
     <Compile Include="Logging\RangeBarLogger.cs" />
     <Compile Include="Logging\TBSLogger.cs" />
+    <Compile Include="Services\Historical\HistoricalModels.cs" />
+    <Compile Include="Helpers\TotpGenerator.cs" />
     <Compile Include="Logging\HistoricalTickLogger.cs" />
     <Compile Include="Logging\StartupLogger.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
@@ -191,6 +191,7 @@
     <Compile Include="Services\Historical\IHistoricalTickDataSource.cs" />
     <Compile Include="Services\Historical\AccelpixApiClient.cs" />
     <Compile Include="Services\Historical\AccelpixSymbolMapper.cs" />
+    <Compile Include="Services\Historical\BaseHistoricalTickDataService.cs" />
     <Compile Include="Services\Historical\AccelpixHistoricalTickDataService.cs" />
     <Compile Include="Services\Historical\HistoricalTickDataCoordinator.cs" />
     <Compile Include="Services\Analysis\InstrumentBackfillService.cs" />
@@ -357,4 +358,5 @@
     <WCFMetadata Include="Connected Services\" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Import Project="$(MSBuildToolsPath)\Microsoft.WinFX.targets" />
 </Project>

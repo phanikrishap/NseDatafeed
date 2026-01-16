@@ -47,8 +47,7 @@ namespace ZerodhaDatafeedAdapter.Logging
             {
                 if (_settingsFilePath == null)
                 {
-                    string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                    _settingsFilePath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "adapterLog-settings.json");
+                    _settingsFilePath = ZerodhaDatafeedAdapter.Classes.Constants.GetFolderPath("adapterLog-settings.json");
                 }
                 return _settingsFilePath;
             }
@@ -331,8 +330,7 @@ namespace ZerodhaDatafeedAdapter.Logging
                 if (_initialized) return;
 
                 // Get the user's Documents folder path
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                _baseLogFolderPath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "Logs");
+                _baseLogFolderPath = ZerodhaDatafeedAdapter.Classes.Constants.GetFolderPath("Logs");
 
                 // Create date-wise subfolder (dd-MM-yyyy format)
                 _todayLogFolderPath = Path.Combine(_baseLogFolderPath, TodayFolderName);

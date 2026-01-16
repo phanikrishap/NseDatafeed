@@ -5,7 +5,6 @@ using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
-using ZerodhaDatafeedAdapter.Logging;
 
 namespace ZerodhaDatafeedAdapter.Services.Historical
 {
@@ -18,18 +17,25 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         private readonly HttpClient _httpClient;
         private readonly string _apiKey;
         private readonly string _baseUrl;
+        private readonly Action<string, string> _logger;
 
         // Epoch for Accelpix tick timestamps (1980-01-01 00:00:00 IST)
         // Accelpix timestamps are IST-based seconds since this epoch
         private static readonly DateTime Epoch1980Ist = new DateTime(1980, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
         private static readonly TimeZoneInfo IstTimeZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
 
-        public AccelpixApiClient(string apiKey, string baseUrl = "https://apidata.accelpix.in")
+        public AccelpixApiClient(string apiKey, string baseUrl = "https://apidata.accelpix.in", Action<string, string> logger = null)
         {
             _apiKey = Uri.EscapeDataString(apiKey);
             _baseUrl = baseUrl.TrimEnd('/');
             _httpClient = new HttpClient();
             _httpClient.Timeout = TimeSpan.FromMinutes(5); // Long timeout for large data
+            _logger = logger;
+        }
+
+        private void Log(string level, string message)
+        {
+            _logger?.Invoke(level, message);
         }
 
         /// <summary>
@@ -42,7 +48,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             string dateStr = date.ToString("yyyyMMdd");
             string url = $"{_baseUrl}/api/fda/rest/ticks/{Uri.EscapeDataString(ticker)}/{dateStr}?api_token={_apiKey}";
 
-            HistoricalTickLogger.LogRequest("ACCELPIX", $"/api/fda/rest/ticks/{ticker}/{dateStr}", "GET");
+            Log("DEBUG", $"[ACCELPIX] Requesting ticks for {ticker} on {dateStr}");
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
             try
@@ -52,25 +58,92 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                 if (string.IsNullOrEmpty(response) || response == "[]")
                 {
-                    HistoricalTickLogger.LogResponse("ACCELPIX", $"ticks/{ticker}/{dateStr}", true, 0, sw.ElapsedMilliseconds);
+                    Log("DEBUG", $"[ACCELPIX] No ticks found for {ticker} on {dateStr} (took {sw.ElapsedMilliseconds}ms)");
                     return new List<AccelpixTickData>();
                 }
 
                 var ticks = JsonConvert.DeserializeObject<List<AccelpixTickData>>(response) ?? new List<AccelpixTickData>();
-                HistoricalTickLogger.LogResponse("ACCELPIX", $"ticks/{ticker}/{dateStr}", true, ticks.Count, sw.ElapsedMilliseconds);
+                Log("DEBUG", $"[ACCELPIX] Received {ticks.Count} ticks for {ticker} on {dateStr} (took {sw.ElapsedMilliseconds}ms)");
                 return ticks;
-            }
-            catch (HttpRequestException ex)
-            {
-                sw.Stop();
-                HistoricalTickLogger.LogApiError("ACCELPIX", $"ticks/{ticker}/{dateStr}", "HTTP", ex.Message, ex);
-                return new List<AccelpixTickData>();
             }
             catch (Exception ex)
             {
                 sw.Stop();
-                HistoricalTickLogger.LogApiError("ACCELPIX", $"ticks/{ticker}/{dateStr}", "PARSE", ex.Message, ex);
+                Log("ERROR", $"[ACCELPIX] Error fetching ticks for {ticker} on {dateStr}: {ex.Message}");
                 return new List<AccelpixTickData>();
+            }
+        }
+
+        /// <summary>
+        /// Get symbol master data (all instruments).
+        /// Endpoint: /api/hsd/Masters/3?fmt=json
+        /// </summary>
+        public async Task<List<AccelpixSymbolMaster>> GetMasterDataAsync(bool includeLotSize = true)
+        {
+            int version = includeLotSize ? 3 : 2;
+            string url = $"{_baseUrl}/api/hsd/Masters/{version}?fmt=json";
+
+            Log("DEBUG", $"[MASTER] Fetching master data from: {url}");
+            try
+            {
+                var response = await _httpClient.GetStringAsync(url);
+                if (string.IsNullOrEmpty(response) || response == "[]")
+                    return new List<AccelpixSymbolMaster>();
+
+                return JsonConvert.DeserializeObject<List<AccelpixSymbolMaster>>(response) ?? new List<AccelpixSymbolMaster>();
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"[MASTER] Failed to fetch master data: {ex.Message}");
+                return new List<AccelpixSymbolMaster>();
+            }
+        }
+
+        /// <summary>
+        /// Get EOD (End of Day) data for a symbol.
+        /// Format: GET {base}/api/fda/rest/{ticker}/{startDate}/{endDate}?api_token={token}
+        /// </summary>
+        public async Task<List<AccelpixEodData>> GetEodDataAsync(string ticker, DateTime startDate, DateTime endDate)
+        {
+            string start = startDate.ToString("yyyyMMdd");
+            string end = endDate.ToString("yyyyMMdd");
+            string url = $"{_baseUrl}/api/fda/rest/{Uri.EscapeDataString(ticker)}/{start}/{end}?api_token={_apiKey}";
+
+            Log("DEBUG", $"[EOD] Fetching EOD data: {ticker} from {start} to {end}");
+            try
+            {
+                var response = await _httpClient.GetStringAsync(url);
+                if (string.IsNullOrEmpty(response) || response == "[]")
+                    return new List<AccelpixEodData>();
+
+                return JsonConvert.DeserializeObject<List<AccelpixEodData>>(response) ?? new List<AccelpixEodData>();
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"[EOD] Failed to fetch EOD data: {ex.Message}");
+                return new List<AccelpixEodData>();
+            }
+        }
+
+        /// <summary>
+        /// Get intraday EOD data (candles) for a symbol.
+        /// Pattern: GET {base}/api/fda/rest/intraeod/{ticker}/{startDate}/{endDate}/{resolution}?api_token={token}
+        /// </summary>
+        public async Task<string> GetIntraEodAsync(string ticker, DateTime startDate, DateTime endDate, string resolution = "1")
+        {
+            string start = startDate.ToString("yyyyMMdd");
+            string end = endDate.ToString("yyyyMMdd");
+            string url = $"{_baseUrl}/api/fda/rest/intraeod/{Uri.EscapeDataString(ticker)}/{start}/{end}/{resolution}?api_token={_apiKey}";
+
+            Log("DEBUG", $"[INTRAEOD] Fetching IntraEOD: {ticker} from {start} to {end}, resolution: {resolution}");
+            try
+            {
+                return await _httpClient.GetStringAsync(url);
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"[INTRAEOD] Failed to fetch IntraEOD: {ex.Message}");
+                return null;
             }
         }
 
@@ -82,7 +155,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             string dateStr = date.ToString("yyyyMMdd");
             string url = $"{_baseUrl}/api/fda/rest/ticks/{Uri.EscapeDataString(ticker)}/{dateStr}?api_token={_apiKey}";
 
-            HistoricalTickLogger.Debug($"[RAW] Fetching tick data: {ticker} for {dateStr}");
+            Log("DEBUG", $"[RAW] Fetching tick data: {ticker} for {dateStr}");
 
             try
             {
@@ -90,7 +163,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
             catch (HttpRequestException ex)
             {
-                HistoricalTickLogger.Error($"[RAW] Tick data endpoint failed: {ex.Message}");
+                Log("ERROR", $"[RAW] Tick data endpoint failed: {ex.Message}");
                 return null;
             }
         }
@@ -129,9 +202,17 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             var jsonContent = JsonConvert.SerializeObject(symbols);
             var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-            HistoricalTickLogger.Debug($"[QUOTE] Fetching quotes for {symbols.Count} symbols...");
-            var response = await _httpClient.PostAsync(url, content);
-            return await response.Content.ReadAsStringAsync();
+            Log("DEBUG", $"[QUOTE] Fetching quotes for {symbols.Count} symbols...");
+            try
+            {
+                var response = await _httpClient.PostAsync(url, content);
+                return await response.Content.ReadAsStringAsync();
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"[QUOTE] Failed to fetch quotes: {ex.Message}");
+                return string.Empty;
+            }
         }
 
         /// <summary>
@@ -143,12 +224,12 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             {
                 var response = await GetQuotesAsync(new List<string> { "NIFTY-1" });
                 bool success = !string.IsNullOrEmpty(response) && !response.Contains("error") && !response.Contains("unauthorized");
-                HistoricalTickLogger.Info($"[CONNECTION] Test result: {(success ? "SUCCESS" : "FAILED")}");
+                Log("INFO", $"[CONNECTION] Test result: {(success ? "SUCCESS" : "FAILED")}");
                 return success;
             }
             catch (Exception ex)
             {
-                HistoricalTickLogger.Error($"[CONNECTION] Test failed: {ex.Message}");
+                Log("ERROR", $"[CONNECTION] Test failed: {ex.Message}");
                 return false;
             }
         }
@@ -226,8 +307,12 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         [JsonProperty("pr")]
         public float Price { get; set; }
 
+        // Accelpix uses either 'qt' or 'qty' for quantity in different endpoints/versions
         [JsonProperty("qt")]
         public uint Quantity { get; set; }  // Cumulative traded quantity (resets daily)
+
+        [JsonProperty("qty")]
+        private uint QuantityAlias { set { Quantity = value; } }
 
         [JsonProperty("vol")]
         public uint Volume { get; set; }  // Not used by Accelpix (always empty)
@@ -254,6 +339,76 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         public override string ToString()
         {
             return $"{Ticker} {GetDateTime():yyyy-MM-dd HH:mm:ss}: P={Price} Q={Quantity} V={Volume} OI={OpenInterest}";
+        }
+    }
+
+    /// <summary>
+    /// Accelpix EOD data model.
+    /// </summary>
+    public class AccelpixEodData
+    {
+        [JsonProperty("tkr")]
+        public string Ticker { get; set; }
+
+        [JsonProperty("td")]
+        public string TradeDate { get; set; }
+
+        [JsonProperty("o")]
+        public decimal Open { get; set; }
+
+        [JsonProperty("h")]
+        public decimal High { get; set; }
+
+        [JsonProperty("l")]
+        public decimal Low { get; set; }
+
+        [JsonProperty("c")]
+        public decimal Close { get; set; }
+
+        [JsonProperty("v")]
+        public long Volume { get; set; }
+
+        [JsonProperty("oi")]
+        public long OpenInterest { get; set; }
+
+        public override string ToString()
+        {
+            return $"{Ticker} {TradeDate}: O={Open} H={High} L={Low} C={Close} V={Volume} OI={OpenInterest}";
+        }
+    }
+
+    /// <summary>
+    /// Accelpix symbol/instrument master data.
+    /// </summary>
+    public class AccelpixSymbolMaster
+    {
+        [JsonProperty("tkr")]
+        public string Ticker { get; set; }
+
+        [JsonProperty("und")]
+        public string Underlying { get; set; }
+
+        [JsonProperty("exp")]
+        public string ExpiryDate { get; set; }
+
+        [JsonProperty("stk")]
+        public decimal StrikePrice { get; set; }
+
+        [JsonProperty("opt")]
+        public string OptionType { get; set; }  // CE or PE
+
+        [JsonProperty("seg")]
+        public int SegmentId { get; set; }
+
+        [JsonProperty("lot")]
+        public int LotSize { get; set; }
+
+        [JsonProperty("tkn")]
+        public int Token { get; set; }
+
+        public override string ToString()
+        {
+            return $"{Ticker} ({Underlying}) Exp={ExpiryDate} Strike={StrikePrice} {OptionType} Lot={LotSize}";
         }
     }
 }

@@ -10,6 +10,8 @@ using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
+using ZerodhaDatafeedAdapter.Helpers;
+
 namespace TokenGeneratorTest
 {
     /// <summary>

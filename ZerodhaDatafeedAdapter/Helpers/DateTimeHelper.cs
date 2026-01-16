@@ -37,8 +37,7 @@ namespace ZerodhaDatafeedAdapter.Helpers
 
                 try
                 {
-                    string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                    string holidayFilePath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "holidayCalendar.json");
+                    string holidayFilePath = Classes.Constants.GetFolderPath("holidayCalendar.json");
 
                     if (File.Exists(holidayFilePath))
                     {

@@ -38,8 +38,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
         private TBSConfigurationService()
         {
-            string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            _configFilePath = Path.Combine(documentsPath, "NinjaTrader 8", "ZerodhaAdapter", "tbsConfig.xlsx");
+            _configFilePath = Classes.Constants.GetFolderPath("tbsConfig.xlsx");
         }
 
         /// <summary>
