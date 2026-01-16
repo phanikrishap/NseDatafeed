@@ -88,10 +88,22 @@ namespace ZerodhaDatafeedAdapter.Services.Auth
             _isInitializing = true;
 
             // Run initialization in background thread pool
-            ThreadPool.QueueUserWorkItem(_ => InitializeAsync());
+            // Use Task.Run with proper async/await pattern instead of fire-and-forget
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await InitializeAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[IciciDirectTokenService] Unhandled initialization error: {ex.Message}", ex);
+                    EmitStatus($"Initialization failed: {ex.Message}", false);
+                }
+            });
         }
 
-        private async void InitializeAsync()
+        private async Task InitializeAsync()
         {
             var stopwatch = Stopwatch.StartNew();
 

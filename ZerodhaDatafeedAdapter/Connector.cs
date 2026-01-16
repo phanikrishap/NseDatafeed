@@ -51,7 +51,8 @@ namespace ZerodhaDatafeedAdapter
 
         // TaskCompletionSource pattern for robust token ready signaling
         // Unlike events, late subscribers can await this and get the result
-        private readonly TaskCompletionSource<bool> _tokenReadyTcs = new TaskCompletionSource<bool>();
+        // RunContinuationsAsynchronously prevents continuations from running inline on setter thread
+        private readonly TaskCompletionSource<bool> _tokenReadyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly CancellationTokenSource _tokenValidationCts = new CancellationTokenSource();
 
         /// <summary>

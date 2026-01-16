@@ -301,34 +301,37 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     return;
                 }
 
-                HistoricalTickLogger.Info("[HistoricalTickDataService] Subscribing to instrument queue - processing 4 at a time");
+                HistoricalTickLogger.Info("[HistoricalTickDataService] Subscribing to instrument queue - processing 4 at a time with backpressure");
 
-                // Use Buffer with count=PARALLEL_STRIKES to process instruments in parallel batches
-                // Then use SelectMany to process each batch
+                // Use Concat to ensure sequential batch processing (true backpressure)
+                // Each batch waits for previous batch to complete before starting
                 _instrumentQueueSubscription = _instrumentRequestQueue
                     .Buffer(PARALLEL_STRIKES) // Batch into groups of 4
                     .Where(batch => batch.Count > 0)
-                    .Subscribe(
-                        batch =>
+                    .Select(batch => Observable.FromAsync(async () =>
+                    {
+                        try
                         {
-                            // Process batch on background thread
-                            _ = Task.Run(async () =>
-                            {
-                                try
-                                {
-                                    HistoricalTickLogger.Info($"[INST-QUEUE] Processing batch of {batch.Count} instruments");
-                                    var tasks = batch.Select(req => ProcessInstrumentRequestAsync(req)).ToList();
-                                    await Task.WhenAll(tasks);
+                            HistoricalTickLogger.Info($"[INST-QUEUE] Processing batch of {batch.Count} instruments");
 
-                                    // Rate limit between batches
-                                    await Task.Delay(RATE_LIMIT_DELAY_MS);
-                                }
-                                catch (Exception ex)
-                                {
-                                    HistoricalTickLogger.Error($"[INST-QUEUE] Batch processing error: {ex.Message}");
-                                }
-                            });
-                        },
+                            // Process all instruments in batch concurrently
+                            var tasks = batch.Select(req => ProcessInstrumentRequestAsync(req)).ToList();
+                            await Task.WhenAll(tasks);
+
+                            // Rate limit between batches
+                            await Task.Delay(RATE_LIMIT_DELAY_MS);
+
+                            return System.Reactive.Unit.Default;
+                        }
+                        catch (Exception ex)
+                        {
+                            HistoricalTickLogger.Error($"[INST-QUEUE] Batch processing error: {ex.Message}");
+                            return System.Reactive.Unit.Default;
+                        }
+                    }))
+                    .Concat() // Concat ensures sequential execution - only 1 batch in flight at a time
+                    .Subscribe(
+                        _ => { /* Batch completed */ },
                         ex => HistoricalTickLogger.Error($"[INST-QUEUE] Queue error: {ex.Message}"),
                         () => HistoricalTickLogger.Info("[INST-QUEUE] Queue completed")
                     );
@@ -1620,6 +1623,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             bool hasData = false;
             bool requestCompleted = false;
             string diagnosticInfo = "";
+            var completionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             HistoricalTickLogger.Info($"[NT8-CHECK] START checking {zerodhaSymbol} for {targetDate:yyyy-MM-dd}");
 
@@ -1636,6 +1640,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         {
                             diagnosticInfo = "Instrument not found in NT8";
                             HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
+                            completionSource.TrySetResult(false);
                             return;
                         }
 
@@ -1655,12 +1660,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                         HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: BarsRequest created - BarsPeriodType={barsRequest.BarsPeriod.BarsPeriodType}, Value={barsRequest.BarsPeriod.Value}");
 
-                        var completionEvent = new ManualResetEventSlim(false);
-
                         barsRequest.Request((barsResult, errorCode, errorMessage) =>
                         {
                             requestCompleted = true;
 
+                            bool hasTicks = false;
                             if (errorCode == ErrorCode.NoError)
                             {
                                 if (barsResult != null && barsResult.Bars != null)
@@ -1668,7 +1672,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                                     int barCount = barsResult.Bars.Count;
                                     if (barCount > 0)
                                     {
-                                        hasData = true;
+                                        hasTicks = true;
                                         var firstBar = barsResult.Bars.GetTime(0);
                                         var lastBar = barsResult.Bars.GetTime(barCount - 1);
                                         diagnosticInfo = $"FOUND {barCount} ticks ({firstBar:HH:mm:ss} to {lastBar:HH:mm:ss})";
@@ -1689,27 +1693,32 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                             }
 
                             HistoricalTickLogger.Info($"[NT8-CHECK] {zerodhaSymbol}: Callback - {diagnosticInfo}");
-                            completionEvent.Set();
+                            completionSource.TrySetResult(hasTicks);
                         });
-
-                        // Wait for the request to complete (max 5 seconds)
-                        bool waitResult = completionEvent.Wait(TimeSpan.FromSeconds(5));
-                        if (!waitResult)
-                        {
-                            diagnosticInfo = "TIMEOUT - BarsRequest did not complete within 5 seconds";
-                            HistoricalTickLogger.Warn($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
-                        }
                     }
                     catch (Exception ex)
                     {
                         diagnosticInfo = $"Exception: {ex.Message}";
                         HistoricalTickLogger.Error($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
+                        completionSource.TrySetResult(false);
                     }
                 });
             }
             catch (Exception ex)
             {
                 HistoricalTickLogger.Error($"[NT8-CHECK] {zerodhaSymbol}: Dispatcher exception: {ex.Message}");
+            }
+
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(5));
+            var completedTask = await Task.WhenAny(completionSource.Task, timeoutTask);
+            if (completedTask == completionSource.Task)
+            {
+                hasData = completionSource.Task.Result;
+            }
+            else
+            {
+                diagnosticInfo = "TIMEOUT - BarsRequest did not complete within 5 seconds";
+                HistoricalTickLogger.Warn($"[NT8-CHECK] {zerodhaSymbol}: {diagnosticInfo}");
             }
 
             HistoricalTickLogger.Info($"[NT8-CHECK] END {zerodhaSymbol}: hasData={hasData}, requestCompleted={requestCompleted}, info={diagnosticInfo}");

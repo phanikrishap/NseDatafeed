@@ -320,7 +320,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             Interlocked.Exchange(ref _streamingProcessedCount, 0);
 
             // Create new completion source for this batch
-            _batchCompletionSource = new TaskCompletionSource<bool>();
+            // RunContinuationsAsynchronously prevents continuations from running inline on setter thread
+            _batchCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             // Post all instruments to the pipeline (non-blocking with backpressure)
             int postedCount = 0;

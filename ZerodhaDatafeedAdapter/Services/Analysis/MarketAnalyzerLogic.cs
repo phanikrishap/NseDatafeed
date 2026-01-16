@@ -255,8 +255,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <summary>
         /// Generates option symbols based on DTE priority using OptionGenerationService.
         /// Awaits InstrumentDbReadyStream before performing database lookups.
+        /// Returns Task instead of async void to prevent hidden exceptions.
         /// </summary>
-        private async void GenerateOptions(double niftyProjected, double sensexProjected)
+        private async Task GenerateOptionsAsync(double niftyProjected, double sensexProjected)
         {
             Logger.Info($"[MarketAnalyzerLogic] GenerateOptions(): Starting with niftyProjected={niftyProjected:F2}, sensexProjected={sensexProjected:F2}");
 
@@ -476,11 +477,28 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <summary>
         /// Generates options and publishes to MarketDataReactiveHub.
         /// Awaits InstrumentDbReadyStream before performing database lookups.
+        /// Fire-and-forget wrapper with error handling for async Task method.
         /// </summary>
         private void GenerateOptionsAndPublishToHub(double niftyProjected, double sensexProjected)
         {
-            Logger.Info($"[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Redirecting to GenerateOptions with niftyProjected={niftyProjected:F2}, sensexProjected={sensexProjected:F2}");
-            GenerateOptions(niftyProjected, sensexProjected);
+            Logger.Info($"[MarketAnalyzerLogic] GenerateOptionsAndPublishToHub(): Redirecting to GenerateOptionsAsync with niftyProjected={niftyProjected:F2}, sensexProjected={sensexProjected:F2}");
+
+            // Fire-and-forget with proper error handling
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await GenerateOptionsAsync(niftyProjected, sensexProjected).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MarketAnalyzerLogic] Option generation failed: {ex.Message}", ex);
+                    StatusUpdated?.Invoke($"Option generation error: {ex.Message}");
+
+                    // Reset flag so user can retry
+                    Interlocked.Exchange(ref _optionsAlreadyGenerated, 0);
+                }
+            });
         }
     }
 }

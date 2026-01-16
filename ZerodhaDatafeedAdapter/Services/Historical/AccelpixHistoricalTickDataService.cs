@@ -280,33 +280,37 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 return;
             }
 
-            HistoricalTickLogger.Info($"[AccelpixHistoricalTickDataService] Subscribing to instrument queue - processing {PARALLEL_REQUESTS} at a time");
+            HistoricalTickLogger.Info($"[AccelpixHistoricalTickDataService] Subscribing to instrument queue - processing {PARALLEL_REQUESTS} at a time with backpressure");
 
-            // Use Buffer with count=PARALLEL_REQUESTS to process instruments in parallel batches
+            // Use Concat to ensure sequential batch processing (true backpressure)
+            // Each batch waits for previous batch to complete before starting
             _instrumentQueueSubscription = _instrumentRequestQueue
                 .Buffer(PARALLEL_REQUESTS)
                 .Where(batch => batch.Count > 0)
-                .Subscribe(
-                    batch =>
+                .Select(batch => Observable.FromAsync(async () =>
+                {
+                    try
                     {
-                        // Process batch on background thread
-                        _ = Task.Run(async () =>
-                        {
-                            try
-                            {
-                                HistoricalTickLogger.Info($"[INST-QUEUE] Processing batch of {batch.Count} instruments");
-                                var tasks = batch.Select(req => ProcessInstrumentRequestAsync(req)).ToList();
-                                await Task.WhenAll(tasks);
+                        HistoricalTickLogger.Info($"[INST-QUEUE] Processing batch of {batch.Count} instruments");
 
-                                // Rate limit between batches
-                                await Task.Delay(RATE_LIMIT_DELAY_MS);
-                            }
-                            catch (Exception ex)
-                            {
-                                HistoricalTickLogger.Error($"[INST-QUEUE] Batch processing error: {ex.Message}");
-                            }
-                        });
-                    },
+                        // Process all instruments in batch concurrently
+                        var tasks = batch.Select(req => ProcessInstrumentRequestAsync(req)).ToList();
+                        await Task.WhenAll(tasks);
+
+                        // Rate limit between batches
+                        await Task.Delay(RATE_LIMIT_DELAY_MS);
+
+                        return System.Reactive.Unit.Default;
+                    }
+                    catch (Exception ex)
+                    {
+                        HistoricalTickLogger.Error($"[INST-QUEUE] Batch processing error: {ex.Message}");
+                        return System.Reactive.Unit.Default;
+                    }
+                }))
+                .Concat() // Concat ensures sequential execution - only 1 batch in flight at a time
+                .Subscribe(
+                    _ => { /* Batch completed */ },
                     ex => HistoricalTickLogger.Error($"[INST-QUEUE] Queue error: {ex.Message}"),
                     () => HistoricalTickLogger.Info("[INST-QUEUE] Queue completed")
                 );
@@ -323,30 +327,34 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 return;
             }
 
-            HistoricalTickLogger.Info($"[AccelpixHistoricalTickDataService] Subscribing to Accelpix queue - processing {PARALLEL_REQUESTS} at a time");
+            HistoricalTickLogger.Info($"[AccelpixHistoricalTickDataService] Subscribing to Accelpix queue - processing {PARALLEL_REQUESTS} at a time with backpressure");
 
             _accelpixQueueSubscription = _accelpixRequestQueue
                 .Buffer(PARALLEL_REQUESTS)
                 .Where(batch => batch.Count > 0)
-                .Subscribe(
-                    batch =>
+                .Select(batch => Observable.FromAsync(async () =>
+                {
+                    try
                     {
-                        _ = Task.Run(async () =>
-                        {
-                            try
-                            {
-                                HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] Processing batch of {batch.Count} instruments");
-                                var tasks = batch.Select(req => ProcessAccelpixRequestAsync(req)).ToList();
-                                await Task.WhenAll(tasks);
+                        HistoricalTickLogger.Info($"[ACCELPIX-QUEUE] Processing batch of {batch.Count} instruments");
 
-                                await Task.Delay(RATE_LIMIT_DELAY_MS);
-                            }
-                            catch (Exception ex)
-                            {
-                                HistoricalTickLogger.Error($"[ACCELPIX-QUEUE] Batch processing error: {ex.Message}");
-                            }
-                        });
-                    },
+                        // Process all instruments in batch concurrently
+                        var tasks = batch.Select(req => ProcessAccelpixRequestAsync(req)).ToList();
+                        await Task.WhenAll(tasks);
+
+                        await Task.Delay(RATE_LIMIT_DELAY_MS);
+
+                        return System.Reactive.Unit.Default;
+                    }
+                    catch (Exception ex)
+                    {
+                        HistoricalTickLogger.Error($"[ACCELPIX-QUEUE] Batch processing error: {ex.Message}");
+                        return System.Reactive.Unit.Default;
+                    }
+                }))
+                .Concat() // Concat ensures sequential execution - only 1 batch in flight at a time
+                .Subscribe(
+                    _ => { /* Batch completed */ },
                     ex => HistoricalTickLogger.Error($"[ACCELPIX-QUEUE] Queue error: {ex.Message}"),
                     () => HistoricalTickLogger.Info("[ACCELPIX-QUEUE] Queue completed")
                 );
@@ -750,7 +758,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             {
                 // Only check the most recent day - if it has data, skip backfill
                 var mostRecentDay = daysToCheck.Last();
-                var tcs = new TaskCompletionSource<int>();
+                var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
 
                 await NinjaTrader.Core.Globals.RandomDispatcher.InvokeAsync(() =>
                 {

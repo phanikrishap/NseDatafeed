@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Threading;
 using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models;
 using ZerodhaDatafeedAdapter.Logging;
@@ -880,8 +881,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// <summary>
         /// Executes a signal via the Stoxo SignalBridge service (IB_MappedOrderMod).
         /// This is called for real-time signals to place orders via the execution platform.
+        /// Returns Task instead of async void to prevent hidden exceptions.
         /// </summary>
-        private async void ExecuteSignalViaBridge(SignalRow signal)
+        private async Task ExecuteSignalViaBridgeAsync(SignalRow signal)
         {
             try
             {
@@ -924,9 +926,28 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         }
 
         /// <summary>
-        /// Places an exit order for an active signal via the Stoxo SignalBridge.
+        /// Fire-and-forget wrapper for ExecuteSignalViaBridgeAsync.
         /// </summary>
-        public async void ExitSignalViaBridge(SignalRow signal, double exitPrice = 0, string orderType = "MARKET")
+        private void ExecuteSignalViaBridge(SignalRow signal)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ExecuteSignalViaBridgeAsync(signal).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _log.Error($"[SignalsOrchestrator] Unhandled error in ExecuteSignalViaBridge: {ex.Message}", ex);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Places an exit order for an active signal via the Stoxo SignalBridge.
+        /// Returns Task instead of async void to prevent hidden exceptions.
+        /// </summary>
+        public async Task ExitSignalViaBridgeAsync(SignalRow signal, double exitPrice = 0, string orderType = "MARKET")
         {
             if (signal.Status != SignalStatus.Active)
             {

@@ -50,7 +50,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             int delayMs = GetNextBackoffDelay();
             Logger.Warn($"[WSC] Connection failed. Backoff #{_backoffCount} for {delayMs}ms");
 
-            _backoffTcs = new TaskCompletionSource<bool>();
+            _backoffTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             using (token.Register(() => _backoffTcs.TrySetResult(false)))
             {
                 await Task.WhenAny(_backoffTcs.Task, Task.Delay(delayMs, token));

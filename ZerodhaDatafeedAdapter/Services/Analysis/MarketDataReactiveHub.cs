@@ -104,6 +104,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         // State tracking
         private bool _projectedOpensCalculated = false;
         private readonly object _syncLock = new object();
+        private readonly object _publishLock = new object();
+
+        private void SafeOnNext<T>(IObserver<T> observer, T value)
+        {
+            lock (_publishLock)
+            {
+                observer.OnNext(value);
+            }
+        }
 
         #region Public Observable Streams (Read-Only)
 
@@ -322,7 +331,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 };
 
                 _projectedOpensCalculated = true;
-                _projectedOpenSubject.OnNext(state);
+                SafeOnNext(_projectedOpenSubject, state);
 
                 Logger.Info($"[MarketDataReactiveHub] Projected Opens: GIFT Chg={giftChangePercent:+0.00;-0.00}%, NIFTY={niftyProjOpen:F0}, SENSEX={sensexProjOpen:F0}");
             }
@@ -356,7 +365,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             var subject = GetSubjectForSymbol(symbol);
             if (subject != null)
             {
-                subject.OnNext(update);
+                SafeOnNext(subject, update);
                 Logger.Debug($"[MarketDataReactiveHub] Published: {update}");
             }
             else
@@ -395,7 +404,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 Timestamp = DateTime.Now
             };
 
-            subject.OnNext(update);
+            SafeOnNext(subject, update);
             Logger.Debug($"[MarketDataReactiveHub] Published close: {symbol} = {close:F2}");
         }
 
@@ -406,7 +415,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         {
             if (evt == null || evt.Options == null) return;
 
-            _optionsGeneratedSubject.OnNext(evt);
+            SafeOnNext(_optionsGeneratedSubject, evt);
             Logger.Info($"[MarketDataReactiveHub] Published OptionsGenerated: {evt}");
         }
 
@@ -454,7 +463,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 Source = source
             };
 
-            _optionPriceSubject.OnNext(update);
+            SafeOnNext(_optionPriceSubject, update);
         }
 
         /// <summary>
@@ -473,7 +482,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 Timestamp = DateTime.Now
             };
 
-            _optionStatusSubject.OnNext(update);
+            SafeOnNext(_optionStatusSubject, update);
         }
 
         /// <summary>
@@ -485,7 +494,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         {
             if (string.IsNullOrEmpty(generatedSymbol) || string.IsNullOrEmpty(zerodhaSymbol)) return;
 
-            _symbolResolvedSubject.OnNext((generatedSymbol, zerodhaSymbol));
+            SafeOnNext(_symbolResolvedSubject, (generatedSymbol, zerodhaSymbol));
             Logger.Debug($"[MarketDataReactiveHub] Symbol resolved: {generatedSymbol} → {zerodhaSymbol}");
         }
 
@@ -511,7 +520,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 Timestamp = DateTime.Now
             };
 
-            _vwapSubject.OnNext(update);
+            SafeOnNext(_vwapSubject, update);
         }
 
         /// <summary>
@@ -541,7 +550,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 Timestamp = DateTime.Now
             };
 
-            _straddlePriceSubject.OnNext(update);
+            SafeOnNext(_straddlePriceSubject, update);
         }
 
         /// <summary>
@@ -558,7 +567,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
 
             Logger.Info("[MarketDataReactiveHub] Publishing PriceSyncReady to Rx stream");
-            _priceSyncReadySubject.OnNext(true);
+            SafeOnNext(_priceSyncReadySubject, true);
         }
 
         /// <summary>
@@ -576,7 +585,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
 
             Logger.Info($"[MarketDataReactiveHub] Publishing TokenReady to Rx stream: isValid={isValid}");
-            _tokenReadySubject.OnNext(isValid);
+            SafeOnNext(_tokenReadySubject, isValid);
         }
 
         /// <summary>
@@ -594,7 +603,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
 
             Logger.Info($"[MarketDataReactiveHub] Publishing InstrumentDbReady to Rx stream: isReady={isReady}");
-            _instrumentDbReadySubject.OnNext(isReady);
+            SafeOnNext(_instrumentDbReadySubject, isReady);
         }
 
         /// <summary>
@@ -607,7 +616,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             if (state == null) return;
 
             Logger.Info($"[MarketDataReactiveHub] InitializationState: {state}");
-            _initializationStateSubject.OnNext(state);
+            SafeOnNext(_initializationStateSubject, state);
 
             // Also publish to simple streams for backward compatibility
             if (state.Phase == InitializationPhase.TokenValidated)
@@ -787,7 +796,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             lock (_syncLock)
             {
                 _projectedOpensCalculated = false;
-                _projectedOpenSubject.OnNext(ProjectedOpenState.Empty);
+                SafeOnNext(_projectedOpenSubject, ProjectedOpenState.Empty);
                 Logger.Info("[MarketDataReactiveHub] Projected opens reset");
             }
 

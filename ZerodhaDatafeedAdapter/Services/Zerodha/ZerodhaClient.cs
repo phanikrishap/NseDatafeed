@@ -44,10 +44,11 @@ namespace ZerodhaDatafeedAdapter.Services.Zerodha
         }
 
         /// <summary>
-        /// Checks if the connection to the Zerodha API is valid
+        /// Checks if the connection to the Zerodha API is valid (async version).
+        /// Replaces blocking .Result calls with proper async/await pattern.
         /// </summary>
         /// <returns>True if the connection is valid, false otherwise</returns>
-        public bool CheckConnection()
+        public async Task<bool> CheckConnectionAsync()
         {
             try
             {
@@ -57,14 +58,14 @@ namespace ZerodhaDatafeedAdapter.Services.Zerodha
                 _httpClient.DefaultRequestHeaders.Add("Authorization", $"token {_configManager.ApiKey}:{_configManager.AccessToken}");
 
                 // Try a valid endpoint - for example, the user profile endpoint
-                var response = _httpClient.GetAsync("/user/profile").Result;
+                var response = await _httpClient.GetAsync("/user/profile").ConfigureAwait(false);
 
                 // Log response details for troubleshooting
                 Logger.Info($"Zerodha API connection response: {response.StatusCode} - {response.ReasonPhrase}");
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    string content = response.Content.ReadAsStringAsync().Result;
+                    string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                     Logger.Info($"Response content: {content}");
 
                     // Parse JSON response to check for token errors
@@ -103,6 +104,19 @@ namespace ZerodhaDatafeedAdapter.Services.Zerodha
                 Logger.Error($"Connection check error: {ex.Message}");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Checks if the connection to the Zerodha API is valid (synchronous wrapper).
+        /// DEPRECATED: Use CheckConnectionAsync() instead to avoid blocking.
+        /// This wrapper is provided for backward compatibility only.
+        /// </summary>
+        /// <returns>True if the connection is valid, false otherwise</returns>
+        [Obsolete("Use CheckConnectionAsync() instead to avoid blocking the thread.")]
+        public bool CheckConnection()
+        {
+            // Use Task.Run to avoid deadlocks when called from UI thread
+            return Task.Run(() => CheckConnectionAsync()).GetAwaiter().GetResult();
         }
 
         /// <summary>
