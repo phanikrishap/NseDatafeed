@@ -180,6 +180,11 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
             HistoricalTickLogger.Info("[HistoricalTickDataService] Initializing - subscribing to ICICI broker status");
 
+            // Initialize new architecture dependencies
+            _provider = ServiceFactory.GetIciciProvider();
+            _persistence = ServiceFactory.GetTickPersistence();
+            _nt8Adapter = ServiceFactory.GetNT8Adapter();
+
             // Subscribe to ICICI broker availability
             _iciciStatusSubscription = IciciDirectTokenService.Instance.BrokerStatus
                 .Where(status => status.IsAvailable)
