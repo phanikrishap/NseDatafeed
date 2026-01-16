@@ -280,6 +280,10 @@
     <!-- Phase 7: Modular components for InstrumentManager -->
     <Compile Include="Services\Instruments\InstrumentDbService.cs" />
     <Compile Include="Services\Instruments\SymbolMappingService.cs" />
+    <Compile Include="Services\Analysis\TickerService.cs" />
+    <Compile Include="Models\TickerData.cs" />
+    <Compile Include="Models\Reactive\AnalysisEvents.cs" />
+    <Compile Include="Services\Analysis\ProjectedOpenService.cs" />
     <!-- Phase 7: Modular components for OptimizedTickProcessor -->
     <Compile Include="Models\MarketData\SymbolState.cs" />
     <Compile Include="Services\MarketData\ShardProcessor.cs" />

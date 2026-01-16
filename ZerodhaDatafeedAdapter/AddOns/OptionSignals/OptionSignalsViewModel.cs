@@ -132,18 +132,26 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         public void StartServices()
         {
-            _log.Info("[OptionSignalsViewModel] Starting services");
+            _log.Info("[OptionSignalsViewModel] Starting services - waiting for Market Analyzer to complete");
             var hub = MarketDataReactiveHub.Instance;
 
+            // IMPORTANT: Wait for Market Analyzer to complete (ProjectedOpen ready) before subscribing to options
+            // This ensures we have correct ATM strike before initializing option chain VP
             _subscriptions.Add(hub.ProjectedOpenStream
                 .Where(s => s.IsComplete)
                 .Take(1)
                 .ObserveOnDispatcher()
-                .Subscribe(OnProjectedOpenReady));
+                .Subscribe(state =>
+                {
+                    OnProjectedOpenReady(state);
 
-            _subscriptions.Add(hub.OptionsGeneratedStream
-                .Subscribe(evt => _strikeGenerationTrigger.OnNext(evt)));
+                    // NOW subscribe to OptionsGeneratedStream after Market Analyzer is ready
+                    _log.Info("[OptionSignalsViewModel] Market Analyzer ready - subscribing to OptionsGeneratedStream");
+                    _subscriptions.Add(hub.OptionsGeneratedStream
+                        .Subscribe(evt => _strikeGenerationTrigger.OnNext(evt)));
+                }));
 
+            // Price updates can start immediately (they'll be buffered/ignored until options are generated)
             _subscriptions.Add(hub.OptionPriceBatchStream
                 .ObserveOnDispatcher()
                 .Subscribe(OnOptionPriceBatch));

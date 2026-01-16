@@ -14,6 +14,7 @@ using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.TBS;
 using ZerodhaDatafeedAdapter.Services.Telegram;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 
 namespace ZerodhaDatafeedAdapter.Services
 {
@@ -66,6 +67,11 @@ namespace ZerodhaDatafeedAdapter.Services
         private const int FALLBACK_DELAY_SECONDS = 45; // Fallback if PriceSyncReady doesn't fire
         private Action _priceSyncReadyHandler;
         private CompositeDisposable _rxSubscriptions = new CompositeDisposable();
+
+        // Event-Driven Optimization: Map symbols to interested tranches for O(1) lookup
+        private readonly Dictionary<string, HashSet<int>> _symbolTrancheMap = new Dictionary<string, HashSet<int>>();
+        private readonly object _mapLock = new object();
+
 
         #endregion
 
@@ -222,6 +228,118 @@ namespace ZerodhaDatafeedAdapter.Services
                 DelayCountdown = 0;
                 IsOptionChainReady = true;
             }
+            // Event-Driven Optimization: Subscribe to Option Price Updates
+            SubscribeToOptionPrices();
+        }
+
+        /// <summary>
+        /// Subscribe to real-time option price updates for event-driven P&L calculation.
+        /// Replaces 100ms polling with reactive updates.
+        /// </summary>
+        private void SubscribeToOptionPrices()
+        {
+            var hub = MarketDataReactiveHub.Instance;
+            
+            // Subscribe to batched stream to reduce UI pressure (buffer 100ms or 50 items)
+            _rxSubscriptions.Add(
+                hub.OptionPriceBatchStream
+                    .ObserveOnDispatcher() // Ensure updates happen on UI thread
+                    .Subscribe(
+                        batch => ProcessOptionPriceBatch(batch),
+                        ex => TBSLogger.Error($"[TBSExecutionService] OptionPriceStream error: {ex.Message}")));
+                        
+            TBSLogger.Info("[TBSExecutionService] Subscribed to OptionPriceBatchStream (Rx)");
+        }
+
+        /// <summary>
+        /// Process a batch of option price updates.
+        /// Updates P&L and checks SL/Target for affected tranches only.
+        /// </summary>
+        private void ProcessOptionPriceBatch(IList<OptionPriceUpdate> batch)
+        {
+            if (batch.Count == 0) return;
+            
+            HashSet<TBSExecutionState> affectedTranches = new HashSet<TBSExecutionState>();
+
+            lock (_mapLock)
+            {
+                foreach (var update in batch)
+                {
+                    if (_symbolTrancheMap.TryGetValue(update.Symbol, out var trancheIds))
+                    {
+                        foreach (var id in trancheIds)
+                        {
+                            var tranche = _executionStates.FirstOrDefault(t => t.TrancheId == id);
+                            if (tranche != null && (tranche.Status == TBSExecutionStatus.Live || tranche.Status == TBSExecutionStatus.Monitoring)) // Only update active tranches
+                            {
+                                // Update the specific leg price
+                                var leg = tranche.Legs.FirstOrDefault(l => l.Symbol == update.Symbol);
+                                if (leg != null)
+                                {
+                                    leg.CurrentPrice = (decimal)update.Price;
+                                    affectedTranches.Add(tranche);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Process logic for affected tranches
+            foreach (var tranche in affectedTranches)
+            {
+                // Update P&L
+                tranche.UpdateCombinedPnL();
+                
+                // If Live and locked, check SL/Target
+                if (tranche.Status == TBSExecutionStatus.Live && tranche.StrikeLocked)
+                {
+                     CheckSLConditions(tranche); // This checks individual SL, combined SL, and Target
+                }
+            }
+            
+            if (affectedTranches.Count > 0)
+            {
+                OnSummaryUpdated();
+            }
+        }
+
+        /// <summary>
+        /// Update the symbol map when a tranche's symbols change.
+        /// </summary>
+        private void UpdateSymbolMap(TBSExecutionState state, string oldCe, string oldPe, string newCe, string newPe)
+        {
+            lock (_mapLock)
+            {
+                // Remove old symbols if they exist
+                if (!string.IsNullOrEmpty(oldCe)) RemoveFromMap(oldCe, state.TrancheId);
+                if (!string.IsNullOrEmpty(oldPe)) RemoveFromMap(oldPe, state.TrancheId);
+                
+                // Add new symbols
+                if (!string.IsNullOrEmpty(newCe)) AddToMap(newCe, state.TrancheId);
+                if (!string.IsNullOrEmpty(newPe)) AddToMap(newPe, state.TrancheId);
+            }
+        }
+        
+        private void AddToMap(string symbol, int trancheId)
+        {
+            if (!_symbolTrancheMap.ContainsKey(symbol))
+            {
+                _symbolTrancheMap[symbol] = new HashSet<int>();
+            }
+            _symbolTrancheMap[symbol].Add(trancheId);
+        }
+        
+        private void RemoveFromMap(string symbol, int trancheId)
+        {
+            if (_symbolTrancheMap.TryGetValue(symbol, out var ids))
+            {
+                ids.Remove(trancheId);
+                if (ids.Count == 0)
+                {
+                    _symbolTrancheMap.Remove(symbol);
+                }
+            }
         }
 
         /// <summary>
@@ -252,6 +370,7 @@ namespace ZerodhaDatafeedAdapter.Services
         public void InitializeExecutionStates(string underlying, int? dte)
         {
             _executionStates.Clear();
+            lock (_mapLock) { _symbolTrancheMap.Clear(); }
             _nextTrancheId = 1;
 
             var configs = TBSConfigurationService.Instance.GetConfigurations(underlying, dte);
@@ -447,6 +566,8 @@ namespace ZerodhaDatafeedAdapter.Services
         private void ProcessTrancheStatus(TBSExecutionState state, TimeSpan now, bool isSimulationActive)
         {
             var oldStatus = state.Status;
+            
+            // 1. Update Status based on Time (Entry/Exit times)
             bool statusChanged = state.UpdateStatusBasedOnTime(now, skipExitTimeCheck: isSimulationActive);
 
             if (statusChanged)
@@ -455,6 +576,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 OnStateChanged(state);
             }
 
+            // 2. Monitoring Phase Logic
             // When entering Monitoring state, fetch ATM strike
             if (oldStatus != TBSExecutionStatus.Monitoring && state.Status == TBSExecutionStatus.Monitoring)
             {
@@ -462,7 +584,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 UpdateStrikeForState(state);
             }
 
-            // While in Monitoring, keep updating ATM strike
+            // While in Monitoring, keep updating ATM strike until locked
             if (state.Status == TBSExecutionStatus.Monitoring && !state.StrikeLocked)
             {
                 UpdateStrikeForState(state);
@@ -488,6 +610,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 }
             }
 
+            // 3. Live Phase Logic
             // When going Live, lock strike and enter positions (only on transition from Monitoring)
             if (oldStatus == TBSExecutionStatus.Monitoring && state.Status == TBSExecutionStatus.Live)
             {
@@ -515,11 +638,13 @@ namespace ZerodhaDatafeedAdapter.Services
                 }
             }
 
-            // While Live, check for SL conditions
+            // NOTE: SL/Target checks moved to Event-Driven ProcessOptionPriceBatch method!
+            // However, we still call CheckSLConditions here as a fallback/safety check periodically
             if (state.Status == TBSExecutionStatus.Live && state.StrikeLocked)
             {
                 CheckSLConditions(state);
             }
+
 
             // Stoxxo: Send SL modification when SL-to-cost is applied
             if (state.SLToCostApplied && !state.StoxxoSLModified && !string.IsNullOrEmpty(state.StoxxoPortfolioName))
@@ -623,11 +748,13 @@ namespace ZerodhaDatafeedAdapter.Services
                 if (leg.Status != TBSLegStatus.Active) continue;
 
                 // Update current price from PriceHub
+                // (Event-Driven: Already updated by ProcessOptionPriceBatch, but updating here ensures fallback if tick missed)
                 decimal currentPrice = GetCurrentPrice(leg.Symbol);
                 if (currentPrice > 0)
                 {
                     leg.CurrentPrice = currentPrice;
                 }
+
 
                 // Check individual leg SL
                 if (leg.SLPrice > 0 && leg.CurrentPrice >= leg.SLPrice)
@@ -779,6 +906,9 @@ namespace ZerodhaDatafeedAdapter.Services
 
             var ceLeg = state.Legs.FirstOrDefault(l => l.OptionType == "CE");
             var peLeg = state.Legs.FirstOrDefault(l => l.OptionType == "PE");
+
+            // Update symbol map
+            UpdateSymbolMap(state, ceLeg?.Symbol, peLeg?.Symbol, ceSymbol, peSymbol);
 
             if (ceLeg != null) ceLeg.Symbol = ceSymbol;
             if (peLeg != null) peLeg.Symbol = peSymbol;

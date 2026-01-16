@@ -108,7 +108,110 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             return options;
         }
 
-        private double GetStrikeStep(string underlying)
+        public class OptionSelectionResult
+        {
+            public string Underlying { get; set; }
+            public DateTime Expiry { get; set; }
+            public bool IsMonthlyExpiry { get; set; }
+            public double ProjectedPrice { get; set; }
+            public int StepSize { get; set; }
+            public string Message { get; set; }
+        }
+
+        /// <summary>
+        /// Selects the best underlying and expiry based on DTE priority:
+        /// 1. NIFTY 0DTE, 2. SENSEX 0DTE, 3. NIFTY 1DTE, 4. SENSEX 1DTE, 5. Default NIFTY
+        /// </summary>
+        public async Task<OptionSelectionResult> SelectBestOptionConfigurationAsync(double niftyProjected, double sensexProjected)
+        {
+            try
+            {
+                // Fetch expiries
+                var niftyExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlyingAsync("NIFTY");
+                var sensexExpiries = await InstrumentManager.Instance.GetExpiriesForUnderlyingAsync("SENSEX");
+
+                var niftyNear = GetNearestExpiry(niftyExpiries);
+                var sensexNear = GetNearestExpiry(sensexExpiries);
+
+                // Calculate DTE
+                double niftyDTE = (niftyNear.Date - DateTime.Today).TotalDays;
+                double sensexDTE = (sensexNear.Date - DateTime.Today).TotalDays;
+
+                string selectedUnderlying;
+                DateTime selectedExpiry;
+                int stepSize;
+                double projectedPrice;
+                string message;
+
+                if (niftyDTE == 0)
+                {
+                    selectedUnderlying = "NIFTY";
+                    selectedExpiry = niftyNear;
+                    stepSize = 50;
+                    projectedPrice = niftyProjected;
+                    message = "Selected NIFTY 0DTE (Priority 1)";
+                }
+                else if (sensexDTE == 0)
+                {
+                    selectedUnderlying = "SENSEX";
+                    selectedExpiry = sensexNear;
+                    stepSize = 100;
+                    projectedPrice = sensexProjected;
+                    message = "Selected SENSEX 0DTE (Priority 2)";
+                }
+                else if (niftyDTE == 1)
+                {
+                    selectedUnderlying = "NIFTY";
+                    selectedExpiry = niftyNear;
+                    stepSize = 50;
+                    projectedPrice = niftyProjected;
+                    message = "Selected NIFTY 1DTE (Priority 3)";
+                }
+                else if (sensexDTE == 1)
+                {
+                    selectedUnderlying = "SENSEX";
+                    selectedExpiry = sensexNear;
+                    stepSize = 100;
+                    projectedPrice = sensexProjected;
+                    message = "Selected SENSEX 1DTE (Priority 4)";
+                }
+                else
+                {
+                    selectedUnderlying = "NIFTY";
+                    selectedExpiry = niftyNear;
+                    stepSize = 50;
+                    projectedPrice = niftyProjected;
+                    message = $"Default to NIFTY (DTE={niftyDTE})";
+                }
+
+                bool isMonthly = SymbolHelper.IsMonthlyExpiry(selectedExpiry, selectedUnderlying == "NIFTY" ? niftyExpiries : sensexExpiries);
+
+                return new OptionSelectionResult
+                {
+                    Underlying = selectedUnderlying,
+                    Expiry = selectedExpiry,
+                    IsMonthlyExpiry = isMonthly,
+                    ProjectedPrice = projectedPrice,
+                    StepSize = stepSize,
+                    Message = message
+                };
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[OGS] SelectBestOptionConfigurationAsync error: {ex.Message}");
+                return null;
+            }
+        }
+
+        private DateTime GetNearestExpiry(List<DateTime> expiries)
+        {
+            if (expiries == null || expiries.Count == 0) return DateTime.Today.AddDays(7); // Safe fallback
+            var today = DateTime.Today;
+            // Return first expiry >= today
+            return expiries.Where(e => e.Date >= today).OrderBy(e => e).FirstOrDefault();
+        }
+
+        public double GetStrikeStep(string underlying)
         {
             if (underlying == "NIFTY") return 50;
             if (underlying == "BANKNIFTY") return 100;

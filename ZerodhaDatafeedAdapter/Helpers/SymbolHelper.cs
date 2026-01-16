@@ -200,17 +200,13 @@ namespace ZerodhaDatafeedAdapter.Helpers
         {
             if (string.IsNullOrEmpty(underlying)) return 25;
 
-            // First try to get from MarketAnalyzerLogic cache (loaded from DB)
+            // First try to get from InstrumentManager (source of truth)
             try
             {
-                var instance = Services.Analysis.MarketAnalyzerLogic.Instance;
-                if (instance != null)
+                int dbLotSize = Services.Instruments.InstrumentManager.Instance.GetLotSizeForUnderlying(underlying);
+                if (dbLotSize > 0)
                 {
-                    int cachedLotSize = instance.GetCachedLotSize(underlying);
-                    if (cachedLotSize > 0)
-                    {
-                        return cachedLotSize;
-                    }
+                    return dbLotSize;
                 }
             }
             catch

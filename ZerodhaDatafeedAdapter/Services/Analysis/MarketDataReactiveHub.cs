@@ -37,8 +37,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private readonly BehaviorSubject<ProjectedOpenState> _projectedOpenSubject =
             new BehaviorSubject<ProjectedOpenState>(ProjectedOpenState.Empty);
 
-        // Subject for options generated events
-        private readonly Subject<OptionsGeneratedEvent> _optionsGeneratedSubject = new Subject<OptionsGeneratedEvent>();
+        // ReplaySubject for options generated events - buffers last event so late subscribers get it
+        // This is critical: Option Signals waits for Market Analyzer before subscribing, so it needs replay
+        private readonly ReplaySubject<OptionsGeneratedEvent> _optionsGeneratedSubject = new ReplaySubject<OptionsGeneratedEvent>(1);
 
         // ═══════════════════════════════════════════════════════════════════
         // OPTION PRICE STREAMS (with backpressure)
