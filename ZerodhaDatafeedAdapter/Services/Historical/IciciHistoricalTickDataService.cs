@@ -349,8 +349,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         {
             try
             {
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string configPath = Path.Combine(documentsPath, Classes.Constants.BaseDataFolder, Classes.Constants.ConfigFileName);
+                string configPath = Classes.Constants.GetFolderPath(Classes.Constants.ConfigFileName);
 
                 if (!File.Exists(configPath))
                 {

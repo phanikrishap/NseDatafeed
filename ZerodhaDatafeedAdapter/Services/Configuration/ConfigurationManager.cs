@@ -125,9 +125,7 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         {
             try
             {
-                // Get the user's Documents folder path
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string fullConfigPath = Path.Combine(documentsPath, ZerodhaDatafeedAdapter.Classes.Constants.BaseDataFolder, ZerodhaDatafeedAdapter.Classes.Constants.ConfigFileName);
+                string fullConfigPath = ZerodhaDatafeedAdapter.Classes.Constants.GetFolderPath(ZerodhaDatafeedAdapter.Classes.Constants.ConfigFileName);
 
                 // Check if config file exists
                 if (!File.Exists(fullConfigPath))
@@ -409,8 +407,7 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         {
             try
             {
-                string documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                string fullConfigPath = Path.Combine(documentsPath, ZerodhaDatafeedAdapter.Classes.Constants.BaseDataFolder, ZerodhaDatafeedAdapter.Classes.Constants.ConfigFileName);
+                string fullConfigPath = ZerodhaDatafeedAdapter.Classes.Constants.GetFolderPath(ZerodhaDatafeedAdapter.Classes.Constants.ConfigFileName);
 
                 string json = _config.ToString(Formatting.Indented);
                 File.WriteAllText(fullConfigPath, json);

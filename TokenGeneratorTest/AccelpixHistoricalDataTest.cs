@@ -151,7 +151,7 @@ namespace TokenGeneratorTest
             var weeklyOptions = _cachedMasters.Where(m =>
             {
                 return m.Underlying == "NIFTY" &&
-                       m.ExpiryDate.StartsWith(weeklyExpiry) &&
+                       (m.ExpiryDate?.StartsWith(weeklyExpiry) ?? false) &&
                        m.StrikePrice == targetStrike;
             }).ToList();
 
@@ -165,7 +165,7 @@ namespace TokenGeneratorTest
             var monthlyOptions = _cachedMasters.Where(m =>
             {
                 return m.Underlying == "NIFTY" &&
-                       m.ExpiryDate.StartsWith(monthlyExpiry) &&
+                       (m.ExpiryDate?.StartsWith(monthlyExpiry) ?? false) &&
                        m.StrikePrice == targetStrike;
             }).ToList();
 
@@ -178,7 +178,7 @@ namespace TokenGeneratorTest
                 var monthlyYYMMM = _cachedMasters.Where(m =>
                 {
                     return m.Underlying == "NIFTY" &&
-                           m.Ticker.Contains("26JAN") &&
+                           (m.Ticker?.Contains("26JAN") ?? false) &&
                            m.StrikePrice == targetStrike;
                 }).ToList();
 
@@ -202,7 +202,7 @@ namespace TokenGeneratorTest
             // Show all NIFTY expiries in January 2026 to understand the pattern
             Console.WriteLine("\n    All NIFTY expiries in January 2026:");
             var niftyJanExpiries = _cachedMasters
-                .Where(m => m.Underlying == "NIFTY" && m.ExpiryDate.StartsWith("2026-01"))
+                .Where(m => m.Underlying == "NIFTY" && (m.ExpiryDate?.StartsWith("2026-01") ?? false))
                 .Select(m => m.ExpiryDate)
                 .Distinct()
                 .OrderBy(e => e)
@@ -245,7 +245,7 @@ namespace TokenGeneratorTest
 
             // First, let's find what underlying names are used for SENSEX
             var sensexUnderlyings = _cachedMasters
-                .Where(m => m.Ticker.Contains("SENSEX") || m.Underlying.Contains("SENSEX"))
+                .Where(m => (m.Ticker?.Contains("SENSEX") ?? false) || (m.Underlying?.Contains("SENSEX") ?? false))
                 .Select(m => m.Underlying)
                 .Distinct()
                 .Take(5)
@@ -257,7 +257,7 @@ namespace TokenGeneratorTest
             var weeklyOptions = _cachedMasters.Where(m =>
             {
                 return (m.Underlying == "SENSEX" || m.Underlying == "BSE SENSEX") &&
-                       m.ExpiryDate.StartsWith(weeklyExpiry) &&
+                       (m.ExpiryDate?.StartsWith(weeklyExpiry) ?? false) &&
                        m.StrikePrice == targetStrike;
             }).ToList();
 

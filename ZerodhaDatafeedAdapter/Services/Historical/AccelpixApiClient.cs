@@ -312,7 +312,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         public uint Quantity { get; set; }  // Cumulative traded quantity (resets daily)
 
         [JsonProperty("qty")]
-        private uint QuantityAlias { set { Quantity = value; } }
+        public uint QuantityAlias { set { Quantity = value; } }
 
         [JsonProperty("vol")]
         public uint Volume { get; set; }  // Not used by Accelpix (always empty)
