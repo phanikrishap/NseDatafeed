@@ -9,7 +9,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
     {
         string ProviderName { get; }
         Task<bool> InitializeAsync(string apiKey, string apiSecret);
-        Task<List<HistoricalTick>> FetchTickDataAsync(
+        Task<List<HistoricalCandle>> FetchTickDataAsync(
             string symbol,
             DateTime fromDate,
             DateTime toDate,

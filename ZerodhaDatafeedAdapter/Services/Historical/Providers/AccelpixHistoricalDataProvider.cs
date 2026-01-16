@@ -43,7 +43,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
             return Task.FromResult(true);
         }
 
-        public async Task<List<HistoricalTick>> FetchTickDataAsync(
+        public async Task<List<HistoricalCandle>> FetchTickDataAsync(
             string symbol,
             DateTime fromDate,
             DateTime toDate,
@@ -64,7 +64,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
 
             try
             {
-                var allTicks = new List<HistoricalTick>();
+                var allTicks = new List<HistoricalCandle>();
                 var currentDate = fromDate;
 
                 while (currentDate <= toDate)

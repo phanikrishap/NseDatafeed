@@ -196,6 +196,14 @@
     <Compile Include="Services\Historical\BaseHistoricalTickDataService.cs" />
     <Compile Include="Services\Historical\AccelpixHistoricalTickDataService.cs" />
     <Compile Include="Services\Historical\HistoricalTickDataCoordinator.cs" />
+    <Compile Include="Core\FeatureFlags.cs" />
+    <Compile Include="Core\ServiceFactory.cs" />
+    <Compile Include="Services\Historical\Providers\IHistoricalDataProvider.cs" />
+    <Compile Include="Services\Historical\Providers\AccelpixHistoricalDataProvider.cs" />
+    <Compile Include="Services\Historical\Providers\IciciHistoricalDataProvider.cs" />
+    <Compile Include="Services\Historical\Persistence\ITickDataPersistence.cs" />
+    <Compile Include="Services\Historical\Persistence\SqliteTickDataPersistence.cs" />
+    <Compile Include="Services\Historical\Adapters\INT8BarsRequestAdapter.cs" />
     <Compile Include="Services\Analysis\InstrumentBackfillService.cs" />
     <Compile Include="Services\Analysis\MarketAnalyzerLogic.cs" />
     <Compile Include="Services\Analysis\NiftyFuturesMetricsService.cs" />

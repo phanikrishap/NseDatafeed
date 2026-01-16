@@ -57,7 +57,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
             HistoricalTickLogger.Info($"[IciciHistoricalDataProvider] Session token set");
         }
 
-        public async Task<List<HistoricalTick>> FetchTickDataAsync(
+        public async Task<List<HistoricalCandle>> FetchTickDataAsync(
             string symbol,
             DateTime fromDate,
             DateTime toDate,
@@ -100,7 +100,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
                 else
                 {
                     HistoricalTickLogger.Warn($"[IciciHistoricalDataProvider] No data or error for {symbol}: {response.Error}");
-                    return new List<HistoricalTick>();
+                    return new List<HistoricalCandle>();
                 }
             }
             catch (Exception ex)
@@ -220,7 +220,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
                 if (status == "Success")
                 {
                     var successObj = json["Success"] as JObject;
-                    var candles = new List<HistoricalTick>();
+                    var candles = new List<HistoricalCandle>();
 
                     if (successObj != null)
                     {
@@ -231,9 +231,9 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
                             {
                                 foreach (var item in candleData)
                                 {
-                                    var candle = new HistoricalTick
+                                    var candle = new HistoricalCandle
                                     {
-                                        Timestamp = DateTime.Parse(item[0].ToString()),
+                                        DateTime = DateTime.Parse(item[0].ToString()),
                                         Open = decimal.Parse(item[1].ToString()),
                                         High = decimal.Parse(item[2].ToString()),
                                         Low = decimal.Parse(item[3].ToString()),
@@ -285,7 +285,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
         private class HistoricalDataResponse
         {
             public bool Success { get; set; }
-            public List<HistoricalTick> Data { get; set; }
+            public List<HistoricalCandle> Data { get; set; }
             public string Error { get; set; }
         }
     }

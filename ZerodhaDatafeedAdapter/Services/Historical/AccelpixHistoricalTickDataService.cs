@@ -447,7 +447,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 });
 
                 // Fetch from provider
-                var allTicks = new List<Models.HistoricalCandle>();
+                var allTicks = new List<HistoricalCandle>();
                 foreach (var tradeDate in daysToFetch)
                 {
                     HistoricalTickLogger.Info($"[NEW-ARCH] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Fetching via provider...");
@@ -455,7 +455,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     var ticks = await _provider.FetchTickDataAsync(accelpixSymbol, tradeDate, tradeDate);
                     if (ticks != null && ticks.Count > 0)
                     {
-                        var candles = ticks.Select(t => new Models.HistoricalCandle
+                        var candles = ticks.Select(t => new HistoricalCandle
                         {
                             DateTime = t.DateTime,
                             Open = t.Open,
@@ -602,7 +602,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 });
 
                 // Fetch from provider
-                var allTicks = new List<Models.HistoricalCandle>();
+                var allTicks = new List<HistoricalCandle>();
                 foreach (var tradeDate in daysToFetch)
                 {
                     HistoricalTickLogger.Info($"[INST-QUEUE] {zerodhaSymbol} {tradeDate:yyyy-MM-dd}: Fetching via provider...");
@@ -610,7 +610,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     var ticks = await _provider.FetchTickDataAsync(accelpixSymbol, tradeDate, tradeDate);
                     if (ticks != null && ticks.Count > 0)
                     {
-                        var candles = ticks.Select(t => new Models.HistoricalCandle
+                        var candles = ticks.Select(t => new HistoricalCandle
                         {
                             DateTime = t.DateTime,
                             Open = t.Open,

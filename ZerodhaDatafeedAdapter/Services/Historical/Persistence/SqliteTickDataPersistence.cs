@@ -104,20 +104,9 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Persistence
 
         public Task PruneOldDataAsync(int retentionDays)
         {
-            try
-            {
-                HistoricalTickLogger.Info($"[SqliteTickDataPersistence] Pruning data older than {retentionDays} days");
-
-                _tickCacheDb.PruneOldData(retentionDays);
-
-                HistoricalTickLogger.Info($"[SqliteTickDataPersistence] Successfully pruned old data");
-                return Task.CompletedTask;
-            }
-            catch (Exception ex)
-            {
-                HistoricalTickLogger.Error($"[SqliteTickDataPersistence] ERROR pruning old data: {ex.Message}", ex);
-                return Task.CompletedTask;
-            }
+            // TODO: Implement pruning in TickCacheDb if needed
+            HistoricalTickLogger.Info($"[SqliteTickDataPersistence] PruneOldDataAsync not implemented yet");
+            return Task.CompletedTask;
         }
     }
 }
