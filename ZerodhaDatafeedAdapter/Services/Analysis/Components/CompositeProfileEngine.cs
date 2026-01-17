@@ -321,6 +321,12 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                 // Control and migration
                 DetermineControlAndMigration(metrics);
 
+                // Session date ranges for UI display
+                metrics.DateRange1D = FormatDateRange(_profile1D);
+                metrics.DateRange3D = FormatDateRange(_profile3D);
+                metrics.DateRange5D = FormatDateRange(_profile5D);
+                metrics.DateRange10D = FormatDateRange(_profile10D);
+
                 LatestMetrics = metrics;
                 return metrics;
             }
@@ -1217,6 +1223,21 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             double range = yearlyHigh - yearlyLow;
             if (range > 0)
                 metrics.YearlyExtremes.PositionInRange = ((currentPrice - yearlyLow) / range) * 100;
+        }
+
+        /// <summary>
+        /// Formats a date range for UI display.
+        /// For single day: "13-Jan", for range: "10-Jan to 13-Jan"
+        /// </summary>
+        private string FormatDateRange(CompositeProfile profile)
+        {
+            if (profile == null || !profile.IsValid)
+                return "-";
+
+            if (profile.StartDate.Date == profile.EndDate.Date)
+                return profile.StartDate.ToString("dd-MMM");
+
+            return $"{profile.StartDate:dd-MMM} to {profile.EndDate:dd-MMM}";
         }
 
         private void DetermineControlAndMigration(CompositeProfileMetrics metrics)

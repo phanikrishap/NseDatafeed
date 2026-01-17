@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using NinjaTrader.Cbi;
@@ -83,6 +84,7 @@ namespace ZerodhaDatafeedAdapter.Services
         private DateTime _currentSimTime;
         private DateTime _targetSimTime;  // Target simulation time that accumulates based on wall-clock elapsed
         private DateTime _lastTickTime;
+        private DateTime _lastAtmUpdateSimTime;  // Last simulation time when ATM was recalculated
         private int _pricesInjectedCount;
         private int _loadedSymbolCount;
         private int _totalTickCount;
@@ -278,9 +280,14 @@ namespace ZerodhaDatafeedAdapter.Services
                 object lockObj = new object();
 
                 // Parallel loading - direct file I/O is fast and parallelizes well
-                await Task.Run(() =>
+                // Force TaskScheduler.Default to avoid ThreadPool starvation from NT's dispatcher
+                await Task.Factory.StartNew(() =>
                 {
-                    Parallel.ForEach(symbols, new ParallelOptions { MaxDegreeOfParallelism = 8 }, symbol =>
+                    Parallel.ForEach(symbols, new ParallelOptions
+                    {
+                        MaxDegreeOfParallelism = Environment.ProcessorCount,
+                        TaskScheduler = TaskScheduler.Default
+                    }, symbol =>
                     {
                         try
                         {
@@ -325,7 +332,7 @@ namespace ZerodhaDatafeedAdapter.Services
                             }
                         }
                     });
-                });
+                }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
                 var loadElapsed = DateTime.Now - loadStart;
                 _log.Info($"[SimulationService] Direct NCD loading completed: {successCount} symbols in {loadElapsed.TotalMilliseconds:F0}ms");
@@ -746,6 +753,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 CurrentSimTime = _tickTimeline[0].Time;
                 _targetSimTime = _tickTimeline[0].Time;  // Initialize target time to first tick
                 _lastTickTime = DateTime.Now;
+                _lastAtmUpdateSimTime = _tickTimeline[0].Time;  // Initialize ATM update tracking
             }
             else if (State == SimulationState.Paused)
             {
@@ -889,10 +897,12 @@ namespace ZerodhaDatafeedAdapter.Services
                 _currentSimTime = lastTickTime;
                 _pricesInjectedCount += ticksInjected;
 
-                // Update ATM periodically (every 500 ticks to reduce overhead)
-                if (_pricesInjectedCount % 500 == 0)
+                // Update ATM every second of simulation time (not tick count)
+                // This is more meaningful in simulation since market conditions change over time
+                if ((lastTickTime - _lastAtmUpdateSimTime).TotalSeconds >= 1)
                 {
                     UpdateATMStrike();
+                    _lastAtmUpdateSimTime = lastTickTime;
                 }
 
                 // Single UI update at the end of processing this batch

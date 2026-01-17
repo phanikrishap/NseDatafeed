@@ -181,6 +181,15 @@ namespace ZerodhaDatafeedAdapter.Services.Simulation
             var byte2 = br.ReadByte();
 
             // Decode time delta (bits 0-2 of byte1)
+            // Based on NinjaTrader NCD format:
+            // 0b000 = 0 (no change)
+            // 0b001 = 1 byte delta in ticks
+            // 0b010 = 2 byte big-endian delta in ticks
+            // 0b011 = 4 byte big-endian delta in ticks
+            // 0b100 = 8 byte big-endian delta in ticks
+            // 0b101 = 1 byte delta in seconds
+            // 0b110 = 2 byte big-endian delta in seconds
+            // 0b111 = 4 byte big-endian delta in seconds
             int timeFlags = byte1 & 0b111;
             long timeDelta = timeFlags switch
             {
@@ -190,7 +199,9 @@ namespace ZerodhaDatafeedAdapter.Services.Simulation
                 0b011 => ReadBigEndianLong(br, 4),
                 0b100 => ReadBigEndianLong(br, 8),
                 0b101 => br.ReadByte() * TimeSpan.TicksPerSecond,
-                _ => throw new Exception($"Unknown time flag: {timeFlags}"),
+                0b110 => ReadBigEndianLong(br, 2) * TimeSpan.TicksPerSecond,
+                0b111 => ReadBigEndianLong(br, 4) * TimeSpan.TicksPerSecond,
+                _ => throw new InvalidOperationException($"Unknown time flag: {timeFlags}")
             };
             timeTicks += timeDelta;
 

@@ -395,11 +395,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             // 8=PriorEOD header, 9=D2Rng, 10=D2%, 11=D3Rng, 12=D3%, 13=D4Rng, 14=D4%, 15=yearly
             for (int i = 0; i < 16; i++) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-            // Column headers
-            AddCompHeaderCell(grid, 0, 1, "1D");
-            AddCompHeaderCell(grid, 0, 2, "3D");
-            AddCompHeaderCell(grid, 0, 3, "5D");
-            AddCompHeaderCell(grid, 0, 4, "10D");
+            // Column headers with date ranges
+            AddCompHeaderCellWithDate(grid, 0, 1, "1D", "VPMetrics.DateRange1D");
+            AddCompHeaderCellWithDate(grid, 0, 2, "3D", "VPMetrics.DateRange3D");
+            AddCompHeaderCellWithDate(grid, 0, 3, "5D", "VPMetrics.DateRange5D");
+            AddCompHeaderCellWithDate(grid, 0, 4, "10D", "VPMetrics.DateRange10D");
 
             // POC row
             AddCompRowLabel(grid, 1, "POC");
@@ -550,6 +550,47 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             Grid.SetRow(tb, row);
             Grid.SetColumn(tb, col);
             grid.Children.Add(tb);
+        }
+
+        /// <summary>
+        /// Adds a composite header cell with a label and a data-bound date range.
+        /// Shows as "1D\n(13-Jan)" or "3D\n(10-Jan to 13-Jan)"
+        /// </summary>
+        private static void AddCompHeaderCellWithDate(Grid grid, int row, int col, string label, string dateBindingPath)
+        {
+            var panel = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 2, 0, 2)
+            };
+
+            // Label (1D, 3D, etc.)
+            var labelTb = new TextBlock
+            {
+                Text = label,
+                FontFamily = _ntFont,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(180, 180, 180)),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            panel.Children.Add(labelTb);
+
+            // Date range (bound)
+            var dateTb = new TextBlock
+            {
+                FontFamily = _ntFont,
+                FontSize = 8,
+                Foreground = new SolidColorBrush(Color.FromRgb(130, 130, 130)),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            dateTb.SetBinding(TextBlock.TextProperty, new Binding(dateBindingPath));
+            panel.Children.Add(dateTb);
+
+            Grid.SetRow(panel, row);
+            Grid.SetColumn(panel, col);
+            grid.Children.Add(panel);
         }
 
         private static void AddCompRowLabel(Grid grid, int row, string label)

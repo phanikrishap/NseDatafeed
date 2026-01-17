@@ -11,6 +11,7 @@ using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.MarketData;
 using ZerodhaDatafeedAdapter.Services; // For HolidayCalendarService
+using ZerodhaDatafeedAdapter.Services.Simulation; // For SimulationTimeHelper
 using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Models; // For TickerData
 
@@ -94,6 +95,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         private string _yearlyHigh = "---", _yearlyLow = "---", _yearlyHighDate = "---", _yearlyLowDate = "---";
         private string _control = "---", _migration = "---";
         private string _dailyBarCount = "0";
+        private string _dateRange1D = "-", _dateRange3D = "-", _dateRange5D = "-", _dateRange10D = "-";
 
         // Prior EOD fields (D-2, D-3, D-4 ranges for each period)
         private string _d2Rng1D = "---", _d2Rng3D = "---", _d2Rng5D = "---", _d2Rng10D = "---";
@@ -180,6 +182,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         public string Control { get => _control; set { _control = value; OnPropertyChanged(nameof(Control)); } }
         public string Migration { get => _migration; set { _migration = value; OnPropertyChanged(nameof(Migration)); } }
         public string DailyBarCount { get => _dailyBarCount; set { _dailyBarCount = value; OnPropertyChanged(nameof(DailyBarCount)); } }
+
+        // Session Date Ranges for column headers
+        public string DateRange1D { get => _dateRange1D; set { _dateRange1D = value; OnPropertyChanged(nameof(DateRange1D)); } }
+        public string DateRange3D { get => _dateRange3D; set { _dateRange3D = value; OnPropertyChanged(nameof(DateRange3D)); } }
+        public string DateRange5D { get => _dateRange5D; set { _dateRange5D = value; OnPropertyChanged(nameof(DateRange5D)); } }
+        public string DateRange10D { get => _dateRange10D; set { _dateRange10D = value; OnPropertyChanged(nameof(DateRange10D)); } }
 
         // Prior EOD Properties (D-2, D-3, D-4)
         public string D2Rng1D { get => _d2Rng1D; set { _d2Rng1D = value; OnPropertyChanged(nameof(D2Rng1D)); } }
@@ -442,9 +450,19 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 vm.D4Pct3D = comp.D4_3DVsAvg > 0 ? $"{comp.D4_3DVsAvg:F0}%" : "---";
                 vm.D4Pct5D = comp.D4_5DVsAvg > 0 ? $"{comp.D4_5DVsAvg:F0}%" : "---";
                 vm.D4Pct10D = comp.D4_10DVsAvg > 0 ? $"{comp.D4_10DVsAvg:F0}%" : "---";
+
+                // Session date ranges for column headers
+                vm.DateRange1D = !string.IsNullOrEmpty(comp.DateRange1D) ? comp.DateRange1D : "-";
+                vm.DateRange3D = !string.IsNullOrEmpty(comp.DateRange3D) ? comp.DateRange3D : "-";
+                vm.DateRange5D = !string.IsNullOrEmpty(comp.DateRange5D) ? comp.DateRange5D : "-";
+                vm.DateRange10D = !string.IsNullOrEmpty(comp.DateRange10D) ? comp.DateRange10D : "-";
             }
 
-            vm.Status = $" - Updated {metrics.LastUpdate:HH:mm:ss}";
+            // Use simulation time when in simulation mode, otherwise use LastUpdate from metrics
+            DateTime displayTime = SimulationTimeHelper.IsSimulationActive
+                ? SimulationTimeHelper.Now
+                : metrics.LastUpdate;
+            vm.Status = $" - Updated {displayTime:HH:mm:ss}";
         }
         
         private void OnTickerUpdated(string symbol)

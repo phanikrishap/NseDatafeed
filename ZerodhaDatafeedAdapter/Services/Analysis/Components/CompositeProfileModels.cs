@@ -230,5 +230,18 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public string Symbol { get; set; }
         public bool IsValid { get; set; }
         public int DailyBarCount { get; set; }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // SESSION DATE RANGES FOR UI DISPLAY
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>Date range for 1D column (single day)</summary>
+        public string DateRange1D { get; set; }
+        /// <summary>Date range for 3D column</summary>
+        public string DateRange3D { get; set; }
+        /// <summary>Date range for 5D column</summary>
+        public string DateRange5D { get; set; }
+        /// <summary>Date range for 10D column</summary>
+        public string DateRange10D { get; set; }
     }
 }

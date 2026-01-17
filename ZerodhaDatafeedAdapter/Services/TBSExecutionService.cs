@@ -17,6 +17,7 @@ using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.TBS;
 using ZerodhaDatafeedAdapter.Services.Telegram;
 using ZerodhaDatafeedAdapter.Services.Trading;
+using ZerodhaDatafeedAdapter.Services.Simulation;
 using ZerodhaDatafeedAdapter.Models.Reactive;
 
 namespace ZerodhaDatafeedAdapter.Services
@@ -382,9 +383,9 @@ namespace ZerodhaDatafeedAdapter.Services
 
             var configs = TBSConfigurationService.Instance.GetConfigurations(underlying, dte);
 
-            // ALWAYS use real system time for TBS status logic
-            var isSimulationActive = SimulationService.Instance.IsSimulationActive;
-            var now = DateTime.Now.TimeOfDay;
+            // Use simulation time when in simulation mode, real time otherwise
+            var isSimulationActive = SimulationTimeHelper.IsSimulationActive;
+            var now = SimulationTimeHelper.TimeOfDay;
 
             foreach (var config in configs)
             {
@@ -560,8 +561,9 @@ namespace ZerodhaDatafeedAdapter.Services
         {
             if (!_optionChainReady) return;
 
-            var isSimulationActive = SimulationService.Instance.IsSimulationActive;
-            var now = DateTime.Now.TimeOfDay;
+            // Use simulation time when in simulation mode, real time otherwise
+            var isSimulationActive = SimulationTimeHelper.IsSimulationActive;
+            var now = SimulationTimeHelper.TimeOfDay;
 
             foreach (var state in _executionStates)
             {
@@ -638,7 +640,7 @@ namespace ZerodhaDatafeedAdapter.Services
             {
                 if (state.ActualEntryTime.HasValue)
                 {
-                    var elapsed = DateTime.Now - state.ActualEntryTime.Value;
+                    var elapsed = SimulationTimeHelper.Now - state.ActualEntryTime.Value;
                     if (elapsed.TotalSeconds >= 10)
                     {
                         ReconcileStoxxoLegsAsync(state).SafeFireAndForget("TBS.ReconcileStoxxoLegs");
@@ -721,7 +723,7 @@ namespace ZerodhaDatafeedAdapter.Services
 
             if (state.ActualEntryTime.HasValue)
             {
-                var elapsed = DateTime.Now - state.ActualEntryTime.Value;
+                var elapsed = SimulationTimeHelper.Now - state.ActualEntryTime.Value;
                 if (elapsed.TotalSeconds >= 10)
                 {
                     ReconcileStoxxoLegsAsync(state).SafeFireAndForget("TBS.ProcessStoxxoReconciliation");
@@ -770,7 +772,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     TBSLogger.Warn($"Tranche #{state.TrancheId} {leg.OptionType} SL TRIGGERED");
                     leg.Status = TBSLegStatus.SLHit;
                     leg.ExitPrice = leg.CurrentPrice;
-                    leg.ExitTime = DateTime.Now;
+                    leg.ExitTime = SimulationTimeHelper.Now;
                     leg.ExitReason = $"SL Hit @ {leg.CurrentPrice:F2}";
                     anyLegHitSLThisTick = true;
 
@@ -808,7 +810,7 @@ namespace ZerodhaDatafeedAdapter.Services
             {
                 state.Status = TBSExecutionStatus.SquaredOff;
                 state.Message = state.TargetHit ? "All legs exited (Target)" : "All legs exited (SL)";
-                state.ExitTime = DateTime.Now;
+                state.ExitTime = SimulationTimeHelper.Now;
             }
         }
 
@@ -829,7 +831,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     {
                         leg.Status = TBSLegStatus.SLHit;
                         leg.ExitPrice = leg.CurrentPrice;
-                        leg.ExitTime = DateTime.Now;
+                        leg.ExitTime = SimulationTimeHelper.Now;
                         leg.ExitReason = "Combined SL Hit";
                     }
 
@@ -856,7 +858,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 {
                     leg.Status = TBSLegStatus.TargetHit;
                     leg.ExitPrice = leg.CurrentPrice;
-                    leg.ExitTime = DateTime.Now;
+                    leg.ExitTime = SimulationTimeHelper.Now;
                     leg.ExitReason = $"Target Hit @ P&L={state.CombinedPnL:F2}";
                 }
                 state.TargetHit = true;
@@ -925,7 +927,7 @@ namespace ZerodhaDatafeedAdapter.Services
         private void LockStrikeAndEnter(TBSExecutionState state)
         {
             state.StrikeLocked = true;
-            state.ActualEntryTime = DateTime.Now;
+            state.ActualEntryTime = SimulationTimeHelper.Now;
 
             foreach (var leg in state.Legs)
             {
@@ -972,7 +974,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     if (exitPrice > 0)
                     {
                         leg.ExitPrice = exitPrice;
-                        leg.ExitTime = DateTime.Now;
+                        leg.ExitTime = SimulationTimeHelper.Now;
                         leg.ExitReason = "Time-based exit";
                         leg.Status = TBSLegStatus.Exited;
                     }
