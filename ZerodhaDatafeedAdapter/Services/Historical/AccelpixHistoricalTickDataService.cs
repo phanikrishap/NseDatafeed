@@ -121,7 +121,13 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 // Create API client and initialize provider
                 _apiClient = new AccelpixApiClient(_apiKey);
                 _provider = ServiceFactory.GetAccelpixProvider(_apiClient);
-                _ = _provider.InitializeAsync(_apiKey, null); // Initialize provider with API key
+
+                bool providerInitialized = _provider.InitializeAsync(_apiKey, null).GetAwaiter().GetResult();
+                if (!providerInitialized)
+                {
+                    HistoricalTickLogger.Error("[AccelpixHistoricalTickDataService] Provider initialization failed");
+                    return;
+                }
 
                 // Initialize persistence and NT8 adapter
                 _persistence = ServiceFactory.GetTickPersistence();

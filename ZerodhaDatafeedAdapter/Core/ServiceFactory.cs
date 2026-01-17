@@ -1,3 +1,4 @@
+using System;
 using ZerodhaDatafeedAdapter.Services.Historical;
 using ZerodhaDatafeedAdapter.Services.Historical.Adapters;
 using ZerodhaDatafeedAdapter.Services.Historical.Persistence;
@@ -21,6 +22,8 @@ namespace ZerodhaDatafeedAdapter.Core
         {
             if (_accelpixProvider == null)
             {
+                if (apiClient == null)
+                    throw new ArgumentNullException(nameof(apiClient), "AccelpixApiClient is required for provider initialization");
                 _accelpixProvider = new AccelpixHistoricalDataProvider(apiClient);
             }
             return _accelpixProvider;
