@@ -12,9 +12,29 @@ namespace ZerodhaDatafeedAdapter.Services.Trading
     /// </summary>
     public class PnLTracker
     {
-        private readonly ConcurrentDictionary<int, TBSExecutionState> _executionStates;
+        private ConcurrentDictionary<int, TBSExecutionState> _executionStates;
 
+        /// <summary>
+        /// Default constructor for ServiceFactory creation.
+        /// Must call Initialize() before use.
+        /// </summary>
+        public PnLTracker()
+        {
+        }
+
+        /// <summary>
+        /// Legacy constructor for direct instantiation.
+        /// </summary>
         public PnLTracker(ConcurrentDictionary<int, TBSExecutionState> executionStates)
+        {
+            _executionStates = executionStates ?? throw new ArgumentNullException(nameof(executionStates));
+        }
+
+        /// <summary>
+        /// Initializes the tracker with execution states.
+        /// Called by TBSExecutionService after getting instance from ServiceFactory.
+        /// </summary>
+        public void Initialize(ConcurrentDictionary<int, TBSExecutionState> executionStates)
         {
             _executionStates = executionStates ?? throw new ArgumentNullException(nameof(executionStates));
         }

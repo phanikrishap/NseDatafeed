@@ -1,5 +1,6 @@
 using System;
 using System.Threading.Tasks;
+using ZerodhaDatafeedAdapter.Core;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.TBS;
@@ -28,7 +29,8 @@ namespace ZerodhaDatafeedAdapter.Services.Trading
 
         public StoxxoOrderRouter()
         {
-            _bridgeManager = new StoxxoBridgeManager();
+            // Get shared StoxxoBridgeManager from ServiceFactory
+            _bridgeManager = ServiceFactory.GetStoxxoBridgeManager();
         }
 
         /// <summary>

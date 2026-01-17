@@ -9,6 +9,7 @@ using System.Reactive.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using System.Windows.Threading;
+using ZerodhaDatafeedAdapter.Core;
 using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
@@ -181,15 +182,18 @@ namespace ZerodhaDatafeedAdapter.Services
         {
             _executionStates = new ObservableCollection<TBSExecutionState>();
             _executionStateDict = new ConcurrentDictionary<int, TBSExecutionState>();
-            _pnlTracker = new PnLTracker(_executionStateDict);
-            _orderRouter = new StoxxoOrderRouter();
-            _tradingContext = new TradingContext();
+
+            // Get dependencies from ServiceFactory (centralized dependency management)
+            _pnlTracker = ServiceFactory.GetPnLTracker();
+            _pnlTracker.Initialize(_executionStateDict); // Initialize with execution state dictionary
+            _orderRouter = ServiceFactory.GetOrderRouter();
+            _tradingContext = ServiceFactory.GetTradingContext();
             _delayCountdown = FALLBACK_DELAY_SECONDS;
 
             // Subscribe to PriceSyncReady event for event-driven initialization
             SubscribeToPriceSyncReady();
 
-            TBSLogger.Info("[TBSExecutionService] Initialized with new architecture");
+            TBSLogger.Info("[TBSExecutionService] Initialized with new architecture using ServiceFactory");
         }
 
         /// <summary>

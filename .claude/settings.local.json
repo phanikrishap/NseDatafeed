@@ -145,7 +145,8 @@
       "Bash(Select-Object -First 1)",
       "Bash(ForEach-Object { $_FullName })",
       "Bash(msbuild:*)",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -File build-and-deploy.ps1)"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File build-and-deploy.ps1)",
+      "Bash(test:*)"
     ]
   }
 }

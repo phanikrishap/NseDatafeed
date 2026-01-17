@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models;
+using ZerodhaDatafeedAdapter.Core;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
@@ -454,10 +455,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             _signals = signals;
             _dispatcher = dispatcher;
 
-            // Initialize new architecture components
-            _notificationService = new CompositeNotificationService();
-            _executionBridge = new SignalExecutionBridge();
-            _signalContext = new SignalContext();
+            // Get dependencies from ServiceFactory (centralized dependency management)
+            _notificationService = ServiceFactory.GetNotificationService();
+            _executionBridge = ServiceFactory.GetExecutionBridge();
+            _signalContext = ServiceFactory.GetSignalContext();
 
             // Initialize underlying bar history (default to NIFTY)
             _underlyingBarHistory = new UnderlyingBarHistory("NIFTY_I", 256);
@@ -465,7 +466,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             // Register default strategies
             _strategies.Add(new HvnBuySellStrategy());
 
-            _log.Info("[SignalsOrchestrator] Initialized with new architecture and default strategies");
+            _log.Info("[SignalsOrchestrator] Initialized with new architecture using ServiceFactory and default strategies");
             _notificationService.NotifyInfo("SignalsOrchestrator initialized");
         }
 
