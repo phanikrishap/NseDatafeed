@@ -859,19 +859,21 @@ namespace ZerodhaDatafeedAdapter.Services
 
             // Process ticks up to _targetSimTime, but limit to MAX_TICKS_PER_CALLBACK to prevent UI freeze
             int ticksInjected = 0;
+            DateTime lastTickTime = _currentSimTime;
+
             while (_currentTickIndex < _tickTimeline.Count && ticksInjected < MAX_TICKS_PER_CALLBACK)
             {
                 var tick = _tickTimeline[_currentTickIndex];
 
                 if (tick.Time <= _targetSimTime)
                 {
-                    // Inject this tick
+                    // Inject this tick - these are fast dictionary updates
                     MarketAnalyzerLogic.Instance.UpdateOptionPrice(tick.Symbol, (decimal)tick.Price, tick.Time);
                     SubscriptionManager.Instance.InjectSimulatedPrice(tick.Symbol, tick.Price, tick.Time);
 
                     _currentTickIndex++;
                     ticksInjected++;
-                    CurrentSimTime = tick.Time;
+                    lastTickTime = tick.Time;
                 }
                 else
                 {
@@ -882,17 +884,27 @@ namespace ZerodhaDatafeedAdapter.Services
 
             if (ticksInjected > 0)
             {
-                PricesInjectedCount += ticksInjected;
+                // Update backing fields directly to avoid triggering PublishStateUpdate() per tick
+                // This prevents thousands of Rx emissions per second
+                _currentSimTime = lastTickTime;
+                _pricesInjectedCount += ticksInjected;
 
-                // Update ATM periodically
-                if (PricesInjectedCount % 100 == 0)
+                // Update ATM periodically (every 500 ticks to reduce overhead)
+                if (_pricesInjectedCount % 500 == 0)
                 {
                     UpdateATMStrike();
                 }
+
+                // Single UI update at the end of processing this batch
+                // This replaces multiple property notifications with one consolidated update
+                OnPropertyChanged(nameof(CurrentSimTime));
+                OnPropertyChanged(nameof(CurrentSimTimeDisplay));
+                OnPropertyChanged(nameof(PricesInjectedCount));
+                OnPropertyChanged(nameof(Progress));
+                PublishStateUpdate();
             }
 
             _lastTickTime = now;
-            OnPropertyChanged(nameof(Progress));
         }
 
         /// <summary>
