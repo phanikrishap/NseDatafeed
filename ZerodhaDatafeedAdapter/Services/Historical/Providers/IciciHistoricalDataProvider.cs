@@ -14,7 +14,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical.Providers
     public class IciciHistoricalDataProvider : IHistoricalDataProvider
     {
         private const string BASE_URL_V2 = "https://breezeapi.icicidirect.com/api/v2/";
-        private const int RATE_LIMIT_DELAY_MS = 500;
 
         private string _apiKey;
         private string _apiSecret;

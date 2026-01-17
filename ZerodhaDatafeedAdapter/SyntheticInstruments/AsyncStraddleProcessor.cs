@@ -86,7 +86,6 @@ namespace ZerodhaDatafeedAdapter.SyntheticInstruments
         private const int QUEUE_CAPACITY_PER_SHARD = 2500; // 10000 / 4 shards
         private const int NUM_SHARDS = 4; // Number of processing shards
         private const int MAX_BATCH_SIZE = 100;
-        private const int BATCH_TIMEOUT_MS = 5; // 5ms max delay for low-latency
 
         private readonly ZerodhaAdapter _adapter;
         private volatile bool _isDisposed = false;

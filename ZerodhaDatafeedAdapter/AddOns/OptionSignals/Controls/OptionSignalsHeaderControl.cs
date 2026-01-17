@@ -14,7 +14,6 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Controls
         private static readonly SolidColorBrush _fgColor = new SolidColorBrush(Color.FromRgb(212, 212, 212));
         private static readonly SolidColorBrush _headerBg = new SolidColorBrush(Color.FromRgb(37, 37, 38));
         private static readonly SolidColorBrush _borderColor = new SolidColorBrush(Color.FromRgb(51, 51, 51));
-        private static readonly FontFamily _ntFont = new FontFamily("Segoe UI");
 
         public string Underlying { set => _lblUnderlying.Text = value; }
         public string Expiry { set => _lblExpiry.Text = value; }

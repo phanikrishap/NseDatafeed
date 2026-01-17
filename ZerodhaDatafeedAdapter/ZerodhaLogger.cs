@@ -104,22 +104,6 @@ namespace ZerodhaDatafeedAdapter
             return LogSettingsManager.GetLogLevel(LogDomain.Main);
         }
 
-        /// <summary>
-        /// Parses a log level string to log4net Level.
-        /// </summary>
-        private static Level ParseLogLevel(string level)
-        {
-            return level?.ToUpperInvariant() switch
-            {
-                "DEBUG" => Level.Debug,
-                "INFO" => Level.Info,
-                "WARN" or "WARNING" => Level.Warn,
-                "ERROR" => Level.Error,
-                "FATAL" => Level.Fatal,
-                _ => Level.Info
-            };
-        }
-
         public static void Initialize()
         {
             // Ensure initialization happens only once

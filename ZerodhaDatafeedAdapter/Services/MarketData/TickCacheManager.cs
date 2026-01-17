@@ -20,7 +20,6 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
     public class TickCacheManager
     {
         private readonly ConcurrentDictionary<string, ZerodhaTickData> _lastTickCache = new ConcurrentDictionary<string, ZerodhaTickData>();
-        private const int MaxCacheSize = 25000;
         private readonly ConcurrentDictionary<string, bool> _initializedCallbacks = new ConcurrentDictionary<string, bool>();
         private readonly int _maxTickCacheSize;
         private readonly TimeZoneInfo _istTimeZone;

@@ -45,7 +45,6 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private readonly InstrumentManager _instrumentManager;
         private readonly WebSocketManager _webSocketManager;
         private readonly ConfigurationManager _configManager;
-        private readonly ConcurrentDictionary<string, int> _lastVolumeMap = new ConcurrentDictionary<string, int>(); // Added for volumeDelta
 
         // OPTIMIZATION: Centralized tick processor for high-performance processing
         private OptimizedTickProcessor _tickProcessor;
@@ -220,88 +219,6 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             }
             cts.Cancel();
             cts.Dispose();
-        }
-
-        /// <summary>
-        /// Processes a market depth packet
-        /// </summary>
-        /// <param name="data">The binary data</param>
-        /// <param name="offset">The offset in the data</param>
-        /// <param name="packetLength">The packet length</param>
-        /// <param name="nativeSymbolName">The native symbol name</param>
-        /// <param name="l2Subscriptions">The L2 subscriptions dictionary</param>
-        private void ProcessDepthPacket(byte[] data, int offset, int packetLength, string nativeSymbolName,
-            ConcurrentDictionary<string, L2Subscription> l2Subscriptions)
-        {
-            try
-            {
-                // Get the instrument token
-                int iToken = ZerodhaAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt32BE(data, offset);
-
-                // Get segment information for MCX check
-                string segment = _instrumentManager.GetSegmentForToken(iToken);
-                bool isMcxSegment = !string.IsNullOrEmpty(segment) && segment.Equals("MCX", StringComparison.OrdinalIgnoreCase);
-
-                // Parse the binary message into a rich data structure
-                // Note: Market depth packets are only for tradeable instruments (not indices), so isIndex is always false here
-                var tickData = _webSocketManager.ParseBinaryMessage(data, iToken, nativeSymbolName, isMcxSegment, isIndex: false);
-
-                if (tickData == null || !tickData.HasMarketDepth)
-                {
-                    // POOL FIX: Return tickData to pool if we're not using it
-                    if (tickData != null)
-                        ZerodhaTickDataPool.Return(tickData);
-                    return;
-                }
-
-                try
-                {
-                    // Get the current time in Indian Standard Time
-                    // OPTIMIZATION: Use cached TimeZone to avoid FindSystemTimeZoneById in hot path
-                    DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, Constants.IndianTimeZone);
-
-                    // Update market depth in NinjaTrader
-                    if (l2Subscriptions.TryGetValue(nativeSymbolName, out var l2Subscription))
-                    {
-                        // Use thread-safe snapshot for iteration
-                        foreach (var callbackKvp in l2Subscription.GetCallbacksSnapshot())
-                        {
-                            var instrument = callbackKvp.Key;
-                            var callback = callbackKvp.Value;
-
-                            // Process asks (offers)
-                            foreach (var ask in tickData.AskDepth)
-                            {
-                                if (ask != null && ask.Quantity > 0)
-                                {
-                                    instrument.UpdateMarketDepth(
-                                        MarketDataType.Ask, ask.Price, ask.Quantity, Operation.Update, now, callback);
-                                }
-                            }
-
-                            // Process bids
-                            foreach (var bid in tickData.BidDepth)
-                            {
-                                if (bid != null && bid.Quantity > 0)
-                                {
-                                    instrument.UpdateMarketDepth(
-                                        MarketDataType.Bid, bid.Price, bid.Quantity, Operation.Update, now, callback);
-                                }
-                            }
-                        }
-                    }
-                }
-                finally
-                {
-                    // POOL FIX: Always return tickData to pool after processing depth data
-                    ZerodhaTickDataPool.Return(tickData);
-                }
-            }
-            catch (Exception ex)
-            {
-                NinjaTrader.NinjaScript.NinjaScript.Log($"[DEPTH PACKET] Exception: {ex.Message}",
-                    NinjaTrader.Cbi.LogLevel.Error);
-            }
         }
 
         /// <summary>

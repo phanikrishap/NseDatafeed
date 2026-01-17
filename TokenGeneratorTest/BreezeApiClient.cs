@@ -441,19 +441,6 @@ namespace TokenGeneratorTest
             }
         }
 
-        private string CalculateChecksum(string timestamp, string bodyJson)
-        {
-            var data = timestamp + bodyJson + _apiSecret;
-            using (var sha256 = SHA256.Create())
-            {
-                var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(data));
-                var builder = new StringBuilder();
-                foreach (var b in bytes)
-                    builder.Append(b.ToString("x2"));
-                return builder.ToString();
-            }
-        }
-
         private string FormatDateTime(DateTime dt)
         {
             // Format: 2022-08-15T09:15:00.000Z

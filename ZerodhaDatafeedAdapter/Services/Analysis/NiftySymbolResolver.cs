@@ -11,8 +11,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
     /// </summary>
     public class NiftySymbolResolver
     {
-        private const string NIFTY_I_SYMBOL = "Nifty 50"; // Use the actual symbol if known, else usage indicates "NIFTY_I"
-
         public NiftySymbolResolver()
         {
         }
