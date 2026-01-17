@@ -17,7 +17,6 @@ namespace ZerodhaDatafeedAdapter.Services
         public static HolidayCalendarService Instance => _instance.Value;
 
         private HashSet<DateTime> _holidays = new HashSet<DateTime>();
-        private bool _isLoaded = false;
 
         private HolidayCalendarService()
         {
@@ -48,7 +47,6 @@ namespace ZerodhaDatafeedAdapter.Services
                             _holidays.Add(holidayDate.Date);
                         }
                     }
-                    _isLoaded = true;
                     Logger.Info($"[HolidayCalendarService] Loaded {_holidays.Count} holidays for year {calendar.year}");
                 }
             }

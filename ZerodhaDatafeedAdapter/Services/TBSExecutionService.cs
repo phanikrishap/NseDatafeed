@@ -171,7 +171,6 @@ namespace ZerodhaDatafeedAdapter.Services
 
         public event PropertyChangedEventHandler PropertyChanged;
         public event EventHandler<TBSExecutionState> StateChanged;
-        public event EventHandler<string> StatusMessageChanged;
         public event EventHandler SummaryUpdated;
 
         #endregion

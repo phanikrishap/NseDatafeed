@@ -66,10 +66,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         public decimal GetATMStrike(string underlying) => _atmStrikes.TryGetValue(underlying, out var strike) ? strike : 0;
 
-        public async Task<List<MappedInstrument>> GenerateOptionsAsync(string underlying, double currentPrice, DateTime expiry, int strikeCount = 10)
+        public Task<List<MappedInstrument>> GenerateOptionsAsync(string underlying, double currentPrice, DateTime expiry, int strikeCount = 10)
         {
             Logger.Info($"[OGS] Generating options for {underlying} @ {currentPrice}, Expiry: {expiry:dd-MMM-yyyy}");
-            
+
             var options = new List<MappedInstrument>();
             int lotSize = InstrumentManager.Instance.GetLotSizeForUnderlying(underlying);
             if (lotSize == 0) lotSize = 50; // Fallback
@@ -82,7 +82,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             for (int i = -strikeCount; i <= strikeCount; i++)
             {
                 double strike = atmStrike + (i * strikeStep);
-                
+
                 // Generate CE and PE
                 foreach (var type in new[] { "CE", "PE" })
                 {
@@ -105,7 +105,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             }
 
             Logger.Info($"[OGS] Generated {options.Count} options for {underlying}");
-            return options;
+            return Task.FromResult(options);
         }
 
         public class OptionSelectionResult

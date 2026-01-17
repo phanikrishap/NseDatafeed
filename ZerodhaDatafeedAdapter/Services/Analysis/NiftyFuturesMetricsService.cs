@@ -79,7 +79,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private int _lastBarIndex = -1;
         private DateTime _sessionStart = DateTime.MinValue;
         private DateTime _lastSessionDate = DateTime.MinValue;
-        private bool _isHistoricalPhaseComplete = false; // Could potentially remove if state is managed better
         private bool _isLivePhaseActive = false;
 
         // Simulation replay state
@@ -329,7 +328,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 _lastPrice = 0;
 
                 _simDataReady = true;
-                _isHistoricalPhaseComplete = true;
 
                 // Subscribe to simulation tick stream for progressive updates
                 SubscribeToSimulationTicks();
@@ -603,7 +601,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             // Process historical VP
             ProcessHistoricalVolumeProfile();
 
-            _isHistoricalPhaseComplete = true;
             _isLivePhaseActive = true;
 
             await SetupLiveUpdateHandler();

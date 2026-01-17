@@ -445,10 +445,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         // Replay mode - disables duplicate signal check and throttling
         private bool _isReplayMode = false;
 
-        // Position tracking for auto-exit (CE and PE tracked separately)
+        // Position tracking for auto-exit
         private bool _autoExitEnabled = true;
-        private SignalRow _activeCELongPosition;
-        private SignalRow _activePELongPosition;
 
         public SignalsOrchestrator(ObservableCollection<SignalRow> signals, Dispatcher dispatcher)
         {
@@ -517,10 +515,6 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                         hvnStrategy.SetReplayMode(true);
                     }
                 }
-
-                // Clear position tracking
-                _activeCELongPosition = null;
-                _activePELongPosition = null;
             }
             else
             {

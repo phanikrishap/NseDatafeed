@@ -81,8 +81,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public event Action<string, string> HistoricalDataStatusChanged;
         public event Action<List<MappedInstrument>> OptionsGenerated;
         public event Action PriceSyncReady;
+        #pragma warning disable CS0067 // Events reserved for future use
         public event Action<string, double> OptionPriceUpdated;
         public event Action<string, double> PriceUpdated;
+        #pragma warning restore CS0067
 
         private bool _priceSyncFired = false;
         /// <summary>

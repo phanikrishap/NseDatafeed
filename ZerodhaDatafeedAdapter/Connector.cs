@@ -391,7 +391,9 @@ namespace ZerodhaDatafeedAdapter
                 return false;
             }
 
+            #pragma warning disable CS0618 // Intentional use of synchronous method in sync context
             if (!_zerodhaClient.CheckConnection())
+            #pragma warning restore CS0618
             {
                 StartupLogger.LogConnectionCheck(false, "Zerodha API");
                 return false;
@@ -473,7 +475,9 @@ namespace ZerodhaDatafeedAdapter
                 return false;
             }
 
+            #pragma warning disable CS0618 // Intentional use of synchronous method in sync context
             if (!_zerodhaClient.CheckConnection())
+            #pragma warning restore CS0618
                 return false;
 
             this.IsConnected = true;

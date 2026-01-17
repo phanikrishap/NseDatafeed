@@ -37,8 +37,6 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private long _totalCallbackTimeMs = 0;
         private long _slowCallbacks = 0;
         private long _verySlowCallbacks = 0;
-        private long _optionTickLogCounter = 0;
-        private long _optionCallbackFiredCounter = 0;
         private long _noCallbackLogCounter = 0;
 
         public long TicksProcessed => Interlocked.Read(ref _ticksProcessed);

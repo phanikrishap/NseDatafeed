@@ -8,9 +8,30 @@ $SourceDll = "d:\CascadeProjects\NseDatafeed_new\ZerodhaDatafeedAdapter\bin\Debu
 $SourceApiDll = "d:\CascadeProjects\NseDatafeed_new\ZerodhaAPI\bin\Debug\ZerodhaAPI.dll"
 $DestDll = "C:\Users\Phani Krishna\Documents\NinjaTrader 8\bin\Custom\ZerodhaDatafeedAdapter.dll"
 $DestApiDll = "C:\Users\Phani Krishna\Documents\NinjaTrader 8\bin\Custom\ZerodhaAPI.dll"
-$MSBuild = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
+# Find MSBuild
+$MSBuildPaths = @(
+    "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
+    "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
+    "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
+    "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
+    "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+)
+
+$MSBuild = $null
+foreach ($path in $MSBuildPaths) {
+    if (Test-Path $path) {
+        $MSBuild = $path
+        break
+    }
+}
+
+if (-not $MSBuild) {
+    Write-Host "ERROR: MSBuild not found!" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "=== ZerodhaDatafeedAdapter Build & Deploy ===" -ForegroundColor Cyan
+Write-Host "Using MSBuild: $MSBuild" -ForegroundColor Gray
 Write-Host ""
 
 # Step 1: Build
