@@ -162,8 +162,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 .Sample(TimeSpan.FromSeconds(1)) // Throttle to 1 update per second
                 .Subscribe(OnNiftyFuturesMetricsUpdate));
 
-            // Subscribe to SimulationService state changes for replay mode
-            SimulationService.Instance.StateChanged += OnSimulationStateChanged;
+            // Subscribe to simulation state changes via Rx stream (replaces legacy event)
+            // This ensures proper initialization order: Loading → Ready → Playing
+            _subscriptions.Add(hub.SimulationStateStream
+                .DistinctUntilChanged(s => s.State)
+                .ObserveOnDispatcher()
+                .Subscribe(s => OnSimulationStateChanged(s.State)));
 
             // Subscribe to ATM changes for fluid strike grid re-centering
             OptionGenerationService.Instance.ATMChanged += OnATMChanged;
@@ -253,43 +257,65 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         /// <summary>
         /// Handles simulation state changes to enable/disable replay mode.
+        /// Lifecycle: Loading → Ready → Playing → Paused/Stopped → Idle
         /// </summary>
         private void OnSimulationStateChanged(SimulationState newState)
         {
-            bool isSimulationActive = newState == SimulationState.Playing ||
-                                       newState == SimulationState.Paused ||
-                                       newState == SimulationState.Ready;
+            _log.Info($"[OptionSignalsViewModel] Simulation state changed: {newState}");
 
-            if (isSimulationActive)
+            switch (newState)
             {
-                // Get the simulation underlying from config
-                var simConfig = SimulationService.Instance.CurrentConfig;
-                string simUnderlying = simConfig?.Underlying ?? "NIFTY";
+                case SimulationState.Loading:
+                    // Simulation is loading tick data - prepare for fresh data
+                    _log.Info("[OptionSignalsViewModel] Simulation loading - clearing rows for fresh data");
+                    ClearAllRows();
+                    _signalsOrchestrator?.SetReplayMode(true);
+                    break;
 
-                // Reset underlying history if it's different from NIFTY (default)
-                if (!simUnderlying.Equals("NIFTY", StringComparison.OrdinalIgnoreCase))
-                {
-                    string underlyingSymbol = simUnderlying.Equals("SENSEX", StringComparison.OrdinalIgnoreCase)
-                        ? "SENSEX_I"
-                        : $"{simUnderlying}_I";
-                    _signalsOrchestrator?.ResetUnderlyingHistory(underlyingSymbol);
-                }
+                case SimulationState.Ready:
+                    // Tick data loaded - options will be published via OptionsGeneratedStream
+                    var simConfig = SimulationService.Instance.CurrentConfig;
+                    string simUnderlying = simConfig?.Underlying ?? "NIFTY";
 
-                _signalsOrchestrator?.SetReplayMode(true);
-                // Also notify compute service about simulation mode if needed, 
-                // though it likely checks SimulationService.Instance directly or via internal processors
-                
-                _log.Info($"[OptionSignalsViewModel] Simulation state changed to {newState} - replay mode enabled for {simUnderlying}");
-                TerminalService.Instance.Info($"Simulation mode active ({newState}) - taking all trades for {simUnderlying}");
+                    // Reset underlying history if it's different from NIFTY (default)
+                    if (!simUnderlying.Equals("NIFTY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string underlyingSymbol = simUnderlying.Equals("SENSEX", StringComparison.OrdinalIgnoreCase)
+                            ? "SENSEX_I"
+                            : $"{simUnderlying}_I";
+                        _signalsOrchestrator?.ResetUnderlyingHistory(underlyingSymbol);
+                    }
+
+                    _signalsOrchestrator?.SetReplayMode(true);
+                    _log.Info($"[OptionSignalsViewModel] Simulation ready - replay mode enabled for {simUnderlying}");
+                    TerminalService.Instance.Info($"Simulation ready - awaiting option chain for {simUnderlying}");
+                    break;
+
+                case SimulationState.Playing:
+                    _log.Info("[OptionSignalsViewModel] Simulation playing - receiving tick data");
+                    TerminalService.Instance.Info("Simulation playing - taking all trades");
+                    break;
+
+                case SimulationState.Paused:
+                    _log.Info("[OptionSignalsViewModel] Simulation paused");
+                    break;
+
+                case SimulationState.Idle:
+                case SimulationState.Completed:
+                case SimulationState.Error:
+                    _signalsOrchestrator?.SetReplayMode(false);
+                    // Reset back to NIFTY underlying for live mode
+                    _signalsOrchestrator?.ResetUnderlyingHistory("NIFTY_I");
+                    _log.Info($"[OptionSignalsViewModel] Simulation ended ({newState}) - replay mode disabled");
+                    TerminalService.Instance.Info("Live mode active - normal signal dedup enabled");
+                    break;
             }
-            else
-            {
-                _signalsOrchestrator?.SetReplayMode(false);
-                // Reset back to NIFTY underlying for live mode
-                _signalsOrchestrator?.ResetUnderlyingHistory("NIFTY_I");
-                _log.Info($"[OptionSignalsViewModel] Simulation state changed to {newState} - replay mode disabled");
-                TerminalService.Instance.Info($"Live mode active - normal signal dedup enabled");
-            }
+        }
+
+        private void ClearAllRows()
+        {
+            Rows.Clear();
+            Signals.Clear();
         }
 
         private void OnProjectedOpenReady(ProjectedOpenState state)

@@ -73,6 +73,15 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private bool _priceSyncPublished = false;
 
         // ═══════════════════════════════════════════════════════════════════
+        // SIMULATION STATE STREAM
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Simulation state stream - BehaviorSubject provides current state to late subscribers
+        // Modules subscribe here to react to simulation lifecycle: Idle → Loading → Ready → Playing → Paused/Stopped
+        private readonly BehaviorSubject<SimulationStateUpdate> _simulationStateSubject =
+            new BehaviorSubject<SimulationStateUpdate>(SimulationStateUpdate.Idle);
+
+        // ═══════════════════════════════════════════════════════════════════
         // TOKEN & INITIALIZATION STREAMS
         // ═══════════════════════════════════════════════════════════════════
 
@@ -247,6 +256,38 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// Gets the current initialization state synchronously.
         /// </summary>
         public InitializationState CurrentInitializationState => _initializationStateSubject.Value;
+
+        /// <summary>
+        /// Stream of simulation state updates. Uses BehaviorSubject so late subscribers
+        /// immediately receive the current state. Subscribe to react to simulation lifecycle:
+        /// Idle → Loading → Ready → Playing → Paused → Stopped/Completed
+        /// </summary>
+        public IObservable<SimulationStateUpdate> SimulationStateStream => _simulationStateSubject.AsObservable();
+
+        /// <summary>
+        /// Gets the current simulation state synchronously.
+        /// </summary>
+        public SimulationStateUpdate CurrentSimulationState => _simulationStateSubject.Value;
+
+        /// <summary>
+        /// Convenience stream that emits once when simulation reaches Ready state (data loaded).
+        /// Use this to perform initialization after tick data is available.
+        /// </summary>
+        public IObservable<SimulationStateUpdate> WhenSimulationReady => _simulationStateSubject
+            .Where(s => s.State == SimulationState.Ready)
+            .Take(1);
+
+        /// <summary>
+        /// Convenience stream that emits when simulation starts playing.
+        /// Use this to start processing ticks.
+        /// </summary>
+        public IObservable<SimulationStateUpdate> WhenSimulationPlaying => _simulationStateSubject
+            .Where(s => s.State == SimulationState.Playing);
+
+        /// <summary>
+        /// Returns true if currently in simulation mode (any state except Idle).
+        /// </summary>
+        public bool IsSimulationMode => _simulationStateSubject.Value.State != SimulationState.Idle;
 
         #endregion
 
@@ -651,6 +692,36 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             PublishInitializationState(state);
         }
 
+        /// <summary>
+        /// Publishes a simulation state update.
+        /// Called by SimulationService when simulation state changes.
+        /// Modules subscribe to SimulationStateStream to react to lifecycle events.
+        /// </summary>
+        /// <param name="state">The current simulation state</param>
+        public void PublishSimulationState(SimulationStateUpdate state)
+        {
+            if (state == null) return;
+
+            // Only log significant state changes, not every tick update
+            var currentState = _simulationStateSubject.Value;
+            if (currentState.State != state.State)
+            {
+                Logger.Info($"[MarketDataReactiveHub] SimulationState: {state.State} - {state.StatusMessage}");
+            }
+
+            SafeOnNext(_simulationStateSubject, state);
+        }
+
+        /// <summary>
+        /// Resets simulation state to Idle.
+        /// Called when simulation is stopped or reset.
+        /// </summary>
+        public void ResetSimulationState()
+        {
+            Logger.Info("[MarketDataReactiveHub] Resetting simulation state to Idle");
+            SafeOnNext(_simulationStateSubject, SimulationStateUpdate.Idle);
+        }
+
         #endregion
 
         #region Symbol Routing
@@ -863,6 +934,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             _tokenReadySubject.Dispose();
             _instrumentDbReadySubject.Dispose();
             _initializationStateSubject.Dispose();
+
+            // Simulation state stream
+            _simulationStateSubject.Dispose();
 
             Logger.Info("[MarketDataReactiveHub] Disposed");
         }

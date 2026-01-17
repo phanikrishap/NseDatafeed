@@ -980,6 +980,7 @@ namespace ZerodhaDatafeedAdapter.Services
         /// <summary>
         /// Publishes current state to the reactive StateStream.
         /// Call this whenever state or key properties change.
+        /// Also publishes to MarketDataReactiveHub for cross-module coordination.
         /// </summary>
         private void PublishStateUpdate()
         {
@@ -999,7 +1000,12 @@ namespace ZerodhaDatafeedAdapter.Services
                     Timestamp = DateTime.Now
                 };
 
+                // Publish to local StateStream (for SimulationEngineWindow binding)
                 _stateSubject.OnNext(update);
+
+                // Also publish to MarketDataReactiveHub for cross-module coordination
+                // This allows OptionChain, OptionSignals, TBS, and other modules to react to simulation lifecycle
+                MarketDataReactiveHub.Instance.PublishSimulationState(update);
             }
             catch (Exception ex)
             {

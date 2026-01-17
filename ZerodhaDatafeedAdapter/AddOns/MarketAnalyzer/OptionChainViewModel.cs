@@ -155,10 +155,53 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
 
             _subscriptions.Add(hub.StraddlePriceStream
                 .Buffer(TimeSpan.FromMilliseconds(200))
-                .Where(batch => batch.Count > 0) 
+                .Where(batch => batch.Count > 0)
                  // Note: Original code used buffer w/ count check implicitly via logic, keeping similar.
                 .ObserveOnDispatcher()
                 .Subscribe(OnStraddlePriceBatch, ex => Logger.Error($"[OptionChainViewModel] StraddlePrice error: {ex.Message}")));
+
+            // Subscribe to simulation state changes
+            // This allows the Option Chain to reset and prepare when simulation mode starts
+            _subscriptions.Add(hub.SimulationStateStream
+                .DistinctUntilChanged(s => s.State)
+                .ObserveOnDispatcher()
+                .Subscribe(OnSimulationStateChanged, ex => Logger.Error($"[OptionChainViewModel] SimulationState error: {ex.Message}")));
+        }
+
+        private void OnSimulationStateChanged(SimulationStateUpdate state)
+        {
+            Logger.Info($"[OptionChainViewModel] Simulation state changed: {state.State}");
+
+            switch (state.State)
+            {
+                case SimulationState.Loading:
+                    // Clear existing data when new simulation is loading
+                    Logger.Info("[OptionChainViewModel] Simulation loading - clearing rows for fresh data");
+                    ClearAllRows();
+                    break;
+
+                case SimulationState.Ready:
+                    // Data is loaded, options will be published via OptionsGeneratedStream
+                    Logger.Info("[OptionChainViewModel] Simulation ready - awaiting option chain data");
+                    break;
+
+                case SimulationState.Playing:
+                    Logger.Info("[OptionChainViewModel] Simulation playing - receiving tick data");
+                    break;
+
+                case SimulationState.Idle:
+                    // Simulation stopped/reset - could clear or keep data
+                    Logger.Info("[OptionChainViewModel] Simulation idle");
+                    break;
+            }
+        }
+
+        private void ClearAllRows()
+        {
+            Rows.Clear();
+            _symbolToRowMap.Clear();
+            _generatedToZerodhaMap.Clear();
+            _straddleSymbolToRowMap.Clear();
         }
 
         public void StopServices()

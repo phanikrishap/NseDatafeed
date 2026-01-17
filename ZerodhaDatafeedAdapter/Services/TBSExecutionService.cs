@@ -235,6 +235,11 @@ namespace ZerodhaDatafeedAdapter.Services
                 DelayCountdown = 0;
                 IsOptionChainReady = true;
             }
+
+            // Subscribe to simulation state changes
+            // This allows TBS to reset and prepare when simulation mode starts
+            SubscribeToSimulationState();
+
             // Event-Driven Optimization: Subscribe to Option Price Updates
             SubscribeToOptionPrices();
         }
@@ -256,6 +261,92 @@ namespace ZerodhaDatafeedAdapter.Services
                         ex => TBSLogger.Error($"[TBSExecutionService] OptionPriceStream error: {ex.Message}")));
                         
             TBSLogger.Info("[TBSExecutionService] Subscribed to OptionPriceBatchStream (Rx)");
+        }
+
+        /// <summary>
+        /// Subscribe to simulation state changes.
+        /// This allows TBS to reset and prepare when simulation mode starts.
+        /// </summary>
+        private void SubscribeToSimulationState()
+        {
+            var hub = MarketDataReactiveHub.Instance;
+
+            _rxSubscriptions.Add(
+                hub.SimulationStateStream
+                    .DistinctUntilChanged(s => s.State)
+                    .ObserveOnDispatcher()
+                    .Subscribe(
+                        state => OnSimulationStateChanged(state),
+                        ex => TBSLogger.Error($"[TBSExecutionService] SimulationStateStream error: {ex.Message}")));
+
+            TBSLogger.Info("[TBSExecutionService] Subscribed to SimulationStateStream (Rx)");
+        }
+
+        /// <summary>
+        /// Handles simulation state changes.
+        /// Resets TBS state when simulation starts loading, ensures readiness when simulation is ready.
+        /// </summary>
+        private void OnSimulationStateChanged(SimulationStateUpdate state)
+        {
+            TBSLogger.Info($"[TBSExecutionService] Simulation state changed: {state.State}");
+
+            switch (state.State)
+            {
+                case SimulationState.Loading:
+                    // Simulation is loading tick data - reset TBS state
+                    TBSLogger.Info("[TBSExecutionService] Simulation loading - resetting TBS for fresh simulation");
+                    ResetForSimulation();
+                    break;
+
+                case SimulationState.Ready:
+                    // Tick data loaded, options will be published
+                    TBSLogger.Info("[TBSExecutionService] Simulation ready - awaiting option chain and tranche configs");
+                    break;
+
+                case SimulationState.Playing:
+                    TBSLogger.Info("[TBSExecutionService] Simulation playing - processing ticks");
+                    break;
+
+                case SimulationState.Idle:
+                case SimulationState.Completed:
+                    TBSLogger.Info($"[TBSExecutionService] Simulation ended ({state.State})");
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Resets TBS state for a new simulation run.
+        /// Clears execution states but preserves configuration.
+        /// </summary>
+        private void ResetForSimulation()
+        {
+            lock (_mapLock)
+            {
+                // Clear symbol mappings
+                _symbolTrancheMap.Clear();
+            }
+
+            // Reset execution states to Idle (preserve configs)
+            foreach (var tranche in _executionStates.ToList())
+            {
+                tranche.Status = TBSExecutionStatus.Idle;
+                tranche.CombinedPnL = 0;
+                tranche.StoxxoPnL = 0;
+                tranche.TargetHit = false;
+                tranche.IsMissed = false;
+                tranche.SkippedDueToProfitCondition = false;
+
+                // Reset legs
+                foreach (var leg in tranche.Legs)
+                {
+                    leg.Status = TBSLegStatus.Pending;
+                    leg.EntryPrice = 0;
+                    leg.CurrentPrice = 0;
+                    leg.PnL = 0;
+                }
+            }
+
+            TBSLogger.Info("[TBSExecutionService] TBS reset for simulation");
         }
 
         /// <summary>
