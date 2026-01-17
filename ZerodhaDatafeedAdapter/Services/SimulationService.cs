@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Reactive.Linq;
+using System.Reactive.Subjects;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using System.Windows.Threading;
@@ -15,6 +17,7 @@ using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Instruments;
+using ZerodhaDatafeedAdapter.Services.Simulation;
 
 namespace ZerodhaDatafeedAdapter.Services
 {
@@ -50,6 +53,20 @@ namespace ZerodhaDatafeedAdapter.Services
         public event Action<string> StatusChanged;
         public event Action<SimulationState> StateChanged;
 
+        // Reactive state stream - subscribers receive current state and all updates
+        private readonly BehaviorSubject<SimulationStateUpdate> _stateSubject =
+            new BehaviorSubject<SimulationStateUpdate>(SimulationStateUpdate.Idle);
+
+        /// <summary>
+        /// Observable stream of simulation state updates.
+        /// New subscribers immediately receive the current state.
+        /// Use this for UI binding instead of PropertyChanged events.
+        /// </summary>
+        public IObservable<SimulationStateUpdate> StateStream => _stateSubject.AsObservable();
+
+        // Track total symbols for progress calculation
+        private int _totalSymbolsToLoad;
+
         // Loaded historical ticks indexed by symbol
         private readonly ConcurrentDictionary<string, List<TickData>> _loadedTicks = new ConcurrentDictionary<string, List<TickData>>();
 
@@ -82,6 +99,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     _state = value;
                     OnPropertyChanged();
                     StateChanged?.Invoke(value);
+                    PublishStateUpdate();
                 }
             }
         }
@@ -97,6 +115,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     _statusMessage = value;
                     OnPropertyChanged();
                     StatusChanged?.Invoke(value);
+                    PublishStateUpdate();
                 }
             }
         }
@@ -104,7 +123,7 @@ namespace ZerodhaDatafeedAdapter.Services
         public DateTime CurrentSimTime
         {
             get => _currentSimTime;
-            private set { _currentSimTime = value; OnPropertyChanged(); OnPropertyChanged(nameof(CurrentSimTimeDisplay)); OnPropertyChanged(nameof(Progress)); }
+            private set { _currentSimTime = value; OnPropertyChanged(); OnPropertyChanged(nameof(CurrentSimTimeDisplay)); OnPropertyChanged(nameof(Progress)); PublishStateUpdate(); }
         }
 
         public string CurrentSimTimeDisplay => CurrentSimTime != DateTime.MinValue ? CurrentSimTime.ToString("HH:mm:ss") : "--:--:--";
@@ -112,19 +131,19 @@ namespace ZerodhaDatafeedAdapter.Services
         public int LoadedSymbolCount
         {
             get => _loadedSymbolCount;
-            private set { _loadedSymbolCount = value; OnPropertyChanged(); }
+            private set { _loadedSymbolCount = value; OnPropertyChanged(); PublishStateUpdate(); }
         }
 
         public int TotalTickCount
         {
             get => _totalTickCount;
-            private set { _totalTickCount = value; OnPropertyChanged(); }
+            private set { _totalTickCount = value; OnPropertyChanged(); PublishStateUpdate(); }
         }
 
         public int PricesInjectedCount
         {
             get => _pricesInjectedCount;
-            private set { _pricesInjectedCount = value; OnPropertyChanged(); }
+            private set { _pricesInjectedCount = value; OnPropertyChanged(); PublishStateUpdate(); }
         }
 
         /// <summary>
@@ -246,23 +265,70 @@ namespace ZerodhaDatafeedAdapter.Services
                 // Generate option symbols
                 var symbols = GenerateOptionSymbols(config);
                 _optionSymbols.AddRange(symbols);
+                _totalSymbolsToLoad = symbols.Count;
                 _log.Info($"[SimulationService] Generated {symbols.Count} option symbols for {config.Underlying}");
 
                 StatusMessage = $"Loading ticks for {symbols.Count} symbols...";
 
-                // Load ticks for each symbol
+                // Use direct NCD file reading for MUCH faster loading
+                // This bypasses NinjaTrader's slow BarsRequest API and reads directly from the database files
+                var loadStart = DateTime.Now;
                 int successCount = 0;
+                int failCount = 0;
+                object lockObj = new object();
 
-                foreach (var symbol in symbols)
+                // Parallel loading - direct file I/O is fast and parallelizes well
+                await Task.Run(() =>
                 {
-                    bool loaded = await LoadTicksForSymbol(symbol, config);
-                    if (loaded)
+                    Parallel.ForEach(symbols, new ParallelOptions { MaxDegreeOfParallelism = 8 }, symbol =>
                     {
-                        successCount++;
-                        LoadedSymbolCount = successCount;
-                        StatusMessage = $"Loaded {successCount}/{symbols.Count} symbols...";
-                    }
-                }
+                        try
+                        {
+                            var ticks = NCDFileReader.LoadTicksForSymbol(
+                                symbol,
+                                config.SimulationDate,
+                                config.TimeFrom,
+                                config.TimeTo);
+
+                            if (ticks.Count > 0)
+                            {
+                                // Convert NCDTick to TickData
+                                var tickDataList = ticks.Select(t => new TickData
+                                {
+                                    Time = t.Timestamp,
+                                    Price = t.Price,
+                                    Volume = (long)t.Volume
+                                }).ToList();
+
+                                _loadedTicks[symbol] = tickDataList;
+
+                                lock (lockObj)
+                                {
+                                    successCount++;
+                                    LoadedSymbolCount = successCount;
+                                }
+                            }
+                            else
+                            {
+                                lock (lockObj)
+                                {
+                                    failCount++;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _log.Warn($"[SimulationService] Error loading {symbol}: {ex.Message}");
+                            lock (lockObj)
+                            {
+                                failCount++;
+                            }
+                        }
+                    });
+                });
+
+                var loadElapsed = DateTime.Now - loadStart;
+                _log.Info($"[SimulationService] Direct NCD loading completed: {successCount} symbols in {loadElapsed.TotalMilliseconds:F0}ms");
 
                 if (successCount == 0)
                 {
@@ -563,16 +629,18 @@ namespace ZerodhaDatafeedAdapter.Services
                         DateTime filterFrom = fromDateTime;
                         DateTime filterTo = toDateTime;
                         DateTime simDate = config.SimulationDate.Date;
+                        var requestStartTime = DateTime.Now;
 
                         barsRequest.Request((request, errorCode, errorMessage) =>
                         {
+                            var dbReadTime = (DateTime.Now - requestStartTime).TotalMilliseconds;
                             try
                             {
                                 if (errorCode == ErrorCode.NoError && request.Bars != null && request.Bars.Count > 0)
                                 {
                                     var ticks = new List<TickData>();
 
-                                    _log.Info($"[SimulationService] BarsRequest returned {request.Bars.Count} ticks for {symbolClosure}");
+                                    _log.Info($"[SimulationService] BarsRequest returned {request.Bars.Count} ticks for {symbolClosure} (DB read: {dbReadTime:F0}ms)");
 
                                     if (request.Bars.Count > 0)
                                     {
@@ -631,7 +699,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     }
                 });
 
-                // Wait with timeout
+                // Wait with timeout - 15 seconds as in original
                 var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(15000));
                 if (completedTask == tcs.Task)
                 {
@@ -885,6 +953,36 @@ namespace ZerodhaDatafeedAdapter.Services
         protected void OnPropertyChanged([CallerMemberName] string propertyName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        /// <summary>
+        /// Publishes current state to the reactive StateStream.
+        /// Call this whenever state or key properties change.
+        /// </summary>
+        private void PublishStateUpdate()
+        {
+            try
+            {
+                var update = new SimulationStateUpdate
+                {
+                    State = _state,
+                    StatusMessage = _statusMessage,
+                    LoadedSymbolCount = _loadedSymbolCount,
+                    TotalSymbolCount = _totalSymbolsToLoad,
+                    TotalTickCount = _totalTickCount,
+                    PricesInjectedCount = _pricesInjectedCount,
+                    CurrentSimTime = _currentSimTime,
+                    Progress = Progress,
+                    SpeedMultiplier = _config?.SpeedMultiplier ?? 1,
+                    Timestamp = DateTime.Now
+                };
+
+                _stateSubject.OnNext(update);
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"[SimulationService] PublishStateUpdate error: {ex.Message}");
+            }
         }
     }
 }

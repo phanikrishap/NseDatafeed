@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.Globalization;
+using System.Reactive.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -11,6 +12,7 @@ using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Tools;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Helpers;
@@ -133,8 +135,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
         // Configuration
         private SimulationConfig _config;
 
-        // Event handler reference for proper cleanup (prevents memory leak)
-        private PropertyChangedEventHandler _servicePropertyChangedHandler;
+        // Rx subscription for state updates (replaces PropertyChanged)
+        private IDisposable _stateSubscription;
 
         // NinjaTrader-style colors
         private static readonly SolidColorBrush _bgColor = new SolidColorBrush(Color.FromRgb(27, 27, 28));
@@ -384,14 +386,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
             // Row 7: Load Button
             _btnLoad = new Button
             {
-                Content = "Load Historical Data",
+                Content = "Load Sim Data",
                 Background = _accentColor,
                 Foreground = Brushes.White,
                 FontFamily = _ntFont,
                 FontWeight = FontWeights.SemiBold,
                 Padding = new Thickness(20, 5, 20, 5),
                 Margin = new Thickness(5, 5, 5, 5),
-                Cursor = Cursors.Hand
+                Cursor = Cursors.Hand,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
             };
             _btnLoad.Click += OnLoadClick;
             Grid.SetRow(_btnLoad, 7);
@@ -622,7 +626,53 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
                 picker.Style = datePickerStyle;
             }
 
+            // Apply dark theme styling to the DatePicker's TextBox and Calendar when loaded
+            picker.Loaded += (s, e) =>
+            {
+                ApplyDarkThemeToDatePicker(picker);
+            };
+
             return picker;
+        }
+
+        /// <summary>
+        /// Applies dark theme styling to DatePicker's internal TextBox control
+        /// </summary>
+        private void ApplyDarkThemeToDatePicker(DatePicker picker)
+        {
+            try
+            {
+                // Find the DatePickerTextBox inside the DatePicker
+                var textBox = FindVisualChild<System.Windows.Controls.Primitives.DatePickerTextBox>(picker);
+                if (textBox != null)
+                {
+                    textBox.Background = _bgColor;
+                    textBox.Foreground = _fgColor;
+                    textBox.BorderBrush = _borderColor;
+                }
+            }
+            catch
+            {
+                // Ignore styling errors - not critical
+            }
+        }
+
+        /// <summary>
+        /// Helper to find visual child of a specific type
+        /// </summary>
+        private T FindVisualChild<T>(DependencyObject parent) where T : DependencyObject
+        {
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+            {
+                var child = VisualTreeHelper.GetChild(parent, i);
+                if (child is T typedChild)
+                    return typedChild;
+
+                var result = FindVisualChild<T>(child);
+                if (result != null)
+                    return result;
+            }
+            return null;
         }
 
         private TextBlock CreateStatusLabel(string defaultValue)
@@ -655,59 +705,64 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
 
         private void BindToService()
         {
-            var service = SimulationService.Instance;
+            // Subscribe to the reactive StateStream
+            // BehaviorSubject ensures we get the current state immediately on subscription
+            // Use ObserveOnDispatcher for WPF-friendly UI thread marshaling
+            _stateSubscription = SimulationService.Instance.StateStream
+                .ObserveOnDispatcher()
+                .Subscribe(OnStateUpdate, OnStateError);
 
-            // Use named handler for proper cleanup (prevents memory leak)
-            _servicePropertyChangedHandler = OnServicePropertyChanged;
-            service.PropertyChanged += _servicePropertyChangedHandler;
+            Logger.Info("[SimulationEngineTabPage] Subscribed to SimulationService.StateStream");
         }
 
-        private void OnServicePropertyChanged(object sender, PropertyChangedEventArgs e)
+        /// <summary>
+        /// Handles state updates from the reactive StateStream.
+        /// Called on UI thread thanks to ObserveOn(DispatcherScheduler).
+        /// </summary>
+        private void OnStateUpdate(SimulationStateUpdate state)
         {
-            Dispatcher.InvokeAsync(() =>
+            try
             {
-                var service = SimulationService.Instance;
-                switch (e.PropertyName)
-                {
-                    case nameof(service.State):
-                        _lblState.Text = service.State.ToString();
-                        UpdateButtonStates();
-                        break;
-                    case nameof(service.StatusMessage):
-                        _lblStatus.Text = service.StatusMessage;
-                        break;
-                    case nameof(service.CurrentSimTimeDisplay):
-                        _lblCurrentTime.Text = service.CurrentSimTimeDisplay;
-                        break;
-                    case nameof(service.Progress):
-                        _progressBar.Value = service.Progress;
-                        break;
-                    case nameof(service.LoadedSymbolCount):
-                        _lblSymbolsLoaded.Text = service.LoadedSymbolCount.ToString();
-                        break;
-                    case nameof(service.TotalTickCount):
-                        _lblTicksLoaded.Text = service.TotalTickCount.ToString("N0");
-                        break;
-                    case nameof(service.PricesInjectedCount):
-                        _lblPricesInjected.Text = service.PricesInjectedCount.ToString("N0");
-                        break;
-                }
-            });
+                // Update all UI elements from the state snapshot
+                _lblState.Text = state.State.ToString();
+                _lblStatus.Text = state.StatusMessage;
+                _lblCurrentTime.Text = state.CurrentSimTimeDisplay;
+                _progressBar.Value = state.Progress;
+                _lblSymbolsLoaded.Text = state.LoadedSymbolCount.ToString();
+                _lblTicksLoaded.Text = state.TotalTickCount.ToString("N0");
+                _lblPricesInjected.Text = state.PricesInjectedCount.ToString("N0");
+
+                // Update button states based on current state
+                _btnPlay.IsEnabled = state.CanStart;
+                _btnPause.IsEnabled = state.CanPause;
+                _btnStop.IsEnabled = state.CanStop;
+                _btnLoad.IsEnabled = state.State == SimulationState.Idle || state.State == SimulationState.Error;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[SimulationEngineTabPage] OnStateUpdate error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handles errors from the StateStream (shouldn't happen normally).
+        /// </summary>
+        private void OnStateError(Exception ex)
+        {
+            Logger.Error($"[SimulationEngineTabPage] StateStream error: {ex.Message}");
         }
 
         private void UnbindFromService()
         {
-            if (_servicePropertyChangedHandler != null)
-            {
-                var service = SimulationService.Instance;
-                service.PropertyChanged -= _servicePropertyChangedHandler;
-                _servicePropertyChangedHandler = null;
-                Logger.Debug("[SimulationEngineTabPage] Unbound from SimulationService PropertyChanged event");
-            }
+            _stateSubscription?.Dispose();
+            _stateSubscription = null;
+            Logger.Debug("[SimulationEngineTabPage] Disposed SimulationService.StateStream subscription");
         }
 
         private void UpdateButtonStates()
         {
+            // Button states are now updated via OnStateUpdate from the reactive stream
+            // This method kept for backward compatibility if called elsewhere
             var service = SimulationService.Instance;
             _btnPlay.IsEnabled = service.CanStart;
             _btnPause.IsEnabled = service.CanPause;
