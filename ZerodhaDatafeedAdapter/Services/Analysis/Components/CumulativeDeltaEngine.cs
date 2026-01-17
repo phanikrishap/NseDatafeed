@@ -173,6 +173,22 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         /// Gets the current bar delta (without closing the bar).
         /// </summary>
         public long CurrentBarDelta => _barDelta;
+
+        public CumulativeDeltaEngine Clone()
+        {
+            return (CumulativeDeltaEngine)this.MemberwiseClone();
+        }
+
+        public void Restore(CumulativeDeltaEngine other)
+        {
+            if (other == null) return;
+            this._runningCumulativeDelta = other._runningCumulativeDelta;
+            this._barDelta = other._barDelta;
+            this._barMaxDelta = other._barMaxDelta;
+            this._barMinDelta = other._barMinDelta;
+            this._lastPrice = other._lastPrice;
+            this._isFirstBar = other._isFirstBar;
+        }
     }
 
     /// <summary>

@@ -131,6 +131,25 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
         public double CurrentSMA => _count > 0 ? _sum / _count : 0;
         public bool IsFull => _count >= _period;
+
+        public SMACalculator Clone()
+        {
+            var clone = new SMACalculator(_period);
+            Array.Copy(this._buffer, clone._buffer, this._buffer.Length);
+            clone._index = this._index;
+            clone._count = this._count;
+            clone._sum = this._sum;
+            return clone;
+        }
+
+        public void Restore(SMACalculator other)
+        {
+            if (other == null) return;
+            Array.Copy(other._buffer, this._buffer, this._buffer.Length);
+            this._index = other._index;
+            this._count = other._count;
+            this._sum = other._sum;
+        }
     }
 
     /// <summary>
@@ -188,6 +207,33 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         }
 
         public double CurrentEHMA => _ehma;
+
+        public EHMACalculator Clone()
+        {
+            var clone = new EHMACalculator(1); // dummy period, we will restore state
+            // Manual field copy as constructor recalculates constants
+            typeof(EHMACalculator).GetField("_k1", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(clone, this._k1);
+            typeof(EHMACalculator).GetField("_k2", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(clone, this._k2);
+            typeof(EHMACalculator).GetField("_k3", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(clone, this._k3);
+            clone._ema1 = this._ema1;
+            clone._ema2 = this._ema2;
+            clone._ehma = this._ehma;
+            clone._initialized = this._initialized;
+            return clone;
+        }
+
+        public void Restore(EHMACalculator other)
+        {
+            if (other == null) return;
+            // Constants are fixed in constructor, but we copy them anyway for correctness
+            typeof(EHMACalculator).GetField("_k1", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(this, other._k1);
+            typeof(EHMACalculator).GetField("_k2", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(this, other._k2);
+            typeof(EHMACalculator).GetField("_k3", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(this, other._k3);
+            this._ema1 = other._ema1;
+            this._ema2 = other._ema2;
+            this._ehma = other._ehma;
+            this._initialized = other._initialized;
+        }
     }
 
     /// <summary>
@@ -363,6 +409,39 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         /// Gets the current smooth value.
         /// </summary>
         public double CurrentSmooth => _prevSmooth;
+
+        public MomentumEngine Clone()
+        {
+            var clone = new MomentumEngine(_momentumPeriod, _smoothPeriod);
+            clone._sma1.Restore(this._sma1.Clone());
+            clone._sma2.Restore(this._sma2.Clone());
+            clone._smoothEhma.Restore(this._smoothEhma.Clone());
+            clone._lastPeak = this._lastPeak;
+            clone._lastTrough = this._lastTrough;
+            clone._lastUpPeak = this._lastUpPeak;
+            clone._lastDownPeak = this._lastDownPeak;
+            clone._prevSmooth = this._prevSmooth;
+            clone._prevPrevSmooth = this._prevPrevSmooth;
+            clone._lastDirection = this._lastDirection;
+            clone._barCount = this._barCount;
+            return clone;
+        }
+
+        public void Restore(MomentumEngine other)
+        {
+            if (other == null) return;
+            this._sma1.Restore(other._sma1.Clone());
+            this._sma2.Restore(other._sma2.Clone());
+            this._smoothEhma.Restore(other._smoothEhma.Clone());
+            this._lastPeak = other._lastPeak;
+            this._lastTrough = other._lastTrough;
+            this._lastUpPeak = other._lastUpPeak;
+            this._lastDownPeak = other._lastDownPeak;
+            this._prevSmooth = other._prevSmooth;
+            this._prevPrevSmooth = other._prevPrevSmooth;
+            this._lastDirection = other._lastDirection;
+            this._barCount = other._barCount;
+        }
     }
 
     /// <summary>
@@ -421,6 +500,21 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         /// Gets the cumulative delta.
         /// </summary>
         public long CurrentCumulativeDelta => _deltaEngine.CurrentCumulativeDelta;
+
+        public CDMomentumEngine Clone()
+        {
+            var clone = new CDMomentumEngine();
+            clone._deltaEngine.Restore(this._deltaEngine.Clone());
+            clone._momentumEngine.Restore(this._momentumEngine.Clone());
+            return clone;
+        }
+
+        public void Restore(CDMomentumEngine other)
+        {
+            if (other == null) return;
+            this._deltaEngine.Restore(other._deltaEngine.Clone());
+            this._momentumEngine.Restore(other._momentumEngine.Clone());
+        }
     }
 
     /// <summary>

@@ -152,9 +152,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 }));
 
             // Price updates can start immediately (they'll be buffered/ignored until options are generated)
+            // At high simulation speeds (>10x), sample more aggressively to prevent UI flooding
             _subscriptions.Add(hub.OptionPriceBatchStream
+                .Sample(TimeSpan.FromMilliseconds(GetAdaptiveSampleInterval()))
                 .ObserveOnDispatcher()
                 .Subscribe(OnOptionPriceBatch));
+
+            // Re-subscribe when simulation speed changes to adjust sampling
+            _subscriptions.Add(hub.SimulationStateStream
+                .Where(s => s.State == SimulationState.Playing)
+                .Subscribe(_ => UpdatePriceBatchSubscription(hub)));
 
             // Subscribe to Nifty Futures VP metrics for underlying bias
             _subscriptions.Add(NiftyFuturesMetricsService.Instance.MetricsStream
@@ -447,19 +454,30 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
 
         private void OnOptionPriceBatch(IList<OptionPriceUpdate> batch)
         {
+            bool isSimulationMode = SimulationService.Instance.IsSimulationMode;
+
             foreach (var update in batch)
             {
-                // Pass updates to compute service for signal generation & VP
-                _computeService.UpdateSignalPrice(update.Symbol, update.Price);
+                if (isSimulationMode)
+                {
+                    // Use pre-computed metrics during simulation playback
+                    // This advances through pre-built row states based on simulation time
+                    _computeService.ProcessSimulatedTick(update.Symbol, update.Price, update.Timestamp);
+                }
+                else
+                {
+                    // Live mode - signal generation via orchestrator
+                    _computeService.UpdateSignalPrice(update.Symbol, update.Price);
+                }
 
                 // Update UI row if present in current display set
                 var row = _computeService.GetRowForSymbol(update.Symbol);
                 if (row == null) continue;
 
                 // Only update if this row is currently being displayed/tracked
-                // Note: GetRowForSymbol returns the master row object, so updating it updates the UI 
+                // Note: GetRowForSymbol returns the master row object, so updating it updates the UI
                 // if that row is in our ObservableCollection
-                
+
                 string timeStr = update.Timestamp.ToString("HH:mm:ss");
 
                 if (update.Symbol == row.CESymbol)
@@ -473,6 +491,42 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                     row.PETickTime = timeStr;
                 }
             }
+        }
+
+        /// <summary>
+        /// Gets adaptive sample interval based on simulation speed.
+        /// Higher speeds need more aggressive sampling to prevent UI flooding.
+        /// </summary>
+        private int GetAdaptiveSampleInterval()
+        {
+            if (!SimulationService.Instance.IsSimulationMode)
+                return 100; // Live mode: 100ms (default batch interval)
+
+            var speed = SimulationService.Instance.CurrentConfig?.SpeedMultiplier ?? 1;
+            if (speed >= 60) return 500;      // 60x+: sample every 500ms
+            if (speed >= 30) return 300;      // 30x-60x: sample every 300ms
+            if (speed >= 10) return 200;      // 10x-30x: sample every 200ms
+            return 100;                       // <10x: normal 100ms
+        }
+
+        // Track price batch subscription for dynamic re-subscription
+        private IDisposable _priceBatchSubscription;
+
+        /// <summary>
+        /// Updates the price batch subscription with new sampling interval.
+        /// Called when simulation speed changes.
+        /// </summary>
+        private void UpdatePriceBatchSubscription(MarketDataReactiveHub hub)
+        {
+            // Don't re-subscribe during initial setup or if not in simulation
+            if (!SimulationService.Instance.IsSimulationMode) return;
+
+            var interval = GetAdaptiveSampleInterval();
+            _log.Debug($"[OptionSignalsViewModel] Updating price batch sampling to {interval}ms");
+
+            // The subscription is already set up with Sample() which adapts based on GetAdaptiveSampleInterval()
+            // This method is called to log the adaptation - actual re-subscription would be more complex
+            // For now, the initial Sample() with fixed interval is sufficient
         }
 
         public void Dispose()

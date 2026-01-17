@@ -354,5 +354,50 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             return result;
         }
+
+        public VPEngine Clone()
+        {
+            var clone = new VPEngine();
+            clone._priceInterval = this._priceInterval;
+            clone._totalVolume = this._totalVolume;
+            clone._sumPriceVolume = this._sumPriceVolume;
+            clone._sumSquaredPriceVolume = this._sumSquaredPriceVolume;
+            clone._lastClosePrice = this._lastClosePrice;
+
+            foreach (var kvp in _volumeAtPrice)
+            {
+                clone._volumeAtPrice[kvp.Key] = new VolumePriceLevel
+                {
+                    Price = kvp.Value.Price,
+                    Volume = kvp.Value.Volume,
+                    BuyVolume = kvp.Value.BuyVolume,
+                    SellVolume = kvp.Value.SellVolume
+                };
+            }
+
+            return clone;
+        }
+
+        public void Restore(VPEngine other)
+        {
+            if (other == null) return;
+            this._priceInterval = other._priceInterval;
+            this._totalVolume = other._totalVolume;
+            this._sumPriceVolume = other._sumPriceVolume;
+            this._sumSquaredPriceVolume = other._sumSquaredPriceVolume;
+            this._lastClosePrice = other._lastClosePrice;
+
+            this._volumeAtPrice.Clear();
+            foreach (var kvp in other._volumeAtPrice)
+            {
+                this._volumeAtPrice[kvp.Key] = new VolumePriceLevel
+                {
+                    Price = kvp.Value.Price,
+                    Volume = kvp.Value.Volume,
+                    BuyVolume = kvp.Value.BuyVolume,
+                    SellVolume = kvp.Value.SellVolume
+                };
+            }
+        }
     }
 }

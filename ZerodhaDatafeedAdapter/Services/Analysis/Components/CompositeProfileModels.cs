@@ -28,6 +28,28 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public int HVNBuyCount { get; set; }
         public int HVNSellCount { get; set; }
         public bool IsValid { get; set; }
+
+        public DailySessionProfile Clone()
+        {
+            return new DailySessionProfile
+            {
+                Date = this.Date,
+                High = this.High,
+                Low = this.Low,
+                Open = this.Open,
+                Close = this.Close,
+                POC = this.POC,
+                VAH = this.VAH,
+                VAL = this.VAL,
+                TotalVolume = this.TotalVolume,
+                VWAP = this.VWAP,
+                PriceLadder = new Dictionary<double, (long, long)>(this.PriceLadder),
+                HVNs = new List<double>(this.HVNs),
+                HVNBuyCount = this.HVNBuyCount,
+                HVNSellCount = this.HVNSellCount,
+                IsValid = this.IsValid
+            };
+        }
     }
 
     /// <summary>
@@ -56,6 +78,30 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public int HVNBuyCount { get; set; }
         public int HVNSellCount { get; set; }
         public bool IsValid { get; set; }
+
+        public CompositeProfile Clone()
+        {
+            return new CompositeProfile
+            {
+                Days = this.Days,
+                StartDate = this.StartDate,
+                EndDate = this.EndDate,
+                High = this.High,
+                Low = this.Low,
+                HighDate = this.HighDate,
+                LowDate = this.LowDate,
+                POC = this.POC,
+                VAH = this.VAH,
+                VAL = this.VAL,
+                VWAP = this.VWAP,
+                TotalVolume = this.TotalVolume,
+                AggregatePriceLadder = new Dictionary<double, (long, long)>(this.AggregatePriceLadder),
+                HVNs = new List<double>(this.HVNs),
+                HVNBuyCount = this.HVNBuyCount,
+                HVNSellCount = this.HVNSellCount,
+                IsValid = this.IsValid
+            };
+        }
     }
 
     /// <summary>
@@ -77,6 +123,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public double Range3DVsAvg => Avg3DADR > 0 ? Range3D / Avg3DADR : 0;
         public double Range5DVsAvg => Avg5DADR > 0 ? Range5D / Avg5DADR : 0;
         public double Range10DVsAvg => Avg10DADR > 0 ? Range10D / Avg10DADR : 0;
+
+        public ADRMetrics Clone()
+        {
+            return (ADRMetrics)this.MemberwiseClone();
+        }
     }
 
     /// <summary>
@@ -96,6 +147,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public double Rolling3DVsAvg { get; set; }
         public double Rolling5DVsAvg { get; set; }
         public double Rolling10DVsAvg { get; set; }
+
+        public RollingRangeMetrics Clone()
+        {
+            return (RollingRangeMetrics)this.MemberwiseClone();
+        }
     }
 
     /// <summary>
@@ -109,6 +165,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public DateTime YearlyLowDate { get; set; }
         public double YearlyRange => YearlyHigh - YearlyLow;
         public double PositionInRange { get; set; }
+
+        public YearlyExtremes Clone()
+        {
+            return (YearlyExtremes)this.MemberwiseClone();
+        }
     }
 
     /// <summary>
@@ -243,5 +304,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public string DateRange5D { get; set; }
         /// <summary>Date range for 10D column</summary>
         public string DateRange10D { get; set; }
+
+        public CompositeProfileMetrics Clone()
+        {
+            var clone = (CompositeProfileMetrics)this.MemberwiseClone();
+            clone.ADR = this.ADR?.Clone();
+            clone.RollingRange = this.RollingRange?.Clone();
+            clone.YearlyExtremes = this.YearlyExtremes?.Clone();
+            return clone;
+        }
     }
 }

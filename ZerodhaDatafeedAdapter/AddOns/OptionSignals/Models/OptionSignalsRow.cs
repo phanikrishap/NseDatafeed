@@ -344,5 +344,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
             get => _peVwapScoreRoll;
             set { if (_peVwapScoreRoll != value) { _peVwapScoreRoll = value; OnPropertyChanged(); } }
         }
+
+        public OptionSignalsRow Clone()
+        {
+            return (OptionSignalsRow)this.MemberwiseClone();
+        }
     }
 }

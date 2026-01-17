@@ -63,6 +63,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
         public int SimReplayTickIndex { get; set; } = 0;
         public double SimLastPrice { get; set; }
         public bool SimDataReady { get; set; } = false;
+        public List<OptionSignalsRow> SimPrecomputedRows { get; set; } = new List<OptionSignalsRow>();
 
         public OptionVPState()
         {

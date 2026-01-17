@@ -468,12 +468,23 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
         private string FormatMomentum(double momentum)
         {
-            if (Math.Abs(momentum) >= 1_000_000)
-                return (momentum / 1_000_000.0).ToString("F1") + "M";
-            else if (Math.Abs(momentum) >= 1_000)
-                return (momentum / 1_000.0).ToString("F1") + "K";
+            double abs = Math.Abs(momentum);
+            if (abs < 0.1) return "0";
+
+            if (abs >= 1_000_000)
+            {
+                double val = momentum / 1_000_000.0;
+                return Math.Abs(val) >= 10 ? val.ToString("F0") + "M" : val.ToString("F1") + "M";
+            }
+            else if (abs >= 1_000)
+            {
+                double val = momentum / 1_000.0;
+                return Math.Abs(val) >= 10 ? val.ToString("F0") + "K" : val.ToString("F1") + "K";
+            }
             else
+            {
                 return momentum.ToString("F1");
+            }
         }
 
         private DateTime GetTargetDataDate()

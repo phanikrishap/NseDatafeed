@@ -1179,6 +1179,72 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             }
         }
 
+        public CompositeProfileEngine Clone()
+        {
+            lock (_lock)
+            {
+                var clone = new CompositeProfileEngine();
+                foreach (var profile in this._dailyProfiles)
+                {
+                    clone._dailyProfiles.Add(profile.Clone());
+                }
+                foreach (var bar in this._dailyBars)
+                {
+                    clone._dailyBars.Add(bar.Clone());
+                }
+                
+                // Clone inner engine
+                clone._sessionVpEngine.Restore(this._sessionVpEngine.Clone());
+
+                clone._profile1D = this._profile1D?.Clone();
+                clone._profile3D = this._profile3D?.Clone();
+                clone._profile5D = this._profile5D?.Clone();
+                clone._profile10D = this._profile10D?.Clone();
+
+                clone._currentSession = this._currentSession?.Clone();
+                clone._currentSessionDate = this._currentSessionDate;
+                clone._currentDayHigh = this._currentDayHigh;
+                clone._currentDayLow = this._currentDayLow;
+
+                clone.LatestMetrics = this.LatestMetrics?.Clone();
+
+                return clone;
+            }
+        }
+
+        public void Restore(CompositeProfileEngine other)
+        {
+            if (other == null) return;
+            lock (_lock)
+            {
+                this._dailyProfiles.Clear();
+                foreach (var profile in other._dailyProfiles)
+                {
+                    this._dailyProfiles.Add(profile.Clone());
+                }
+
+                this._dailyBars.Clear();
+                foreach (var bar in other._dailyBars)
+                {
+                    this._dailyBars.Add(bar.Clone());
+                }
+
+                this._sessionVpEngine.Restore(other._sessionVpEngine.Clone());
+
+                this._profile1D = other._profile1D?.Clone();
+                this._profile3D = other._profile3D?.Clone();
+                this._profile5D = other._profile5D?.Clone();
+                this._profile10D = other._profile10D?.Clone();
+
+                this._currentSession = other._currentSession?.Clone();
+                this._currentSessionDate = other._currentSessionDate;
+                this._currentDayHigh = other._currentDayHigh;
+                this._currentDayLow = other._currentDayLow;
+
+                this.LatestMetrics = other.LatestMetrics?.Clone();
+            }
+        }
+
         /// <summary>
         /// Simple daily bar data container.
         /// </summary>
@@ -1190,6 +1256,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             public double Low { get; set; }
             public double Close { get; set; }
             public long Volume { get; set; }
+
+            public DailyBarData Clone()
+            {
+                return (DailyBarData)this.MemberwiseClone();
+            }
         }
     }
 }

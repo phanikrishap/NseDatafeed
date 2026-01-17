@@ -107,7 +107,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Controls
         private const double COL_TREND = 28;
         private const double COL_TREND_TIME = 52;
         private const double COL_STRIKE = 48;
-        private const double COL_MOMO = 38;
+        private const double COL_MOMO = 42;
         private const double COL_VWAP = 28;
 
         // Converters

@@ -111,8 +111,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             state.SimReplayTickIndex = 0;
             state.SimDataReady = true;
 
+            // Step 4: Pre-compute rows for simulation day
+            PrecomputeSimulationMetrics(state, targetDate);
+
             _log.Info($"[SimProcessor] {state.Symbol} replay data ready: {state.SimReplayBars.Count} bars for {targetDate:yyyy-MM-dd}, " +
-                $"prior day pre-populated: {priorDayBarsProcessed} bars");
+                $"prior day pre-populated: {priorDayBarsProcessed} bars, pre-computed states: {state.SimPrecomputedRows.Count}");
         }
 
         /// <summary>
@@ -121,49 +124,152 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// </summary>
         public void ProcessSimulatedTick(OptionVPState state, double price, DateTime tickTime)
         {
-            if (!state.SimDataReady || state.SimReplayBars == null || state.SimReplayBars.Count == 0)
+            if (!state.SimDataReady || state.SimPrecomputedRows == null || state.SimPrecomputedRows.Count == 0)
                 return;
+
+            // Find the latest pre-computed row that is applicable for the current tickTime
+            OptionSignalsRow applicableRow = null;
+            
+            // Optimization: since bars are sorted by time, we can track an index
+            while (state.SimReplayBarIndex < state.SimPrecomputedRows.Count)
+            {
+                var row = state.SimPrecomputedRows[state.SimReplayBarIndex];
+                string timeStr = state.Type == "CE" ? row.CEAtrTime : row.PEAtrTime;
+                
+                DateTime barTime;
+                if (!DateTime.TryParse(timeStr, out barTime))
+                {
+                    state.SimReplayBarIndex++;
+                    continue;
+                }
+                
+                // For simplicity during simulation of a single day, we can just compare times
+                if (barTime.TimeOfDay <= tickTime.TimeOfDay)
+                {
+                    applicableRow = row;
+                    state.SimReplayBarIndex++;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            if (applicableRow != null)
+            {
+                // Update the actual row in the state
+                CopyRowData(applicableRow, state.Row);
+                
+                // Track last bar time for signals
+                string closedTimeStr = state.Type == "CE" ? applicableRow.CEAtrTime : applicableRow.PEAtrTime;
+                DateTime closedTime;
+                if (DateTime.TryParse(closedTimeStr, out closedTime))
+                {
+                    state.LastBarCloseTime = tickTime.Date.Add(closedTime.TimeOfDay);
+                }
+            }
+        }
+
+        #region Private Helper Methods
+
+        private void PrecomputeSimulationMetrics(OptionVPState state, DateTime targetDate)
+        {
+            if (state.SimReplayBars == null || state.SimReplayBars.Count == 0) return;
+
+            _log.Info($"[SimProcessor] {state.Symbol} Pre-computing {state.SimReplayBars.Count} metrics for {targetDate:yyyy-MM-dd}");
+            state.SimPrecomputedRows.Clear();
+
+            // Save current state (engines)
+            var savedSessVp = state.SessionVPEngine.Clone();
+            var savedRollVp = state.RollingVPEngine.Clone();
+            var savedCdMomo = state.CDMomoEngine.Clone();
+            var savedPriceMomo = state.PriceMomoEngine.Clone();
+            double savedLastPrice = state.SimLastPrice;
+            int savedTickIndex = state.SimReplayTickIndex;
+            HvnTrend savedSessTrend = state.LastSessionTrend;
+            HvnTrend savedRollTrend = state.LastRollingTrend;
 
             var tickBars = state.TickBarsRequest?.Bars;
-            if (tickBars == null || state.SimTickTimes == null)
-                return;
 
-            // Process all bars that should have closed by tickTime
-            while (state.SimReplayBarIndex < state.SimReplayBars.Count)
+            foreach (var bar in state.SimReplayBars)
             {
-                var bar = state.SimReplayBars[state.SimReplayBarIndex];
-
-                if (bar.BarTime > tickTime)
-                    break; // Bar hasn't closed yet in simulation time
-
-                // Start new bar for CD momentum
+                // Start new bar for momentum
                 state.CDMomoEngine.StartNewBar();
 
-                // Process all ticks within this bar's time window
+                // Process ticks for this bar
                 ProcessBarTicks(state, bar, tickBars);
 
                 // Update VP engines
                 state.SessionVPEngine.SetClosePrice(bar.ClosePrice);
                 state.RollingVPEngine.SetClosePrice(bar.ClosePrice);
                 state.RollingVPEngine.ExpireOldData(bar.BarTime);
-                state.LastClosePrice = bar.ClosePrice;
+                state.SimLastPrice = bar.ClosePrice;
 
-                // Update ATR display
+                // Update ATR display in the temporary Row
                 UpdateAtrDisplay(state, bar.ClosePrice, bar.BarTime);
 
-                // Recalculate VP and check for signals
+                // Recalculate metrics (this updates state.Row)
                 _vpProcessor.RecalculateVP(state, bar.BarTime);
 
-                state.LastBarCloseTime = bar.BarTime;
-                state.LastRangeBarIndex = state.SimReplayBarIndex;
-
-                _log.Debug($"[SimProcessor] {state.Symbol} Bar {state.SimReplayBarIndex + 1}/{state.SimReplayBars.Count} closed at {bar.BarTime:HH:mm:ss}, Close={bar.ClosePrice:F2}");
-
-                state.SimReplayBarIndex++;
+                // Store a copy of the row state
+                state.SimPrecomputedRows.Add(state.Row.Clone());
             }
+
+            // Restore state
+            state.SessionVPEngine.Restore(savedSessVp);
+            state.RollingVPEngine.Restore(savedRollVp);
+            state.CDMomoEngine.Restore(savedCdMomo);
+            state.PriceMomoEngine.Restore(savedPriceMomo);
+            state.SimLastPrice = savedLastPrice;
+            state.SimReplayTickIndex = savedTickIndex;
+            state.LastSessionTrend = savedSessTrend;
+            state.LastRollingTrend = savedRollTrend;
+
+            // Reset replay index for playback
+            state.SimReplayBarIndex = 0;
         }
 
-        #region Private Helper Methods
+        private void CopyRowData(OptionSignalsRow source, OptionSignalsRow target)
+        {
+            target.CELTP = source.CELTP;
+            target.CETickTime = source.CETickTime;
+            target.CEAtrLTP = source.CEAtrLTP;
+            target.CEAtrTime = source.CEAtrTime;
+            target.CEHvnBSess = source.CEHvnBSess;
+            target.CEHvnSSess = source.CEHvnSSess;
+            target.CETrendSess = source.CETrendSess;
+            target.CETrendSessTime = source.CETrendSessTime;
+            target.CEHvnBRoll = source.CEHvnBRoll;
+            target.CEHvnSRoll = source.CEHvnSRoll;
+            target.CETrendRoll = source.CETrendRoll;
+            target.CETrendRollTime = source.CETrendRollTime;
+            target.CECDMomo = source.CECDMomo;
+            target.CECDSmooth = source.CECDSmooth;
+            target.CEPriceMomo = source.CEPriceMomo;
+            target.CEPriceSmooth = source.CEPriceSmooth;
+            target.CEVwapScoreSess = source.CEVwapScoreSess;
+            target.CEVwapScoreRoll = source.CEVwapScoreRoll;
+
+            target.PELTP = source.PELTP;
+            target.PETickTime = source.PETickTime;
+            target.PEAtrLTP = source.PEAtrLTP;
+            target.PEAtrTime = source.PEAtrTime;
+            target.PEHvnBSess = source.PEHvnBSess;
+            target.PEHvnSSess = source.PEHvnSSess;
+            target.PETrendSess = source.PETrendSess;
+            target.PETrendSessTime = source.PETrendSessTime;
+            target.PEHvnBRoll = source.PEHvnBRoll;
+            target.PEHvnSRoll = source.PEHvnSRoll;
+            target.PETrendRoll = source.PETrendRoll;
+            target.PETrendRollTime = source.PETrendRollTime;
+            target.PECDMomo = source.PECDMomo;
+            target.PECDSmooth = source.PECDSmooth;
+            target.PEPriceMomo = source.PEPriceMomo;
+            target.PEPriceSmooth = source.PEPriceSmooth;
+            target.PEVwapScoreSess = source.PEVwapScoreSess;
+            target.PEVwapScoreRoll = source.PEVwapScoreRoll;
+        }
+
 
         private double ProcessPriorDayData(OptionVPState state, Bars rangeBars, Bars tickBars,
             List<(DateTime time, int index)> priorDayTickTimes, DateTime priorWorkingDay, out int barsProcessed)

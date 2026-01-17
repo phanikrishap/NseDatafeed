@@ -43,6 +43,23 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             _head = 0;
             _count = 0;
         }
+
+        public CircularBuffer<T> Clone()
+        {
+            var clone = new CircularBuffer<T>(_buffer.Length);
+            Array.Copy(this._buffer, clone._buffer, this._buffer.Length);
+            clone._head = this._head;
+            clone._count = this._count;
+            return clone;
+        }
+
+        public void Restore(CircularBuffer<T> other)
+        {
+            if (other == null) return;
+            Array.Copy(other._buffer, this._buffer, other._buffer.Length);
+            this._head = other._head;
+            this._count = other._count;
+        }
     }
 
     /// <summary>
@@ -77,20 +94,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         private double[] _rollingRef = new double[3];
 
         // Session VP Result buffers
-        public CircularBuffer<double> RelHVNBuy { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> RelHVNSell { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> RelValueWidth { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> CumHVNBuyRank { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> CumHVNSellRank { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> CumValueWidthRank { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> RelHVNBuy { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> RelHVNSell { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> RelValueWidth { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> CumHVNBuyRank { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> CumHVNSellRank { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> CumValueWidthRank { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
 
-        // Rolling VP Result buffers
-        public CircularBuffer<double> RelHVNBuyRolling { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> RelHVNSellRolling { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> RelValueWidthRolling { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> CumHVNBuyRollingRank { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> CumHVNSellRollingRank { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
-        public CircularBuffer<double> CumValueWidthRollingRank { get; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> RelHVNBuyRolling { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> RelHVNSellRolling { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> RelValueWidthRolling { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> CumHVNBuyRollingRank { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> CumHVNSellRollingRank { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
+        public CircularBuffer<double> CumValueWidthRollingRank { get; private set; } = new CircularBuffer<double>(MAX_BUFFER_SIZE);
 
         public VPRelativeMetricsEngine()
         {
@@ -109,6 +125,108 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                 for (int j = 0; j < 3; j++)
                     _rollingHistory[i][j] = new Queue<double>();
             }
+        }
+
+        public VPRelativeMetricsEngine Clone()
+        {
+            var clone = new VPRelativeMetricsEngine();
+            
+            // Copy history/averages
+            foreach (var kvp in this._avgByTime)
+            {
+                clone._avgByTime[kvp.Key] = (double[])kvp.Value.Clone();
+            }
+            foreach (var kvp in this._rollingAvgByTime)
+            {
+                clone._rollingAvgByTime[kvp.Key] = (double[])kvp.Value.Clone();
+            }
+            foreach (var kvp in this._history)
+            {
+                for (int j = 0; j < 3; j++)
+                    clone._history[kvp.Key][j] = new Queue<double>(kvp.Value[j]);
+            }
+            foreach (var kvp in this._rollingHistory)
+            {
+                for (int j = 0; j < 3; j++)
+                    clone._rollingHistory[kvp.Key][j] = new Queue<double>(kvp.Value[j]);
+            }
+
+            // Copy session state
+            Array.Copy(this._sessionCumul, clone._sessionCumul, 3);
+            Array.Copy(this._sessionRef, clone._sessionRef, 3);
+            clone._sessionDate = this._sessionDate;
+            clone._sessionStartTime = this._sessionStartTime;
+            clone._sessionBarCount = this._sessionBarCount;
+
+            Array.Copy(this._rollingCumul, clone._rollingCumul, 3);
+            Array.Copy(this._rollingRef, clone._rollingRef, 3);
+
+            // Copy buffers
+            clone.RelHVNBuy = this.RelHVNBuy.Clone();
+            clone.RelHVNSell = this.RelHVNSell.Clone();
+            clone.RelValueWidth = this.RelValueWidth.Clone();
+            clone.CumHVNBuyRank = this.CumHVNBuyRank.Clone();
+            clone.CumHVNSellRank = this.CumHVNSellRank.Clone();
+            clone.CumValueWidthRank = this.CumValueWidthRank.Clone();
+
+            clone.RelHVNBuyRolling = this.RelHVNBuyRolling.Clone();
+            clone.RelHVNSellRolling = this.RelHVNSellRolling.Clone();
+            clone.RelValueWidthRolling = this.RelValueWidthRolling.Clone();
+            clone.CumHVNBuyRollingRank = this.CumHVNBuyRollingRank.Clone();
+            clone.CumHVNSellRollingRank = this.CumHVNSellRollingRank.Clone();
+            clone.CumValueWidthRollingRank = this.CumValueWidthRollingRank.Clone();
+
+            return clone;
+        }
+
+        public void Restore(VPRelativeMetricsEngine other)
+        {
+            if (other == null) return;
+
+            // Restore history/averages
+            foreach (var kvp in other._avgByTime)
+            {
+                this._avgByTime[kvp.Key] = (double[])kvp.Value.Clone();
+            }
+            foreach (var kvp in other._rollingAvgByTime)
+            {
+                this._rollingAvgByTime[kvp.Key] = (double[])kvp.Value.Clone();
+            }
+            foreach (var kvp in other._history)
+            {
+                for (int j = 0; j < 3; j++)
+                    this._history[kvp.Key][j] = new Queue<double>(kvp.Value[j]);
+            }
+            foreach (var kvp in other._rollingHistory)
+            {
+                for (int j = 0; j < 3; j++)
+                    this._rollingHistory[kvp.Key][j] = new Queue<double>(kvp.Value[j]);
+            }
+
+            // Restore session state
+            Array.Copy(other._sessionCumul, this._sessionCumul, 3);
+            Array.Copy(other._sessionRef, this._sessionRef, 3);
+            this._sessionDate = other._sessionDate;
+            this._sessionStartTime = other._sessionStartTime;
+            this._sessionBarCount = other._sessionBarCount;
+
+            Array.Copy(other._rollingCumul, this._rollingCumul, 3);
+            Array.Copy(other._rollingRef, this._rollingRef, 3);
+
+            // Restore buffers
+            this.RelHVNBuy.Restore(other.RelHVNBuy);
+            this.RelHVNSell.Restore(other.RelHVNSell);
+            this.RelValueWidth.Restore(other.RelValueWidth);
+            this.CumHVNBuyRank.Restore(other.CumHVNBuyRank);
+            this.CumHVNSellRank.Restore(other.CumHVNSellRank);
+            this.CumValueWidthRank.Restore(other.CumValueWidthRank);
+
+            this.RelHVNBuyRolling.Restore(other.RelHVNBuyRolling);
+            this.RelHVNSellRolling.Restore(other.RelHVNSellRolling);
+            this.RelValueWidthRolling.Restore(other.RelValueWidthRolling);
+            this.CumHVNBuyRollingRank.Restore(other.CumHVNBuyRollingRank);
+            this.CumHVNSellRollingRank.Restore(other.CumHVNSellRollingRank);
+            this.CumValueWidthRollingRank.Restore(other.CumValueWidthRollingRank);
         }
 
         // ... (Include all the methods like UpdateHistory, UpdateRollingHistory, StartSession, Update, UpdateRolling, etc.)

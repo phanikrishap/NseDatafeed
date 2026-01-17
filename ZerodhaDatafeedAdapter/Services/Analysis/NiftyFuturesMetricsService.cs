@@ -83,6 +83,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         // Simulation replay state
         private List<(DateTime BarTime, double ClosePrice, int BarIndex)> _simReplayBars;
+        private List<NiftyFuturesVPMetrics> _simPrecomputedMetrics = new List<NiftyFuturesVPMetrics>();
         private int _simReplayBarIndex = 0;
         private bool _simDataReady = false;
         private IDisposable _simTickSubscription;
@@ -233,6 +234,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 _compositeEngine.Reset();
                 _historicalRangeATRBars.Clear();
                 _historicalTicks.Clear();
+                _simPrecomputedMetrics.Clear();
                 _sessionStart = DateTime.MinValue;
                 _lastSessionDate = DateTime.MinValue;
                 _simDataReady = false;
@@ -329,10 +331,13 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 _simDataReady = true;
 
+                // Pre-compute all metrics for the simulation date
+                PrecomputeSimulationMetrics(simulationDate);
+
                 // Subscribe to simulation tick stream for progressive updates
                 SubscribeToSimulationTicks();
 
-                LoggerFactory.Simulation.Info($"[NiftyFuturesMetricsService] StartSimulationAsync complete - Replay ready with {_simReplayBars.Count} bars");
+                LoggerFactory.Simulation.Info($"[NiftyFuturesMetricsService] StartSimulationAsync complete - Replay ready with {_simReplayBars.Count} bars, {_simPrecomputedMetrics.Count} pre-computed metrics");
             }
             catch (Exception ex)
             {
@@ -502,42 +507,48 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         }
 
         /// <summary>
-        /// Process simulation tick - advances through pre-built bars as simulation time progresses.
+        /// Pre-computes metrics for the entire simulation date.
         /// </summary>
-        private void ProcessSimulationTick(DateTime tickTime)
+        private void PrecomputeSimulationMetrics(DateTime simulationDate)
         {
-            if (!_simDataReady || _simReplayBars == null || _simReplayBars.Count == 0)
-                return;
+            if (_simReplayBars == null || _simReplayBars.Count == 0) return;
 
-            // Process all bars that should have closed by tickTime
-            while (_simReplayBarIndex < _simReplayBars.Count)
+            Logger.Info($"[NiftyFuturesMetricsService] Pre-computing {_simReplayBars.Count} metrics for {simulationDate:yyyy-MM-dd}");
+            _simPrecomputedMetrics.Clear();
+
+            // Save current state to restore after pre-computation
+            var savedVpEngine = _vpEngine.Clone();
+            var savedRollingVpEngine = _rollingVpEngine.Clone();
+            var savedRelMetrics = _relMetrics.Clone();
+            var savedComposite = _compositeEngine.Clone();
+            double savedHigh = _currentDayHigh;
+            double savedLow = _currentDayLow;
+            double savedLastPrice = _lastPrice;
+            DateTime savedLastBarTime = _lastBarCloseTime;
+            int savedLastBarIndex = _lastBarIndex;
+            int savedTickIndex = _simTickIndex;
+
+            // We need to use a separate tick index for pre-computation to not mess up the live one
+            int precomputeTickIndex = _simTickIndex;
+            DateTime precomputeLastBarTime = _sessionStart;
+
+            foreach (var bar in _simReplayBars)
             {
-                var bar = _simReplayBars[_simReplayBarIndex];
-
-                // Only process bars whose close time has been reached
-                if (bar.BarTime > tickTime)
-                    break;
-
-                // Process ticks for this bar using sequential index
-                double lastPrice = bar.ClosePrice;
-                DateTime prevBarTime = _lastBarCloseTime; 
-                if (prevBarTime == DateTime.MinValue && _simReplayBarIndex > 0)
-                     prevBarTime = _simReplayBars[_simReplayBarIndex-1].BarTime;
-
-                // Use optimized tick processing
+                // Process ticks for this bar
+                DateTime prevBarTime = precomputeLastBarTime;
+                
                 VolumeProfileLogic.ProcessTicksOptimized(
                     _historicalTicks,
-                    ref _simTickIndex,
+                    ref precomputeTickIndex,
                     prevBarTime,
                     bar.BarTime,
-                    lastPrice, // Fallback
+                    bar.ClosePrice,
                     (price, volume, isBuy, tTime) =>
                     {
                         _vpEngine.AddTick(price, volume, isBuy);
                         _rollingVpEngine.AddTick(price, volume, isBuy, tTime);
                         _compositeEngine.AddTick(price, volume, isBuy, tTime);
 
-                        // Track day high/low
                         if (price > _currentDayHigh) _currentDayHigh = price;
                         if (price < _currentDayLow) _currentDayLow = price;
                         _lastPrice = price;
@@ -550,12 +561,62 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 _lastBarCloseTime = bar.BarTime;
                 _lastBarIndex = bar.BarIndex;
 
-                // Recalculate and publish metrics
-                RecalculateAndPublishMetrics();
+                // Recalculate metrics (this populates LatestMetrics)
+                RecalculateAndPublishMetrics(true); // true to skip rel metrics update if we already did it or don't want to mess up buffers
 
-                LoggerFactory.Simulation.Debug($"[NiftyFuturesMetricsService] SimReplay bar {_simReplayBarIndex + 1}/{_simReplayBars.Count} at {bar.BarTime:HH:mm:ss}");
+                // Store a copy of the metrics
+                _simPrecomputedMetrics.Add(LatestMetrics.Clone());
 
-                _simReplayBarIndex++;
+                precomputeLastBarTime = bar.BarTime;
+            }
+
+            // Restore state
+            _vpEngine.Restore(savedVpEngine);
+            _rollingVpEngine.Restore(savedRollingVpEngine);
+            _relMetrics.Restore(savedRelMetrics);
+            _compositeEngine.Restore(savedComposite);
+            _currentDayHigh = savedHigh;
+            _currentDayLow = savedLow;
+            _lastPrice = savedLastPrice;
+            _lastBarCloseTime = savedLastBarTime;
+            _lastBarIndex = savedLastBarIndex;
+            _simTickIndex = savedTickIndex;
+
+            Logger.Info($"[NiftyFuturesMetricsService] Pre-computed {_simPrecomputedMetrics.Count} metrics");
+        }
+
+        /// <summary>
+        /// Process simulation tick - advances through pre-built bars as simulation time progresses.
+        /// </summary>
+        private void ProcessSimulationTick(DateTime tickTime)
+        {
+            if (!_simDataReady || _simPrecomputedMetrics == null || _simPrecomputedMetrics.Count == 0)
+                return;
+
+            // Find the latest pre-computed metric that is applicable for the current tickTime
+            NiftyFuturesVPMetrics applicableMetrics = null;
+            
+            // Optimization: since metrics are sorted by time, we can track an index or just find last
+            foreach (var metrics in _simPrecomputedMetrics)
+            {
+                if (metrics.LastBarTime <= tickTime)
+                {
+                    applicableMetrics = metrics;
+                }
+                else
+                {
+                    break; // Future metric
+                }
+            }
+
+            if (applicableMetrics != null && applicableMetrics != LatestMetrics)
+            {
+                LatestMetrics = applicableMetrics;
+                _metricsSubject.OnNext(applicableMetrics);
+                
+                // Update internal tracking to stay in sync with what was published
+                _lastBarCloseTime = applicableMetrics.LastBarTime;
+                // Note: we don't need to update _vpEngine etc. because we are just replaying pre-computed metrics
             }
         }
 

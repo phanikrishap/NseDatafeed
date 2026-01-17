@@ -118,5 +118,44 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public DateTime LastUpdate { get; set; }
         public string Symbol { get; set; }
         public bool IsValid { get; set; }
+
+        public NiftyFuturesVPMetrics Clone()
+        {
+            return new NiftyFuturesVPMetrics
+            {
+                POC = this.POC,
+                VAH = this.VAH,
+                VAL = this.VAL,
+                VWAP = this.VWAP,
+                HVNs = new List<double>(this.HVNs),
+                HVNBuyCount = this.HVNBuyCount,
+                HVNSellCount = this.HVNSellCount,
+                HVNBuyVolume = this.HVNBuyVolume,
+                HVNSellVolume = this.HVNSellVolume,
+                RelHVNBuy = this.RelHVNBuy,
+                RelHVNSell = this.RelHVNSell,
+                RelValueWidth = this.RelValueWidth,
+                CumHVNBuyRank = this.CumHVNBuyRank,
+                CumHVNSellRank = this.CumHVNSellRank,
+                CumValueWidthRank = this.CumValueWidthRank,
+                RollingPOC = this.RollingPOC,
+                RollingVAH = this.RollingVAH,
+                RollingVAL = this.RollingVAL,
+                RollingHVNBuyCount = this.RollingHVNBuyCount,
+                RollingHVNSellCount = this.RollingHVNSellCount,
+                RelHVNBuyRolling = this.RelHVNBuyRolling,
+                RelHVNSellRolling = this.RelHVNSellRolling,
+                RelValueWidthRolling = this.RelValueWidthRolling,
+                CumHVNBuyRollingRank = this.CumHVNBuyRollingRank,
+                CumHVNSellRollingRank = this.CumHVNSellRollingRank,
+                CumValueWidthRollingRank = this.CumValueWidthRollingRank,
+                Composite = this.Composite?.Clone(), // Assuming CompositeProfileMetrics has Clone
+                BarCount = this.BarCount,
+                LastBarTime = this.LastBarTime,
+                LastUpdate = this.LastUpdate,
+                Symbol = this.Symbol,
+                IsValid = this.IsValid
+            };
+        }
     }
 }

@@ -310,5 +310,80 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             return result;
         }
+
+        public RollingVolumeProfileEngine Clone()
+        {
+            var clone = new RollingVolumeProfileEngine(_rollingWindowMinutes);
+            clone._priceInterval = this._priceInterval;
+            clone._totalVolume = this._totalVolume;
+            clone._sumPriceVolume = this._sumPriceVolume;
+            clone._sumSquaredPriceVolume = this._sumSquaredPriceVolume;
+            clone._lastClosePrice = this._lastClosePrice;
+            clone._useDynamicInterval = this._useDynamicInterval;
+
+            foreach (var update in _updates)
+            {
+                clone._updates.Enqueue(new RollingVolumeUpdate
+                {
+                    Price = update.Price,
+                    RoundedPrice = update.RoundedPrice,
+                    Volume = update.Volume,
+                    IsBuy = update.IsBuy,
+                    Time = update.Time,
+                    PriceSquaredVolume = update.PriceSquaredVolume
+                });
+            }
+
+            foreach (var kvp in _volumeAtPrice)
+            {
+                clone._volumeAtPrice[kvp.Key] = new VolumePriceLevel
+                {
+                    Price = kvp.Value.Price,
+                    Volume = kvp.Value.Volume,
+                    BuyVolume = kvp.Value.BuyVolume,
+                    SellVolume = kvp.Value.SellVolume
+                };
+            }
+
+            return clone;
+        }
+
+        public void Restore(RollingVolumeProfileEngine other)
+        {
+            if (other == null) return;
+            this._priceInterval = other._priceInterval;
+            this._rollingWindowMinutes = other._rollingWindowMinutes;
+            this._totalVolume = other._totalVolume;
+            this._sumPriceVolume = other._sumPriceVolume;
+            this._sumSquaredPriceVolume = other._sumSquaredPriceVolume;
+            this._lastClosePrice = other._lastClosePrice;
+            this._useDynamicInterval = other._useDynamicInterval;
+
+            this._updates.Clear();
+            foreach (var update in other._updates)
+            {
+                this._updates.Enqueue(new RollingVolumeUpdate
+                {
+                    Price = update.Price,
+                    RoundedPrice = update.RoundedPrice,
+                    Volume = update.Volume,
+                    IsBuy = update.IsBuy,
+                    Time = update.Time,
+                    PriceSquaredVolume = update.PriceSquaredVolume
+                });
+            }
+
+            this._volumeAtPrice.Clear();
+            foreach (var kvp in other._volumeAtPrice)
+            {
+                this._volumeAtPrice[kvp.Key] = new VolumePriceLevel
+                {
+                    Price = kvp.Value.Price,
+                    Volume = kvp.Value.Volume,
+                    BuyVolume = kvp.Value.BuyVolume,
+                    SellVolume = kvp.Value.SellVolume
+                };
+            }
+        }
     }
 }
