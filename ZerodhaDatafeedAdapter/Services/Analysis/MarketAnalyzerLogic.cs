@@ -79,7 +79,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         }
 
         public event Action<string, string> HistoricalDataStatusChanged;
-        public event Action<List<MappedInstrument>> OptionsGenerated;
         public event Action PriceSyncReady;
         #pragma warning disable CS0067 // Events reserved for future use
         public event Action<string, double> OptionPriceUpdated;
@@ -165,12 +164,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public List<string> GetCachedExpiries(string underlying) => OptionGenerationService.Instance.GetCachedExpiries(underlying);
         public int GetLotSize(string underlying) => OptionGenerationService.Instance.GetLotSize(underlying);
         public int GetCachedLotSize(string underlying) => OptionGenerationService.Instance.GetLotSize(underlying);
-
-        public async Task GenerateOptionsAsync(string underlying, double price, DateTime expiry)
-        {
-            var options = await OptionGenerationService.Instance.GenerateOptionsAsync(underlying, price, expiry);
-            OptionsGenerated?.Invoke(options);
-        }
 
         public void SetATMStrike(string underlying, decimal strike) => OptionGenerationService.Instance.SetATMStrike(underlying, strike);
         public decimal GetATMStrike(string underlying) => OptionGenerationService.Instance.GetATMStrike(underlying);
@@ -390,10 +383,6 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     dte,
                     atmStrike,
                     projectedPrice);
-
-                // Fire legacy event for backward compatibility
-                Logger.Info("[MarketAnalyzerLogic] GenerateOptions(): Invoking OptionsGenerated event...");
-                OptionsGenerated?.Invoke(generated);
 
                 // Initialize hedge subscriptions (liquid strikes for hedge selection)
                 _ = Task.Run(async () =>

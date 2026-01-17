@@ -5,6 +5,7 @@ using System.Linq;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services;
+using ZerodhaDatafeedAdapter.Services.Simulation;
 
 namespace ZerodhaDatafeedAdapter.ViewModels
 {
@@ -386,11 +387,11 @@ namespace ZerodhaDatafeedAdapter.ViewModels
 
             if (expiry.HasValue)
             {
-                // Compute DTE from expiry
-                int dte = (int)(expiry.Value.Date - DateTime.Today).TotalDays;
+                // Compute DTE from expiry using simulation-aware date
+                int dte = (int)(expiry.Value.Date - SimulationTimeHelper.Today).TotalDays;
                 _selectedDTE = dte;
                 OnPropertyChanged(nameof(SelectedDTE));
-                TBSLogger.Info($"[TBSViewModel] OnOptionsGenerated: Auto-set DTE={dte} from expiry={expiry.Value:dd-MMM-yyyy}");
+                TBSLogger.Info($"[TBSViewModel] OnOptionsGenerated: Auto-set DTE={dte} from expiry={expiry.Value:dd-MMM-yyyy} (today={SimulationTimeHelper.Today:dd-MMM-yyyy})");
             }
 
             // Apply filter and refresh execution states with new DTE

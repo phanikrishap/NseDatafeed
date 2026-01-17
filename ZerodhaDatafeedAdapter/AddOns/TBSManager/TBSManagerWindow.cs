@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Reactive.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -12,6 +13,7 @@ using System.Xml.Linq;
 using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Tools;
 using ZerodhaDatafeedAdapter.Models;
+using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Helpers;
@@ -58,6 +60,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         private TBSExecutionControl _executionControl;
         private TBSViewModel _viewModel;
         private Instrument _instrument;
+        private IDisposable _optionsGeneratedSubscription;
 
         public TBSManagerTabPage()
         {
@@ -108,15 +111,21 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
         private void SubscribeToEvents()
         {
             MarketAnalyzerLogic.Instance.PriceSyncReady += OnPriceSyncReady;
-            MarketAnalyzerLogic.Instance.OptionsGenerated += OnOptionsGenerated;
             MarketAnalyzerLogic.Instance.PriceUpdated += OnPriceHubUpdated;
+
+            // Subscribe to OptionsGeneratedStream from hub (works for both live and simulation modes)
+            _optionsGeneratedSubscription = MarketDataReactiveHub.Instance.OptionsGeneratedStream
+                .ObserveOnDispatcher()
+                .Subscribe(
+                    OnOptionsGeneratedFromHub,
+                    ex => TBSLogger.Error($"[TBSManagerTabPage] OptionsGeneratedStream error: {ex.Message}"));
         }
 
         private void UnsubscribeFromEvents()
         {
             MarketAnalyzerLogic.Instance.PriceSyncReady -= OnPriceSyncReady;
-            MarketAnalyzerLogic.Instance.OptionsGenerated -= OnOptionsGenerated;
             MarketAnalyzerLogic.Instance.PriceUpdated -= OnPriceHubUpdated;
+            _optionsGeneratedSubscription?.Dispose();
         }
 
         private void OnPriceSyncReady()
@@ -124,11 +133,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager
             Dispatcher.InvokeAsync(() => _viewModel.OnOptionChainReady());
         }
 
-        private void OnOptionsGenerated(List<MappedInstrument> options)
+        private void OnOptionsGeneratedFromHub(OptionsGeneratedEvent evt)
         {
-            if (options == null || options.Count == 0) return;
-            var first = options.First();
-            Dispatcher.InvokeAsync(() => _viewModel.OnOptionsGenerated(first.underlying, first.expiry));
+            if (evt?.Options == null || evt.Options.Count == 0) return;
+            TBSLogger.Info($"[TBSManagerTabPage] OnOptionsGeneratedFromHub: {evt.SelectedUnderlying} Expiry={evt.SelectedExpiry:dd-MMM-yyyy} DTE={evt.DTE}");
+            _viewModel.OnOptionsGenerated(evt.SelectedUnderlying, evt.SelectedExpiry);
         }
 
         private void OnPriceHubUpdated(string symbol, double price)

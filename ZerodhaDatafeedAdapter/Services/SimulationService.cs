@@ -532,7 +532,11 @@ namespace ZerodhaDatafeedAdapter.Services
                 (double)_config.ProjectedOpen
             );
 
-            // Also set ATM strike in MarketAnalyzerLogic for consistency
+            // Update MarketAnalyzerLogic state for simulation
+            // This ensures TBS and other modules use simulation expiry/underlying for symbol building
+            MarketAnalyzerLogic.Instance.SelectedUnderlying = _config.Underlying;
+            MarketAnalyzerLogic.Instance.SelectedExpiry = _config.ExpiryDate.ToString("dd-MMM-yyyy");
+            MarketAnalyzerLogic.Instance.SelectedIsMonthlyExpiry = false; // Weekly expiry in simulation
             MarketAnalyzerLogic.Instance.SetATMStrike(_config.Underlying, _config.ATMStrike);
 
             _log.Info($"[SimulationService] PublishSimulatedOptionChain: Published {options.Count} options, ATM={_config.ATMStrike}, DTE={dte}");
