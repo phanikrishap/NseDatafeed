@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reactive;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Threading.Tasks;
@@ -47,7 +48,9 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         #endregion
 
         // Accelpix-specific request queue (for batch downloads - uses pre-built symbols)
+        // Using synchronized observer for thread-safe multi-producer access
         private readonly ReplaySubject<AccelpixInstrumentRequest> _accelpixRequestQueue;
+        private readonly IObserver<AccelpixInstrumentRequest> _synchronizedAccelpixObserver;
         private IDisposable _accelpixQueueSubscription;
 
         #region State
@@ -86,6 +89,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         private AccelpixHistoricalTickDataService() : base(bufferSize: 200)
         {
             _accelpixRequestQueue = new ReplaySubject<AccelpixInstrumentRequest>(bufferSize: 500);
+            _synchronizedAccelpixObserver = Observer.Synchronize(_accelpixRequestQueue);
 
             HistoricalTickLogger.Info("[AccelpixHistoricalTickDataService] Singleton instance created");
         }
@@ -229,16 +233,16 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                         continue; // Skip if already processed/processing
                     }
 
-                    // Update status to queued
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    // Update status to queued (use base class method for thread-safety)
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Queued,
                         TradeDate = tradeDate
                     });
 
-                    // Queue the request using the enhanced request type
-                    _accelpixRequestQueue.OnNext(request);
+                    // Queue the request using synchronized observer for thread-safety
+                    _synchronizedAccelpixObserver.OnNext(request);
                     queued++;
                 }
             }

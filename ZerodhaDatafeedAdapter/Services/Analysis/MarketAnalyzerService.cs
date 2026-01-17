@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reactive.Disposables;
@@ -28,7 +29,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private readonly SubscriptionManager _subscriptionManager;
         private readonly MarketDataReactiveHub _hub;
         private readonly CompositeDisposable _subscriptions = new CompositeDisposable();
-        private readonly HashSet<string> _persistenceSubscribedSymbols = new HashSet<string>();
+        private readonly ConcurrentDictionary<string, byte> _persistenceSubscribedSymbols = new ConcurrentDictionary<string, byte>();
         private bool _isRunning = false;
 
         private MarketAnalyzerService()
@@ -900,7 +901,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <param name="symbol">The NinjaTrader symbol name</param>
         private void SubscribeForPersistence(string symbol)
         {
-            if (_persistenceSubscribedSymbols.Contains(symbol))
+            if (_persistenceSubscribedSymbols.ContainsKey(symbol))
             {
                 Logger.Debug($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Already subscribed for persistence");
                 return;
@@ -969,7 +970,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                         // Subscribe with empty callback - NinjaTrader will still persist ticks to database
                         adapter.SubscribeMarketData(nt, (t, p, v, time, a5) => { });
-                        _persistenceSubscribedSymbols.Add(symbol);
+                        _persistenceSubscribedSymbols.TryAdd(symbol, 0);
                         Logger.Info($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Successfully subscribed for NT database persistence");
                     }
                     catch (Exception ex)

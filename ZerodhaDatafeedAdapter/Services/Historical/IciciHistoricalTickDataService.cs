@@ -542,16 +542,16 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
             HistoricalTickLogger.Info($"[INST-QUEUE] Queueing {zerodhaSymbol} for {tradeDate:yyyy-MM-dd} (IsReady={IsReady})");
 
-            // Update status to queued
-            statusSubject.OnNext(new InstrumentTickDataStatus
+            // Update status to queued (use base class method for thread-safety)
+            UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
             {
                 ZerodhaSymbol = zerodhaSymbol,
                 State = TickDataState.Queued,
                 TradeDate = tradeDate
             });
 
-            // Push to the queue - will be buffered if not ready, processed when ready
-            _instrumentRequestQueue.OnNext(request);
+            // Push to the queue using synchronized observer for thread-safety
+            _synchronizedRequestObserver.OnNext(request);
 
             return statusSubject.AsObservable();
         }

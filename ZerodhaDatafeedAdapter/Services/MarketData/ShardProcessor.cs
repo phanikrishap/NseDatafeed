@@ -26,7 +26,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private readonly TickCacheManager _cacheManager;
         private readonly TickSubscriptionRegistry _subscriptionRegistry;
         private readonly PerformanceMonitor _performanceMonitor;
-        private readonly Subject<TickStreamItem> _tickSubject;
+        private readonly IObserver<TickStreamItem> _tickObserver;
         private readonly Action<string, double> _optionTickReceived;
         private readonly TimeZoneInfo _istTimeZone;
 
@@ -47,12 +47,12 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         public long VerySlowCallbacks => Interlocked.Read(ref _verySlowCallbacks);
 
         public ShardProcessor(
-            int index, 
-            Shard shard, 
-            TickCacheManager cacheManager, 
+            int index,
+            Shard shard,
+            TickCacheManager cacheManager,
             TickSubscriptionRegistry subRegistry,
             PerformanceMonitor perfMonitor,
-            Subject<TickStreamItem> tickSubject,
+            IObserver<TickStreamItem> tickObserver,
             Action<string, double> optionTickReceived)
         {
             _shardIndex = index;
@@ -60,7 +60,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             _cacheManager = cacheManager;
             _subscriptionRegistry = subRegistry;
             _performanceMonitor = perfMonitor;
-            _tickSubject = tickSubject;
+            _tickObserver = tickObserver;
             _optionTickReceived = optionTickReceived;
             _istTimeZone = TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId);
         }
@@ -97,7 +97,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                 // 1. Always cache the tick (Critical for pre/post market)
                 if (item.TickData.LastTradePrice > 0)
                 {
-                    _cacheManager.CacheLastTick(ntSymbolName, item.TickData, _tickSubject, _optionTickReceived);
+                    _cacheManager.CacheLastTick(ntSymbolName, item.TickData, _tickObserver, _optionTickReceived);
                 }
 
                 // 2. Check for subscription

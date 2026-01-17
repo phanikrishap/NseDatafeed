@@ -37,7 +37,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             _istTimeZone = TimeZoneInfo.FindSystemTimeZoneById(Constants.IndianTimeZoneId);
         }
 
-        public void CacheLastTick(string symbol, ZerodhaTickData tickData, Subject<TickStreamItem> tickSubject, Action<string, double> optionTickReceived)
+        public void CacheLastTick(string symbol, ZerodhaTickData tickData, IObserver<TickStreamItem> tickObserver, Action<string, double> optionTickReceived)
         {
             if (string.IsNullOrEmpty(symbol) || tickData == null || tickData.LastTradePrice <= 0)
                 return;
@@ -60,7 +60,7 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             try
             {
                 DateTime now = TimeZoneInfo.ConvertTime(DateTime.Now, _istTimeZone);
-                tickSubject.OnNext(new TickStreamItem(symbol, tickData, now));
+                tickObserver.OnNext(new TickStreamItem(symbol, tickData, now));
             }
             catch (Exception ex)
             {

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reactive;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Threading;
@@ -29,7 +30,8 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private readonly BackpressureManager _backpressureManager;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private readonly ConcurrentDictionary<string, string> _symbolMappingCache = new ConcurrentDictionary<string, string>();
-        private readonly Subject<TickStreamItem> _tickSubject = new Subject<TickStreamItem>();
+        private readonly Subject<TickStreamItem> _tickSubject;
+        private readonly IObserver<TickStreamItem> _synchronizedTickObserver;
 
         private long _ticksQueued = 0;
         private bool _isDisposed = false;
@@ -46,13 +48,17 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             _cacheManager = new TickCacheManager();
             _subscriptionRegistry = new TickSubscriptionRegistry();
 
+            // Create thread-safe synchronized Subject for multi-producer scenario
+            _tickSubject = new Subject<TickStreamItem>();
+            _synchronizedTickObserver = Observer.Synchronize(_tickSubject);
+
             _shards = new Shard[SHARD_COUNT];
             _shardProcessors = new ShardProcessor[SHARD_COUNT];
 
             for (int i = 0; i < SHARD_COUNT; i++)
             {
                 _shards[i] = new Shard(QUEUE_CAPACITY);
-                _shardProcessors[i] = new ShardProcessor(i, _shards[i], _cacheManager, _subscriptionRegistry, _performanceMonitor, _tickSubject, (s, p) => OptionTickReceived?.Invoke(s, p));
+                _shardProcessors[i] = new ShardProcessor(i, _shards[i], _cacheManager, _subscriptionRegistry, _performanceMonitor, _synchronizedTickObserver, (s, p) => OptionTickReceived?.Invoke(s, p));
                 
                 int shardIndex = i;
                 _shards[i].WorkerTask = Task.Factory.StartNew(

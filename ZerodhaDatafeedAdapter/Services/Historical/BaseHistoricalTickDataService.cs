@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Reactive;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using ZerodhaDatafeedAdapter.Logging;
@@ -13,16 +14,22 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
     public abstract class BaseHistoricalTickDataService : IHistoricalTickDataSource, IDisposable
     {
         // Per-instrument tick data request queue (buffered until service is ready)
+        // Using synchronized observer for thread-safe multi-producer access
         protected readonly ReplaySubject<InstrumentTickDataRequest> _instrumentRequestQueue;
+        protected readonly IObserver<InstrumentTickDataRequest> _synchronizedRequestObserver;
         protected IDisposable _instrumentQueueSubscription;
 
         // Tracks status for each instrument request
         protected readonly ConcurrentDictionary<string, BehaviorSubject<InstrumentTickDataStatus>> _instrumentStatusSubjects
             = new ConcurrentDictionary<string, BehaviorSubject<InstrumentTickDataStatus>>();
 
+        // Lock for status subject updates
+        private readonly object _statusLock = new object();
+
         protected BaseHistoricalTickDataService(int bufferSize = 200)
         {
             _instrumentRequestQueue = new ReplaySubject<InstrumentTickDataRequest>(bufferSize: bufferSize);
+            _synchronizedRequestObserver = Observer.Synchronize(_instrumentRequestQueue);
         }
 
         public abstract bool IsInitialized { get; }
@@ -72,25 +79,31 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 QueuedAt = DateTime.Now
             };
 
-            statusSubject.OnNext(new InstrumentTickDataStatus
+            lock (_statusLock)
             {
-                ZerodhaSymbol = zerodhaSymbol,
-                State = TickDataState.Queued,
-                TradeDate = tradeDate
-            });
+                statusSubject.OnNext(new InstrumentTickDataStatus
+                {
+                    ZerodhaSymbol = zerodhaSymbol,
+                    State = TickDataState.Queued,
+                    TradeDate = tradeDate
+                });
+            }
 
-            _instrumentRequestQueue.OnNext(request);
+            _synchronizedRequestObserver.OnNext(request);
             return statusSubject.AsObservable();
         }
 
         /// <summary>
-        /// Updates the status for a given symbol.
+        /// Updates the status for a given symbol (thread-safe).
         /// </summary>
         protected void UpdateInstrumentStatus(string zerodhaSymbol, InstrumentTickDataStatus status)
         {
             if (_instrumentStatusSubjects.TryGetValue(zerodhaSymbol, out var subject))
             {
-                subject.OnNext(status);
+                lock (_statusLock)
+                {
+                    subject.OnNext(status);
+                }
             }
         }
 

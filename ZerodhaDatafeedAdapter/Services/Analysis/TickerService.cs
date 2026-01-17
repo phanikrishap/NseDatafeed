@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Reactive;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using ZerodhaDatafeedAdapter.Logging;
@@ -50,14 +51,18 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public long NiftyFuturesToken { get; private set; }
         public DateTime NiftyFuturesExpiry { get; private set; }
 
-        // Reactive Streams
-        private readonly Subject<TickerPriceUpdate> _priceUpdateSubject = new Subject<TickerPriceUpdate>();
+        // Reactive Streams (synchronized for thread-safe multi-producer access)
+        private readonly Subject<TickerPriceUpdate> _priceUpdateSubject;
+        private readonly IObserver<TickerPriceUpdate> _synchronizedPriceObserver;
         public IObservable<TickerPriceUpdate> PriceUpdateStream => _priceUpdateSubject.AsObservable();
 
         public event Action<string> TickerUpdated;
 
         private TickerService()
         {
+            _priceUpdateSubject = new Subject<TickerPriceUpdate>();
+            _synchronizedPriceObserver = Observer.Synchronize(_priceUpdateSubject);
+
             Tickers.Add(GiftNiftyTicker);
             Tickers.Add(NiftyTicker);
             Tickers.Add(SensexTicker);
@@ -151,7 +156,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             {
                 TickerUpdated?.Invoke(ticker.Symbol);
 
-                _priceUpdateSubject.OnNext(new TickerPriceUpdate
+                _synchronizedPriceObserver.OnNext(new TickerPriceUpdate
                 {
                     TickerSymbol = ticker.Symbol,
                     Price = ticker.CurrentPrice,
@@ -189,7 +194,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             if (ticker != null)
             {
-                _priceUpdateSubject.OnNext(new TickerPriceUpdate
+                _synchronizedPriceObserver.OnNext(new TickerPriceUpdate
                 {
                     TickerSymbol = ticker.Symbol,
                     Price = ticker.CurrentPrice,

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using NinjaTrader.Cbi;
 using ZerodhaAPI.Common.Enums;
@@ -27,7 +28,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         #region State
 
         private readonly ConcurrentQueue<MappedInstrument> _subscriptionQueue = new ConcurrentQueue<MappedInstrument>();
-        private bool _isProcessing = false;
+        private int _isProcessing = 0; // 0 = false, 1 = true (for Interlocked)
         private int _processedCount = 0;
         private int _totalQueued = 0;
 
@@ -62,7 +63,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <summary>
         /// Whether queue processing is currently running
         /// </summary>
-        public bool IsProcessing => _isProcessing;
+        public bool IsProcessing => _isProcessing == 1;
 
         /// <summary>
         /// Count of items in the queue
@@ -110,15 +111,7 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             Logger.Info($"[SubscriptionWorkQueue] Queue size is now {_subscriptionQueue.Count}");
 
-            if (!_isProcessing)
-            {
-                Logger.Info("[SubscriptionWorkQueue] Starting queue processor...");
-                Task.Run(ProcessQueue);
-            }
-            else
-            {
-                Logger.Info("[SubscriptionWorkQueue] Queue processor already running");
-            }
+            TryStartProcessing();
         }
 
         /// <summary>
@@ -127,11 +120,25 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public void QueueSingleInstrument(MappedInstrument instrument)
         {
             _subscriptionQueue.Enqueue(instrument);
-            _totalQueued++;
+            Interlocked.Increment(ref _totalQueued);
 
-            if (!_isProcessing)
+            TryStartProcessing();
+        }
+
+        /// <summary>
+        /// Atomically try to start processing if not already running
+        /// </summary>
+        private void TryStartProcessing()
+        {
+            // Atomically try to set _isProcessing from 0 to 1
+            if (Interlocked.CompareExchange(ref _isProcessing, 1, 0) == 0)
             {
+                Logger.Info("[SubscriptionWorkQueue] Starting queue processor...");
                 Task.Run(ProcessQueue);
+            }
+            else
+            {
+                Logger.Info("[SubscriptionWorkQueue] Queue processor already running");
             }
         }
 
@@ -145,35 +152,65 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private async Task ProcessQueue()
         {
             Logger.Info("[SubscriptionWorkQueue] ProcessQueue(): Started processing");
-            _isProcessing = true;
+            // Note: _isProcessing is already set to 1 by TryStartProcessing via CompareExchange
 
-            while (_subscriptionQueue.TryDequeue(out var instrument))
+            try
             {
-                _processedCount++;
-                Logger.Info($"[SubscriptionWorkQueue] Processing {_processedCount}/{_totalQueued} - {instrument.symbol}");
-
-                try
+                while (true)
                 {
-                    await SubscribeToInstrument(instrument);
-                    Logger.Debug($"[SubscriptionWorkQueue] Completed {instrument.symbol}");
+                    // Process all available items
+                    while (_subscriptionQueue.TryDequeue(out var instrument))
+                    {
+                        int processed = Interlocked.Increment(ref _processedCount);
+                        Logger.Info($"[SubscriptionWorkQueue] Processing {processed}/{_totalQueued} - {instrument.symbol}");
 
-                    // Notify progress
-                    ProgressUpdated?.Invoke(_processedCount, _totalQueued);
+                        try
+                        {
+                            await SubscribeToInstrument(instrument);
+                            Logger.Debug($"[SubscriptionWorkQueue] Completed {instrument.symbol}");
 
-                    // Minimal delay - subscriptions are lightweight
-                    await Task.Delay(10);
+                            // Notify progress
+                            ProgressUpdated?.Invoke(processed, _totalQueued);
+
+                            // Minimal delay - subscriptions are lightweight
+                            await Task.Delay(10);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Error($"[SubscriptionWorkQueue] Failed to process {instrument.symbol} - {ex.Message}", ex);
+                        }
+                    }
+
+                    // Try to exit: reset _isProcessing to 0, but re-check queue
+                    // If an item was added between TryDequeue returning false and Exchange,
+                    // we need to continue processing
+                    Interlocked.Exchange(ref _isProcessing, 0);
+
+                    // Double-check: if queue is still empty, we're done
+                    if (_subscriptionQueue.IsEmpty)
+                    {
+                        break;
+                    }
+
+                    // Items were added after we exited the loop - try to reclaim processing
+                    if (Interlocked.CompareExchange(ref _isProcessing, 1, 0) != 0)
+                    {
+                        // Another processor started, let it handle the work
+                        break;
+                    }
+                    // We reclaimed processing, continue the outer loop
                 }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[SubscriptionWorkQueue] Failed to process {instrument.symbol} - {ex.Message}", ex);
-                }
+
+                Logger.Info($"[SubscriptionWorkQueue] Completed all {_processedCount} instruments");
+
+                // Notify completion
+                QueueProcessingComplete?.Invoke();
             }
-
-            _isProcessing = false;
-            Logger.Info($"[SubscriptionWorkQueue] Completed all {_processedCount} instruments");
-
-            // Notify completion
-            QueueProcessingComplete?.Invoke();
+            catch (Exception ex)
+            {
+                Logger.Error($"[SubscriptionWorkQueue] ProcessQueue exception: {ex.Message}", ex);
+                Interlocked.Exchange(ref _isProcessing, 0);
+            }
         }
 
         /// <summary>
