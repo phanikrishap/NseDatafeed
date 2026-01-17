@@ -324,15 +324,19 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     // Update market depth in NinjaTrader
                     if (l2Subscriptions.TryGetValue(nativeSymbolName, out var l2Subscription))
                     {
-                        for (int index = 0; index < l2Subscription.L2Callbacks.Count; ++index)
+                        // Use thread-safe snapshot for iteration
+                        foreach (var callbackKvp in l2Subscription.GetCallbacksSnapshot())
                         {
+                            var instrument = callbackKvp.Key;
+                            var callback = callbackKvp.Value;
+
                             // Process asks (offers)
                             foreach (var ask in tickData.AskDepth)
                             {
                                 if (ask != null && ask.Quantity > 0)
                                 {
-                                    l2Subscription.L2Callbacks.Keys[index].UpdateMarketDepth(
-                                        MarketDataType.Ask, ask.Price, ask.Quantity, Operation.Update, now, l2Subscription.L2Callbacks.Values[index]);
+                                    instrument.UpdateMarketDepth(
+                                        MarketDataType.Ask, ask.Price, ask.Quantity, Operation.Update, now, callback);
                                 }
                             }
 
@@ -341,8 +345,8 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                             {
                                 if (bid != null && bid.Quantity > 0)
                                 {
-                                    l2Subscription.L2Callbacks.Keys[index].UpdateMarketDepth(
-                                        MarketDataType.Bid, bid.Price, bid.Quantity, Operation.Update, now, l2Subscription.L2Callbacks.Values[index]);
+                                    instrument.UpdateMarketDepth(
+                                        MarketDataType.Bid, bid.Price, bid.Quantity, Operation.Update, now, callback);
                                 }
                             }
                         }

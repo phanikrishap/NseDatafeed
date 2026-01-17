@@ -189,7 +189,8 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         {
             if (!_subscriptionRegistry.L2Subscriptions.TryGetValue(tick.InstrumentIdentifier, out var l2Sub)) return;
 
-            foreach (var callbackKvp in l2Sub.L2Callbacks)
+            // Use thread-safe snapshot for iteration
+            foreach (var callbackKvp in l2Sub.GetCallbacksSnapshot())
             {
                 var instrument = callbackKvp.Key;
                 var callback = callbackKvp.Value;

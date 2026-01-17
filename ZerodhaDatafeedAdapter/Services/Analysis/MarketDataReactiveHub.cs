@@ -662,6 +662,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             { "NIFTY", "NIFTY 50", "NIFTY_50", "NIFTY50", "NIFTY_SPOT" };
         private static readonly HashSet<string> SensexAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { "SENSEX", "SENSEX_SPOT", "BSE:SENSEX" };
+        // NiftyFuturesAliases is mutable (aliases added at runtime) - requires synchronization
+        private static readonly object _niftyFuturesAliasesLock = new object();
         private static readonly HashSet<string> NiftyFuturesAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { "NIFTY_I" };
 
@@ -673,7 +675,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 return _niftySubject;
             if (SensexAliases.Contains(symbol))
                 return _sensexSubject;
-            if (NiftyFuturesAliases.Contains(symbol) || IsNiftyFuturesSymbol(symbol))
+
+            // Thread-safe check for mutable NiftyFuturesAliases
+            bool isNiftyFuturesAlias;
+            lock (_niftyFuturesAliasesLock)
+            {
+                isNiftyFuturesAlias = NiftyFuturesAliases.Contains(symbol);
+            }
+            if (isNiftyFuturesAlias || IsNiftyFuturesSymbol(symbol))
                 return _niftyFuturesSubject;
 
             return null;
@@ -687,7 +696,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 return "NIFTY 50";
             if (SensexAliases.Contains(symbol))
                 return "SENSEX";
-            if (NiftyFuturesAliases.Contains(symbol) || IsNiftyFuturesSymbol(symbol))
+
+            // Thread-safe check for mutable NiftyFuturesAliases
+            bool isNiftyFuturesAlias;
+            lock (_niftyFuturesAliasesLock)
+            {
+                isNiftyFuturesAlias = NiftyFuturesAliases.Contains(symbol);
+            }
+            if (isNiftyFuturesAlias || IsNiftyFuturesSymbol(symbol))
                 return "NIFTY_I";
 
             return symbol;
@@ -703,13 +719,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
         /// <summary>
         /// Adds a dynamic alias for NIFTY Futures (e.g., NIFTY26JANFUT resolved at runtime).
+        /// Thread-safe operation.
         /// </summary>
         public void AddNiftyFuturesAlias(string alias)
         {
-            if (!string.IsNullOrEmpty(alias) && !NiftyFuturesAliases.Contains(alias))
+            if (string.IsNullOrEmpty(alias)) return;
+
+            lock (_niftyFuturesAliasesLock)
             {
-                NiftyFuturesAliases.Add(alias);
-                Logger.Debug($"[MarketDataReactiveHub] Added NIFTY_I alias: {alias}");
+                if (!NiftyFuturesAliases.Contains(alias))
+                {
+                    NiftyFuturesAliases.Add(alias);
+                    Logger.Debug($"[MarketDataReactiveHub] Added NIFTY_I alias: {alias}");
+                }
             }
         }
 

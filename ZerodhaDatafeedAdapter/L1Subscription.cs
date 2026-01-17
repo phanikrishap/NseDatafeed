@@ -37,8 +37,10 @@ public class L1Subscription
     /// </summary>
     public bool ContainsCallback(Instrument instrument)
     {
-        return _instrumentToCallbackIds.ContainsKey(instrument) &&
-               _instrumentToCallbackIds[instrument].Count > 0;
+        lock (_lock)
+        {
+            return _instrumentToCallbackIds.TryGetValue(instrument, out var ids) && ids.Count > 0;
+        }
     }
 
     /// <summary>

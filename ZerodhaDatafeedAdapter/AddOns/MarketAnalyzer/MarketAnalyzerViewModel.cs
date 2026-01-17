@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Reactive.Linq;
+using System.Windows;
 using System.Windows.Input;
 using NinjaTrader.Cbi;
 using ZerodhaDatafeedAdapter.Logging;
@@ -276,9 +277,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                  var hub = MarketDataReactiveHub.Instance;
                  _projectedOpenSubscription = hub.ProjectedOpenStream
                     .Where(state => state.IsComplete)
+                    .ObserveOnDispatcher()
                     .Subscribe(OnProjectedOpenCalculated);
 
                  _optionsGeneratedSubscription = hub.OptionsGeneratedStream
+                    .ObserveOnDispatcher()
                     .Subscribe(OnOptionsGenerated);
 
                 // Start Metrics Service
@@ -313,6 +316,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                 VPMetrics.Status = " - Starting...";
                 _vpMetricsSubscription = NiftyFuturesMetricsService.Instance.MetricsStream
                     .Where(m => m != null)
+                    .ObserveOnDispatcher()
                     .Subscribe(OnMetricsUpdated);
                 
                 await NiftyFuturesMetricsService.Instance.StartAsync();
@@ -445,6 +449,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         
         private void OnTickerUpdated(string symbol)
         {
+            // Marshal to UI thread for WPF binding safety
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher != null && !dispatcher.CheckAccess())
+            {
+                dispatcher.BeginInvoke(new Action(() => OnTickerUpdated(symbol)));
+                return;
+            }
+
             try
             {
                 var logic = MarketAnalyzerLogic.Instance;
@@ -588,11 +600,19 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
         
         private void OnHistoricalDataStatusChanged(string symbol, string status)
         {
+            // Marshal to UI thread for WPF binding safety
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher != null && !dispatcher.CheckAccess())
+            {
+                dispatcher.BeginInvoke(new Action(() => OnHistoricalDataStatusChanged(symbol, status)));
+                return;
+            }
+
             string target = symbol;
             if (symbol.Equals("GIFT_NIFTY", StringComparison.OrdinalIgnoreCase)) target = "GIFT NIFTY";
             else if (symbol.Equals("NIFTY", StringComparison.OrdinalIgnoreCase)) target = "NIFTY 50";
             else if (symbol.Equals("NIFTY_I", StringComparison.OrdinalIgnoreCase)) target = "NIFTY_I"; // Or NIFTY_I from list
-            
+
             var row = _rows.FirstOrDefault(r => r.Symbol.Equals(target, StringComparison.OrdinalIgnoreCase) || r.Symbol == target);
             if (row != null) row.Status = status;
         }

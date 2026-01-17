@@ -249,24 +249,14 @@ namespace ZerodhaDatafeedAdapter
                         })))));
                     }
                 }
-                L2Subscription l2Subscription1;
-                this._l2Subscriptions.TryGetValue(name, out l2Subscription1);
-                if (l2Subscription1 == null)
+                // Get or create L2Subscription for this symbol
+                if (!this._l2Subscriptions.TryGetValue(name, out var l2Subscription))
                 {
-                    var l2Subscriptions = this._l2Subscriptions;
-                    string key = name;
-                    var l2Subscription2 = new L2Subscription();
-                    l2Subscription2.Instrument = instrument;
-                    l2Subscription1 = l2Subscription2;
-                    l2Subscriptions.TryAdd(key, l2Subscription2);
+                    l2Subscription = new L2Subscription { Instrument = instrument };
+                    this._l2Subscriptions.TryAdd(name, l2Subscription);
                 }
-                l2Subscription1.L2Callbacks = new System.Collections.Generic.SortedList<Instrument, Action<int, string, Operation, MarketDataType, double, long, DateTime>>((System.Collections.Generic.IDictionary<Instrument, Action<int, string, Operation, MarketDataType, double, long, DateTime>>)l2Subscription1.L2Callbacks)
-                {
-                    {
-                        instrument,
-                        callback
-                    }
-                };
+                // Use thread-safe AddCallback method
+                l2Subscription.AddCallback(instrument, callback);
                 int status = (int)this._zerodhaConncetion.Status;
             }
             catch (Exception ex)
