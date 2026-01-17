@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -14,6 +15,7 @@ using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.TBS;
 using ZerodhaDatafeedAdapter.Services.Telegram;
+using ZerodhaDatafeedAdapter.Services.Trading;
 using ZerodhaDatafeedAdapter.Models.Reactive;
 
 namespace ZerodhaDatafeedAdapter.Services
@@ -52,14 +54,15 @@ namespace ZerodhaDatafeedAdapter.Services
         #region Fields
 
         private readonly ObservableCollection<TBSExecutionState> _executionStates;
-        private readonly StoxxoBridgeManager _stoxxoBridgeManager;
+        private readonly ConcurrentDictionary<int, TBSExecutionState> _executionStateDict;
+        private readonly PnLTracker _pnlTracker;
+        private readonly IOrderRouter _orderRouter;
+        private readonly TradingContext _tradingContext;
         private DispatcherTimer _statusTimer;
         private DispatcherTimer _stoxxoPollingTimer;
         private bool _optionChainReady;
         private int _delayCountdown;
         private int _nextTrancheId = 1;
-        private string _selectedUnderlying;
-        private DateTime? _selectedExpiry;
         private bool _isDisposed;
 
         private const int STATUS_TIMER_INTERVAL_MS = 1000;
@@ -117,32 +120,29 @@ namespace ZerodhaDatafeedAdapter.Services
         /// <summary>
         /// Total P&L across all Live and SquaredOff tranches (excluding missed)
         /// </summary>
-        public decimal TotalPnL => _executionStates
-            .Where(s => s.Status == TBSExecutionStatus.Live || s.Status == TBSExecutionStatus.SquaredOff)
-            .Where(s => !s.IsMissed)
-            .Sum(s => s.CombinedPnL);
+        public decimal TotalPnL => _pnlTracker.GetTotalPnL();
 
         /// <summary>
         /// Count of tranches currently Live
         /// </summary>
-        public int LiveCount => _executionStates.Count(s => s.Status == TBSExecutionStatus.Live);
+        public int LiveCount => _pnlTracker.GetLiveCount();
 
         /// <summary>
         /// Count of tranches currently in Monitoring state
         /// </summary>
-        public int MonitoringCount => _executionStates.Count(s => s.Status == TBSExecutionStatus.Monitoring);
+        public int MonitoringCount => _pnlTracker.GetMonitoringCount();
 
         /// <summary>
         /// Currently selected underlying (from Option Chain)
         /// </summary>
         public string SelectedUnderlying
         {
-            get => _selectedUnderlying;
+            get => _tradingContext.SelectedUnderlying;
             set
             {
-                if (_selectedUnderlying != value)
+                if (_tradingContext.SelectedUnderlying != value)
                 {
-                    _selectedUnderlying = value;
+                    _tradingContext.SetUnderlying(value);
                     OnPropertyChanged();
                 }
             }
@@ -153,12 +153,12 @@ namespace ZerodhaDatafeedAdapter.Services
         /// </summary>
         public DateTime? SelectedExpiry
         {
-            get => _selectedExpiry;
+            get => _tradingContext.SelectedExpiry;
             set
             {
-                if (_selectedExpiry != value)
+                if (_tradingContext.SelectedExpiry != value)
                 {
-                    _selectedExpiry = value;
+                    _tradingContext.SetExpiry(value);
                     OnPropertyChanged();
                 }
             }
@@ -180,13 +180,16 @@ namespace ZerodhaDatafeedAdapter.Services
         private TBSExecutionService()
         {
             _executionStates = new ObservableCollection<TBSExecutionState>();
-            _stoxxoBridgeManager = new StoxxoBridgeManager();
+            _executionStateDict = new ConcurrentDictionary<int, TBSExecutionState>();
+            _pnlTracker = new PnLTracker(_executionStateDict);
+            _orderRouter = new StoxxoOrderRouter();
+            _tradingContext = new TradingContext();
             _delayCountdown = FALLBACK_DELAY_SECONDS;
 
             // Subscribe to PriceSyncReady event for event-driven initialization
             SubscribeToPriceSyncReady();
 
-            TBSLogger.Info("[TBSExecutionService] Initialized");
+            TBSLogger.Info("[TBSExecutionService] Initialized with new architecture");
         }
 
         /// <summary>
@@ -370,6 +373,7 @@ namespace ZerodhaDatafeedAdapter.Services
         public void InitializeExecutionStates(string underlying, int? dte)
         {
             _executionStates.Clear();
+            _executionStateDict.Clear();
             lock (_mapLock) { _symbolTrancheMap.Clear(); }
             _nextTrancheId = 1;
 
@@ -383,6 +387,7 @@ namespace ZerodhaDatafeedAdapter.Services
             {
                 var state = CreateExecutionState(config, now, isSimulationActive);
                 _executionStates.Add(state);
+                _executionStateDict[state.TrancheId] = state;
             }
 
             OnSummaryUpdated();
@@ -891,7 +896,7 @@ namespace ZerodhaDatafeedAdapter.Services
             var selectedExpiryStr = MarketAnalyzerLogic.Instance.SelectedExpiry;
             if (!string.IsNullOrEmpty(selectedExpiryStr) && DateTime.TryParse(selectedExpiryStr, out var parsed))
                 expiry = parsed;
-            expiry = expiry ?? _selectedExpiry ?? FindNearestExpiry(underlying, state.Config?.DTE ?? 0);
+            expiry = expiry ?? _tradingContext.SelectedExpiry ?? FindNearestExpiry(underlying, state.Config?.DTE ?? 0);
             if (!expiry.HasValue) return;
 
             bool isMonthlyExpiry = MarketAnalyzerLogic.Instance.SelectedIsMonthlyExpiry;
@@ -1026,7 +1031,7 @@ namespace ZerodhaDatafeedAdapter.Services
                     if (state.Status != TBSExecutionStatus.Live && state.Status != TBSExecutionStatus.SquaredOff)
                         continue;
 
-                    await _stoxxoBridgeManager.PollAndUpdateStatusAsync(state);
+                    await _orderRouter.PollAndUpdateStatusAsync(state);
                 }
             }
             catch (Exception ex)
@@ -1041,16 +1046,16 @@ namespace ZerodhaDatafeedAdapter.Services
             {
                 state.StoxxoOrderPlaced = true;
 
-                var result = await _stoxxoBridgeManager.PlaceOrderAsync(state);
+                var result = await _orderRouter.PlaceOrderAsync(state);
 
-                if (!string.IsNullOrEmpty(result))
+                if (result.Success)
                 {
-                    state.StoxxoPortfolioName = result;
-                    state.Message = $"Stoxxo order placed: {result}";
+                    state.StoxxoPortfolioName = result.PortfolioName;
+                    state.Message = result.Message;
                 }
                 else
                 {
-                    state.Message = "Stoxxo order failed";
+                    state.Message = result.Message;
                 }
             }
             catch (Exception ex)
@@ -1065,7 +1070,7 @@ namespace ZerodhaDatafeedAdapter.Services
             try
             {
                 state.StoxxoReconciled = true;
-                await _stoxxoBridgeManager.ReconcileLegsAsync(state);
+                await _orderRouter.ReconcileOrderAsync(state);
             }
             catch (Exception ex)
             {
@@ -1078,7 +1083,7 @@ namespace ZerodhaDatafeedAdapter.Services
             try
             {
                 state.StoxxoSLModified = true;
-                await _stoxxoBridgeManager.ModifySLToCostAsync(state);
+                await _orderRouter.ModifyStopLossAsync(state);
             }
             catch (Exception ex)
             {
@@ -1092,7 +1097,7 @@ namespace ZerodhaDatafeedAdapter.Services
             {
                 state.StoxxoExitCalled = true;
 
-                var success = await _stoxxoBridgeManager.ExitOrderAsync(state);
+                var success = await _orderRouter.ExitOrderAsync(state);
 
                 if (success)
                 {

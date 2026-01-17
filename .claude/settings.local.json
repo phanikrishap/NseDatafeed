@@ -143,7 +143,9 @@
       "Bash(powershell: Get-ChildItem \"C:\\\\Users\\\\Phani Krishna\\\\Documents\\\\NinjaTrader 8\\\\ZerodhaAdapter\\\\Logs\" -Directory)",
       "Bash(Sort-Object Name -Descending)",
       "Bash(Select-Object -First 1)",
-      "Bash(ForEach-Object { $_FullName })"
+      "Bash(ForEach-Object { $_FullName })",
+      "Bash(msbuild:*)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File build-and-deploy.ps1)"
     ]
   }
 }

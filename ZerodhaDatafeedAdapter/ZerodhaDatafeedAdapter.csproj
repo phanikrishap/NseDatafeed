@@ -244,6 +244,9 @@
     <Compile Include="Models\ExecutionSettings.cs" />
     <Compile Include="Services\TBSConfigurationService.cs" />
     <Compile Include="Services\TBSExecutionService.cs" />
+    <Compile Include="Services\Trading\PnLTracker.cs" />
+    <Compile Include="Services\Trading\OrderRouter.cs" />
+    <Compile Include="Services\Trading\TradingContext.cs" />
     <Compile Include="Services\TBS\StoxxoBridgeManager.cs" />
     <Compile Include="Services\Hedge\HedgeSubscriptionService.cs" />
     <Compile Include="Services\SimulationService.cs" />
@@ -312,6 +315,9 @@
     <Compile Include="AddOns\OptionSignals\Controls\OptionSignalsListView.cs" />
     <Compile Include="AddOns\OptionSignals\Controls\SignalsListView.cs" />
     <Compile Include="AddOns\OptionSignals\Services\SignalsOrchestrator.cs" />
+    <Compile Include="Services\Signals\NotificationService.cs" />
+    <Compile Include="Services\Signals\SignalContext.cs" />
+    <Compile Include="Services\Signals\ExecutionBridge.cs" />
     <Compile Include="AddOns\OptionSignals\Services\SignalBridgeService.cs" />
     <Compile Include="AddOns\OptionSignals\Services\TerminalService.cs" />
     <Compile Include="AddOns\OptionSignals\Models\OptionBarHistory.cs" />

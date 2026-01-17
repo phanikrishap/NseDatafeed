@@ -9,6 +9,7 @@ using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Analysis.Components;
+using ZerodhaDatafeedAdapter.Services.Signals;
 
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 {
@@ -425,6 +426,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         private readonly Dispatcher _dispatcher;
         private readonly object _lock = new object();
 
+        private readonly INotificationService _notificationService;
+        private readonly IExecutionBridge _executionBridge;
+        private readonly SignalContext _signalContext;
+
         private static readonly ILoggerService _log = LoggerFactory.OpSignals;
 
         // Underlying state
@@ -433,10 +438,6 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         private DateTime _lastUnderlyingLogTime = DateTime.MinValue;
         private readonly TimeSpan _underlyingLogInterval = TimeSpan.FromSeconds(30); // Log underlying every 30s
 
-        private double _atmStrike;
-        private int _strikeStep = 50;
-        private DateTime? _selectedExpiry;
-        private string _underlying = "NIFTY"; // Underlying for dynamic ATM lookup
         private DateTime _lastEvaluationTime = DateTime.MinValue;
         private readonly TimeSpan _minEvaluationInterval = TimeSpan.FromMilliseconds(500); // Throttle evaluations
 
@@ -453,14 +454,19 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             _signals = signals;
             _dispatcher = dispatcher;
 
+            // Initialize new architecture components
+            _notificationService = new CompositeNotificationService();
+            _executionBridge = new SignalExecutionBridge();
+            _signalContext = new SignalContext();
+
             // Initialize underlying bar history (default to NIFTY)
             _underlyingBarHistory = new UnderlyingBarHistory("NIFTY_I", 256);
 
             // Register default strategies
             _strategies.Add(new HvnBuySellStrategy());
 
-            _log.Info("[SignalsOrchestrator] Initialized with default strategies");
-            TerminalService.Instance.Info("SignalsOrchestrator initialized");
+            _log.Info("[SignalsOrchestrator] Initialized with new architecture and default strategies");
+            _notificationService.NotifyInfo("SignalsOrchestrator initialized");
         }
 
         /// <summary>
@@ -536,7 +542,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             {
                 _signals.Clear();
                 _log.Info("[SignalsOrchestrator] All signals cleared");
-                TerminalService.Instance.Info("Signals cleared for new session");
+                _notificationService.NotifyInfo("Signals cleared for new session");
             });
         }
 
@@ -574,15 +580,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         {
             lock (_lock)
             {
-                _atmStrike = atmStrike;
-                _strikeStep = strikeStep;
-                _selectedExpiry = selectedExpiry;
-                if (!string.IsNullOrEmpty(underlying))
-                {
-                    _underlying = underlying;
-                }
+                _signalContext.SetMarketContext(atmStrike, strikeStep, selectedExpiry, underlying);
             }
-            TerminalService.Instance.Info($"Market context set: Underlying={_underlying}, ATM={atmStrike}, Step={strikeStep}, Expiry={selectedExpiry?.ToString("dd-MMM") ?? "N/A"}");
+            _notificationService.NotifyInfo($"Market context set: Underlying={_signalContext.SelectedUnderlying}, ATM={atmStrike}, Step={strikeStep}, Expiry={selectedExpiry?.ToString("dd-MMM") ?? "N/A"}");
         }
 
         /// <summary>
@@ -758,7 +758,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     if (execSettings != null && execSettings.IsStoplossTriggered((decimal)signal.UnrealizedPnL))
                     {
                         _log.Info($"[SignalsOrchestrator] STOPLOSS TRIGGERED: {signal.Symbol} UnrealizedPnL={signal.UnrealizedPnL:F2} exceeds StoplossExposure={execSettings.StoplossExposure}");
-                        TerminalService.Instance.Signal($"[STOPLOSS] {signal.Symbol} closed at {price:F2} | Loss={signal.UnrealizedPnL:F2}");
+                        _notificationService.NotifyStoploss(signal.SignalId, signal.Symbol, price);
 
                         // Close the signal
                         CloseSignal(signal.SignalId, price, "Stoploss exposure exceeded");
@@ -802,18 +802,18 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
             lock (_lock)
             {
-                if (_atmStrike <= 0 || _optionStates.Count == 0)
+                if (_signalContext.ATMStrike <= 0 || _optionStates.Count == 0)
                     return;
 
                 // Get dynamic ATM from MarketAnalyzerLogic (calculated by Option Chain based on straddle prices)
                 // This ensures we use the same ATM as Option Chain window shows
-                double dynamicAtm = (double)MarketAnalyzerLogic.Instance.GetATMStrike(_underlying);
-                double atmToUse = dynamicAtm > 0 ? dynamicAtm : _atmStrike;
+                double dynamicAtm = (double)MarketAnalyzerLogic.Instance.GetATMStrike(_signalContext.SelectedUnderlying);
+                double atmToUse = dynamicAtm > 0 ? dynamicAtm : _signalContext.ATMStrike;
 
                 // Log ATM change if significant
-                if (dynamicAtm > 0 && Math.Abs(dynamicAtm - _atmStrike) > _strikeStep)
+                if (dynamicAtm > 0 && Math.Abs(dynamicAtm - _signalContext.ATMStrike) > _signalContext.StrikeStep)
                 {
-                    _log.Info($"[SignalsOrchestrator] Using dynamic ATM={dynamicAtm} (initial ATM was {_atmStrike})");
+                    _log.Info($"[SignalsOrchestrator] Using dynamic ATM={dynamicAtm} (initial ATM was {_signalContext.ATMStrike})");
                 }
 
                 newSignals = new List<SignalRow>();
@@ -826,7 +826,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                             _optionStates,
                             _barHistories,
                             atmToUse,
-                            _strikeStep,
+                            _signalContext.StrikeStep,
                             currentTime,
                             _signals.ToList());
 
@@ -888,12 +888,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             try
             {
                 // Generate unique order ID for this signal
-                signal.BridgeOrderId = SignalBridgeService.Instance.GenerateOrderId();
+                signal.BridgeOrderId = _executionBridge.GenerateOrderId();
                 _log.Info($"[SignalsOrchestrator] Executing signal via bridge: OrderId={signal.BridgeOrderId} {signal.Symbol}");
-                TerminalService.Instance.Info($"[Bridge] Placing order #{signal.BridgeOrderId}: {signal.DirectionStr} {signal.Symbol} Qty={signal.Quantity}");
+                _notificationService.NotifyInfo($"[Bridge] Placing order #{signal.BridgeOrderId}: {signal.DirectionStr} {signal.Symbol} Qty={signal.Quantity}");
 
                 // Call bridge to place entry order
-                var response = await SignalBridgeService.Instance.PlaceEntryOrderAsync(signal);
+                var response = await _executionBridge.PlaceSignalOrderAsync(signal);
 
                 // Update signal with bridge response
                 signal.BridgeRequestId = response.RequestId;
@@ -902,25 +902,25 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 if (response.IsSuccess)
                 {
                     _log.Info($"[SignalsOrchestrator] Bridge order placed successfully: RequestId={response.RequestId}");
-                    TerminalService.Instance.Signal($"[Bridge] Order #{signal.BridgeOrderId} PLACED - RequestId={response.RequestId}");
+                    _notificationService.NotifySignal($"[Bridge] Order #{signal.BridgeOrderId} PLACED - RequestId={response.RequestId}");
                 }
                 else
                 {
                     _log.Warn($"[SignalsOrchestrator] Bridge order failed: {response.ErrorMessage}");
-                    TerminalService.Instance.Error($"[Bridge] Order #{signal.BridgeOrderId} FAILED: {response.ErrorMessage}");
+                    _notificationService.NotifyError($"[Bridge] Order #{signal.BridgeOrderId} FAILED: {response.ErrorMessage}");
 
                     // Get detailed error from bridge if available
                     if (response.RequestId > 0 && response.RequestId < 90000)
                     {
-                        string detailedError = await SignalBridgeService.Instance.GetErrorAsync(response.RequestId);
-                        TerminalService.Instance.Error($"[Bridge] Error details: {detailedError}");
+                        string detailedError = await _executionBridge.GetErrorAsync(response.RequestId);
+                        _notificationService.NotifyError($"[Bridge] Error details: {detailedError}");
                     }
                 }
             }
             catch (Exception ex)
             {
                 _log.Error($"[SignalsOrchestrator] ExecuteSignalViaBridge error: {ex.Message}", ex);
-                TerminalService.Instance.Error($"[Bridge] Exception executing signal: {ex.Message}");
+                _notificationService.NotifyError($"[Bridge] Exception executing signal: {ex.Message}");
                 signal.BridgeError = ex.Message;
             }
         }
@@ -951,21 +951,21 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         {
             if (signal.Status != SignalStatus.Active)
             {
-                TerminalService.Instance.Warn($"[Bridge] Cannot exit non-active signal: {signal.Symbol} Status={signal.Status}");
+                _notificationService.NotifyInfo($"[Bridge] Cannot exit non-active signal: {signal.Symbol} Status={signal.Status}");
                 return;
             }
 
             try
             {
                 _log.Info($"[SignalsOrchestrator] Exiting signal via bridge: OrderId={signal.BridgeOrderId} {signal.Symbol}");
-                TerminalService.Instance.Info($"[Bridge] Placing exit for #{signal.BridgeOrderId}: {signal.Symbol} @ {(exitPrice > 0 ? exitPrice.ToString("F2") : "MKT")}");
+                _notificationService.NotifyInfo($"[Bridge] Placing exit for #{signal.BridgeOrderId}: {signal.Symbol} @ {(exitPrice > 0 ? exitPrice.ToString("F2") : "MKT")}");
 
-                var response = await SignalBridgeService.Instance.PlaceExitOrderAsync(signal, exitPrice, orderType);
+                var response = await _executionBridge.ExitSignalOrderAsync(signal, exitPrice, orderType);
 
                 if (response.IsSuccess)
                 {
                     _log.Info($"[SignalsOrchestrator] Bridge exit order placed: RequestId={response.RequestId}");
-                    TerminalService.Instance.Signal($"[Bridge] Exit #{signal.BridgeOrderId} PLACED - RequestId={response.RequestId}");
+                    _notificationService.NotifySignal($"[Bridge] Exit #{signal.BridgeOrderId} PLACED - RequestId={response.RequestId}");
 
                     // Update signal status
                     signal.Status = SignalStatus.Closed;
@@ -975,13 +975,13 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 else
                 {
                     _log.Warn($"[SignalsOrchestrator] Bridge exit order failed: {response.ErrorMessage}");
-                    TerminalService.Instance.Error($"[Bridge] Exit #{signal.BridgeOrderId} FAILED: {response.ErrorMessage}");
+                    _notificationService.NotifyError($"[Bridge] Exit #{signal.BridgeOrderId} FAILED: {response.ErrorMessage}");
                 }
             }
             catch (Exception ex)
             {
                 _log.Error($"[SignalsOrchestrator] ExitSignalViaBridge error: {ex.Message}", ex);
-                TerminalService.Instance.Error($"[Bridge] Exception exiting signal: {ex.Message}");
+                _notificationService.NotifyError($"[Bridge] Exception exiting signal: {ex.Message}");
             }
         }
 
