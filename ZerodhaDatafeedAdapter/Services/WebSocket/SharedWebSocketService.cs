@@ -36,7 +36,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
         private CancellationTokenSource _cts;
         private Task _messageLoopTask;
         private int _connectionState = (int)WebSocketConnectionState.Disconnected;
-        private bool _isProcessingPending = false;
+        private int _isProcessingPending = 0;
 
         public event Action<string, ZerodhaTickData> TickReceived;
         public event Action ConnectionReady;
@@ -310,8 +310,9 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
 
         private async Task ProcessPendingSubscriptionsAsync()
         {
-            if (_isProcessingPending) return;
-            _isProcessingPending = true;
+            // Use atomic compare-exchange to prevent race condition
+            if (Interlocked.CompareExchange(ref _isProcessingPending, 1, 0) != 0)
+                return;
 
             try
             {
@@ -330,7 +331,7 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             }
             finally
             {
-                _isProcessingPending = false;
+                Interlocked.Exchange(ref _isProcessingPending, 0);
             }
         }
 
@@ -420,7 +421,16 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
                             var handler = TickReceived;
                             if (handler != null)
                             {
-                                handler.Invoke(symbol, tickData);
+                                try
+                                {
+                                    handler.Invoke(symbol, tickData);
+                                }
+                                catch (Exception handlerEx)
+                                {
+                                    // Return tick to pool on handler exception to prevent pool exhaustion
+                                    Logger.Error($"[SharedWS] TickReceived handler exception for {symbol}: {handlerEx.Message}");
+                                    ZerodhaTickDataPool.Return(tickData);
+                                }
                             }
                             else
                             {

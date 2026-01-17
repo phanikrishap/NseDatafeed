@@ -153,7 +153,30 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
             _cts.Cancel();
             _healthMonitor.Dispose();
             _performanceMonitor.Dispose();
-            foreach (var shard in _shards) { shard.Queue.CompleteAdding(); shard.Queue.Dispose(); }
+
+            // Signal queues to complete and wait for worker tasks to finish
+            // This prevents ObjectDisposedException when workers call OnNext during dispose
+            foreach (var shard in _shards)
+            {
+                shard.Queue.CompleteAdding();
+            }
+
+            // Wait for all worker tasks to complete (with timeout to prevent hangs)
+            foreach (var shard in _shards)
+            {
+                try
+                {
+                    shard.WorkerTask?.Wait(TimeSpan.FromSeconds(5));
+                }
+                catch (AggregateException) { } // Ignore task cancellation exceptions
+                catch (OperationCanceledException) { }
+            }
+
+            // Now safe to dispose queues and subject
+            foreach (var shard in _shards)
+            {
+                shard.Queue.Dispose();
+            }
             _tickSubject.OnCompleted();
             _tickSubject.Dispose();
             _cts.Dispose();

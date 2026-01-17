@@ -184,9 +184,12 @@ public class L1Subscription
     /// </summary>
     public void MarkCallbackFired(string callbackId)
     {
-        if (_callbacks.TryGetValue(callbackId, out var entry))
+        lock (_lock)
         {
-            entry.LastFiredAt = DateTime.UtcNow;
+            if (_callbacks.TryGetValue(callbackId, out var entry))
+            {
+                entry.LastFiredAt = DateTime.UtcNow;
+            }
         }
     }
 

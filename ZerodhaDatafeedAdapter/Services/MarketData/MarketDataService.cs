@@ -38,7 +38,10 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
     /// </summary>
     public class MarketDataService
     {
-        private static MarketDataService _instance;
+        // Thread-safe lazy singleton initialization
+        private static readonly Lazy<MarketDataService> _lazyInstance =
+            new Lazy<MarketDataService>(() => new MarketDataService());
+
         private readonly InstrumentManager _instrumentManager;
         private readonly WebSocketManager _webSocketManager;
         private readonly ConfigurationManager _configManager;
@@ -49,17 +52,9 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         private readonly object _tickProcessorLock = new object();
 
         /// <summary>
-        /// Gets the singleton instance of the MarketDataService
+        /// Gets the singleton instance of the MarketDataService (thread-safe)
         /// </summary>
-        public static MarketDataService Instance
-        {
-            get
-            {
-                if (_instance == null)
-                    _instance = new MarketDataService();
-                return _instance;
-            }
-        }
+        public static MarketDataService Instance => _lazyInstance.Value;
 
         /// <summary>
         /// Gets the OptimizedTickProcessor instance, creating it if necessary

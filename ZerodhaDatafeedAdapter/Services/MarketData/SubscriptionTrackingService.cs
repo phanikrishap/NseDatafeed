@@ -151,36 +151,45 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         }
 
         /// <summary>
-        /// Gets the reference count for a symbol.
+        /// Gets the reference count for a symbol (thread-safe).
         /// </summary>
         public int GetReferenceCount(string symbol)
         {
-            if (_subscriptions.TryGetValue(symbol, out var info))
+            lock (_operationLock)
             {
-                return info.ReferenceCount;
+                if (_subscriptions.TryGetValue(symbol, out var info))
+                {
+                    return info.ReferenceCount;
+                }
+                return 0;
             }
-            return 0;
         }
 
         /// <summary>
-        /// Checks if a subscription is sticky (should never be unsubscribed).
+        /// Checks if a subscription is sticky (should never be unsubscribed). Thread-safe.
         /// </summary>
         public bool IsSticky(string symbol)
         {
-            if (_subscriptions.TryGetValue(symbol, out var info))
+            lock (_operationLock)
             {
-                return info.IsSticky;
+                if (_subscriptions.TryGetValue(symbol, out var info))
+                {
+                    return info.IsSticky;
+                }
+                return false;
             }
-            return false;
         }
 
         /// <summary>
-        /// Gets subscription info for a symbol.
+        /// Gets subscription info for a symbol (thread-safe).
         /// </summary>
         public SubscriptionInfo GetSubscriptionInfo(string symbol)
         {
-            _subscriptions.TryGetValue(symbol, out var info);
-            return info;
+            lock (_operationLock)
+            {
+                _subscriptions.TryGetValue(symbol, out var info);
+                return info;
+            }
         }
 
         /// <summary>
