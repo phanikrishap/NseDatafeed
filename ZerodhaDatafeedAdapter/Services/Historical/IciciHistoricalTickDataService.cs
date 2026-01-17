@@ -20,10 +20,6 @@ using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Auth;
 using ZerodhaDatafeedAdapter.Services.Instruments;
-using ZerodhaDatafeedAdapter.Core;
-using ZerodhaDatafeedAdapter.Services.Historical.Providers;
-using ZerodhaDatafeedAdapter.Services.Historical.Persistence;
-using ZerodhaDatafeedAdapter.Services.Historical.Adapters;
 
 namespace ZerodhaDatafeedAdapter.Services.Historical
 {
@@ -107,11 +103,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
         // Current Zerodha symbol map for NT persistence (set during DownloadOptionChainHistoryAsync)
         private Dictionary<(int strike, string optionType), string> _currentZerodhaSymbolMap;
 
-        // New architecture dependencies
-        private IHistoricalDataProvider _provider;
-        private ITickDataPersistence _persistence;
-        private INT8BarsRequestAdapter _nt8Adapter;
-
         #endregion
 
         #region Public Observables
@@ -179,11 +170,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             }
 
             HistoricalTickLogger.Info("[HistoricalTickDataService] Initializing - subscribing to ICICI broker status");
-
-            // Initialize new architecture dependencies
-            _provider = ServiceFactory.GetIciciProvider();
-            _persistence = ServiceFactory.GetTickPersistence();
-            _nt8Adapter = ServiceFactory.GetNT8Adapter();
 
             // Subscribe to ICICI broker availability
             _iciciStatusSubscription = IciciDirectTokenService.Instance.BrokerStatus

@@ -17,11 +17,10 @@ namespace ZerodhaDatafeedAdapter.Core
         private static ITickDataPersistence _tickPersistence;
         private static INT8BarsRequestAdapter _nt8Adapter;
 
-        public static IHistoricalDataProvider GetAccelpixProvider()
+        public static IHistoricalDataProvider GetAccelpixProvider(AccelpixApiClient apiClient)
         {
             if (_accelpixProvider == null)
             {
-                var apiClient = new AccelpixApiClient(apiKey: null);
                 _accelpixProvider = new AccelpixHistoricalDataProvider(apiClient);
             }
             return _accelpixProvider;

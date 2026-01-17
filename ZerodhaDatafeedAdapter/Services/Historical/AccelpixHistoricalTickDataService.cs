@@ -118,11 +118,12 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     return;
                 }
 
-                // Create API client
+                // Create API client and initialize provider
                 _apiClient = new AccelpixApiClient(_apiKey);
+                _provider = ServiceFactory.GetAccelpixProvider(_apiClient);
+                _ = _provider.InitializeAsync(_apiKey, null); // Initialize provider with API key
 
-                // Initialize new architecture dependencies
-                _provider = ServiceFactory.GetAccelpixProvider();
+                // Initialize persistence and NT8 adapter
                 _persistence = ServiceFactory.GetTickPersistence();
                 _nt8Adapter = ServiceFactory.GetNT8Adapter();
 
