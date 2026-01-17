@@ -19,47 +19,6 @@ using ZerodhaDatafeedAdapter.Helpers;
 
 namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
 {
-    #region Value Converters
-
-    /// <summary>
-    /// Converts SimulationState to color
-    /// </summary>
-    public class SimStateToColorConverter : IValueConverter
-    {
-        private static readonly SolidColorBrush IdleBrush = new SolidColorBrush(Color.FromRgb(150, 150, 150));
-        private static readonly SolidColorBrush LoadingBrush = new SolidColorBrush(Color.FromRgb(200, 180, 80));
-        private static readonly SolidColorBrush ReadyBrush = new SolidColorBrush(Color.FromRgb(100, 150, 220));
-        private static readonly SolidColorBrush PlayingBrush = new SolidColorBrush(Color.FromRgb(100, 200, 100));
-        private static readonly SolidColorBrush PausedBrush = new SolidColorBrush(Color.FromRgb(220, 180, 50));
-        private static readonly SolidColorBrush CompletedBrush = new SolidColorBrush(Color.FromRgb(100, 200, 100));
-        private static readonly SolidColorBrush ErrorBrush = new SolidColorBrush(Color.FromRgb(220, 80, 80));
-
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            if (value is SimulationState state)
-            {
-                switch (state)
-                {
-                    case SimulationState.Idle: return IdleBrush;
-                    case SimulationState.Loading: return LoadingBrush;
-                    case SimulationState.Ready: return ReadyBrush;
-                    case SimulationState.Playing: return PlayingBrush;
-                    case SimulationState.Paused: return PausedBrush;
-                    case SimulationState.Completed: return CompletedBrush;
-                    case SimulationState.Error: return ErrorBrush;
-                }
-            }
-            return IdleBrush;
-        }
-
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            throw new NotImplementedException();
-        }
-    }
-
-    #endregion
-
     /// <summary>
     /// Simulation Engine Window - replays historical tick data for offline development
     /// </summary>

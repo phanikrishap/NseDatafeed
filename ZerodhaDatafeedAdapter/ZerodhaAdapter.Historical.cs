@@ -306,13 +306,6 @@ namespace ZerodhaDatafeedAdapter
             return task;
         }
 
-        private bool IsIndianMarketInstrument(Instrument instrument)
-        {
-            string name = instrument.MasterInstrument.Name;
-            return name.EndsWith("-NSE") || name.EndsWith("-BSE") ||
-                   instrument.Exchange == Exchange.Nse || instrument.Exchange == Exchange.Bse;
-        }
-
         /// <summary>
         /// Get tick data from ICICI SQLite cache for BarsWorker.
         /// Converts cached HistoricalCandle data to Record format.

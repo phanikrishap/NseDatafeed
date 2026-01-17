@@ -354,58 +354,6 @@ namespace ZerodhaDatafeedAdapter.Services.WebSocket
             if (offset + 44 <= data.Length) tick.Close = ZerodhaBinaryReader.ReadInt32BE(data, offset + 40) / 100.0;
         }
 
-        private void ParseFullData(byte[] data, int offset, ZerodhaTickData tick)
-        {
-            if (offset + 48 <= data.Length)
-            {
-                int lastTradedTimestamp = ZerodhaBinaryReader.ReadInt32BE(data, offset + 44);
-                if (lastTradedTimestamp > 0) tick.LastTradeTime = ZerodhaBinaryReader.UnixSecondsToLocalTime(lastTradedTimestamp);
-            }
-
-            if (offset + 52 <= data.Length) tick.OpenInterest = ZerodhaBinaryReader.ReadInt32BE(data, offset + 48);
-            if (offset + 56 <= data.Length) tick.OpenInterestDayHigh = ZerodhaBinaryReader.ReadInt32BE(data, offset + 52);
-            if (offset + 60 <= data.Length) tick.OpenInterestDayLow = ZerodhaBinaryReader.ReadInt32BE(data, offset + 56);
-
-            if (offset + 64 <= data.Length)
-            {
-                int exchangeTimestamp = ZerodhaBinaryReader.ReadInt32BE(data, offset + 60);
-                if (exchangeTimestamp > 0) tick.ExchangeTimestamp = ZerodhaBinaryReader.UnixSecondsToLocalTime(exchangeTimestamp);
-            }
-        }
-
-        private void ParseMarketDepth(byte[] data, int offset, ZerodhaTickData tick)
-        {
-            // Process bids (5 levels)
-            for (int j = 0; j < 5; j++)
-            {
-                int depthOffset = offset + 64 + (j * 12);
-                if (depthOffset + 12 <= data.Length)
-                {
-                    tick.BidDepth[j] = new DepthEntry
-                    {
-                        Quantity = ZerodhaBinaryReader.ReadInt32BE(data, depthOffset),
-                        Price = ZerodhaBinaryReader.ReadInt32BE(data, depthOffset + 4) / 100.0,
-                        Orders = ZerodhaBinaryReader.ReadInt16BE(data, depthOffset + 8)
-                    };
-                }
-            }
-
-            // Process asks (5 levels)
-            for (int j = 0; j < 5; j++)
-            {
-                int depthOffset = offset + 124 + (j * 12);
-                if (depthOffset + 12 <= data.Length)
-                {
-                    tick.AskDepth[j] = new DepthEntry
-                    {
-                        Quantity = ZerodhaBinaryReader.ReadInt32BE(data, depthOffset),
-                        Price = ZerodhaBinaryReader.ReadInt32BE(data, depthOffset + 4) / 100.0,
-                        Orders = ZerodhaBinaryReader.ReadInt16BE(data, depthOffset + 8)
-                    };
-                }
-            }
-        }
-
         private ZerodhaTickData CreateDefaultTick(int token, string symbol)
         {
             // OPTIMIZATION: Use object pool to reduce GC pressure

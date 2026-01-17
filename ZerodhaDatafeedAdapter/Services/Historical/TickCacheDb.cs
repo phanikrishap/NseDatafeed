@@ -203,14 +203,6 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             return dt.Year * 10000 + dt.Month * 100 + dt.Day;
         }
 
-        private static DateTime FromDateInt(int dateInt)
-        {
-            int year = dateInt / 10000;
-            int month = (dateInt / 100) % 100;
-            int day = dateInt % 100;
-            return new DateTime(year, month, day);
-        }
-
         #endregion
 
         #region Cache Operations

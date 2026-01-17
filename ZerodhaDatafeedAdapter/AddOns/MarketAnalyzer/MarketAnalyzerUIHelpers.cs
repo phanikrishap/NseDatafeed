@@ -535,23 +535,6 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
             return border;
         }
 
-        private static void AddCompHeaderCell(Grid grid, int row, int col, string text)
-        {
-            var tb = new TextBlock
-            {
-                Text = text,
-                FontFamily = _ntFont,
-                FontSize = 10,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = new SolidColorBrush(Color.FromRgb(180, 180, 180)),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 2, 0, 2)
-            };
-            Grid.SetRow(tb, row);
-            Grid.SetColumn(tb, col);
-            grid.Children.Add(tb);
-        }
-
         /// <summary>
         /// Adds a composite header cell with a label and a data-bound date range.
         /// Shows as "1D\n(13-Jan)" or "3D\n(10-Jan to 13-Jan)"

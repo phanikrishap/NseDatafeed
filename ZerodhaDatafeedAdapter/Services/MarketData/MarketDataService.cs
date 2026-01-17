@@ -223,62 +223,6 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
         }
 
         /// <summary>
-        /// Processes market depth data
-        /// </summary>
-        /// <param name="data">The binary data</param>
-        /// <param name="tokenInt">The instrument token</param>
-        /// <param name="nativeSymbolName">The native symbol name</param>
-        /// <param name="l2Subscriptions">The L2 subscriptions dictionary</param>
-        private void ProcessDepthData(byte[] data, int tokenInt, string nativeSymbolName,
-            ConcurrentDictionary<string, L2Subscription> l2Subscriptions)
-        {
-            if (data.Length < 2)
-            {
-                NinjaTrader.NinjaScript.NinjaScript.Log("[DEPTH PARSER] Packet too small", NinjaTrader.Cbi.LogLevel.Warning);
-                return;
-            }
-
-            int offset = 0;
-            int packetCount = ZerodhaAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt16BE(data, offset);
-            offset += 2;
-
-            for (int i = 0; i < packetCount; i++)
-            {
-                // Check if we have enough data for packet length
-                if (offset + 2 > data.Length)
-                    break;
-
-                int packetLength = ZerodhaAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt16BE(data, offset);
-                offset += 2;
-
-                // Check if we have enough data for the packet content
-                if (offset + packetLength > data.Length)
-                    break;
-
-                // Only process packets with valid length (we need 184 bytes for market depth)
-                if (packetLength != 184)
-                {
-                    offset += packetLength; // Skip this packet
-                    continue;
-                }
-
-                // Check if this is our subscribed token
-                int iToken = ZerodhaAPI.Zerodha.Utility.ZerodhaBinaryReader.ReadInt32BE(data, offset);
-                if (iToken != tokenInt)
-                {
-                    offset += packetLength; // Skip this packet
-                    continue;
-                }
-
-                // Process market depth packet
-                ProcessDepthPacket(data, offset, packetLength, nativeSymbolName, l2Subscriptions);
-
-                // Move to next packet
-                offset += packetLength;
-            }
-        }
-
-        /// <summary>
         /// Processes a market depth packet
         /// </summary>
         /// <param name="data">The binary data</param>
@@ -380,69 +324,6 @@ namespace ZerodhaDatafeedAdapter.Services.MarketData
                     await Task.Delay(500, cts.Token);
                 }
             });
-        }
-
-        /// <summary>
-        /// Logs tick information
-        /// </summary>
-        /// <param name="nativeSymbolName">The native symbol name</param>
-        /// <param name="lastPrice">The last traded price</param>
-        /// <param name="lastQuantity">The last traded quantity</param>
-        /// <param name="volume">The volume</param>
-        /// <param name="timestamp">The timestamp</param>
-        /// <param name="receivedTime">The time the message was received</param>
-        private async Task LogTickInformationAsync(string nativeSymbolName, double lastPrice, int lastQuantity, int volume, DateTime timestamp, DateTime receivedTime)
-        {
-            await Task.Run(() =>
-            {
-                try
-                {
-                    // Format the log message
-                    string logMessage = string.Format(
-                        "{0:HH:mm:ss.fff},{1},{2:HH:mm:ss.fff},{3:HH:mm:ss.fff},{4:HH:mm:ss.fff},{5},{6},{7}",
-                        receivedTime, // System Time (when received by adapter)
-                        nativeSymbolName,
-                        receivedTime, // Placeholder for original received time before parsing, if available
-                        timestamp,    // ExchangeTime (from tick data)
-                        DateTime.Now, // ParsedTime (current time, assuming parsing is quick)
-                        lastPrice,
-                        lastQuantity,
-                        volume);
-
-                    // Log to NinjaTrader's log (consider if this is needed or too verbose)
-                    // NinjaTrader.NinjaScript.NinjaScript.Log($"[TICK-LOG] {logMessage}", NinjaTrader.Cbi.LogLevel.Information);
-
-                    // Append to CSV - Ensure this path is configurable and accessible
-                    // string logFilePath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "log", "TickDataLog.csv");
-                    // System.IO.File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
-                }
-                catch (Exception ex)
-                {
-                    NinjaTrader.NinjaScript.NinjaScript.Log($"[LOG-TICK-ERROR] Failed to log tick: {ex.Message}", NinjaTrader.Cbi.LogLevel.Error);
-                }
-            });
-        }
-
-        /// <summary>
-        /// Gets the current time in Indian Standard Time
-        /// </summary>
-        /// <param name="dateTime">The date time</param>
-        /// <returns>The date time in Indian Standard Time</returns>
-        private DateTime GetIndianTime(DateTime dateTime)
-        {
-            // OPTIMIZATION: Use cached TimeZone to avoid FindSystemTimeZoneById
-            return TimeZoneInfo.ConvertTime(dateTime, Constants.IndianTimeZone);
-        }
-
-        /// <summary>
-        /// Converts a Unix timestamp to local time
-        /// </summary>
-        /// <param name="unixTimestamp">The Unix timestamp</param>
-        /// <returns>The local DateTime</returns>
-        private DateTime UnixSecondsToLocalTime(int unixTimestamp)
-        {
-            // OPTIMIZATION: Use cached epoch to avoid repeated allocations
-            return Constants.UnixEpoch.AddSeconds(unixTimestamp).ToLocalTime();
         }
 
         #region Shared WebSocket Subscription

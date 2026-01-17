@@ -791,22 +791,6 @@ namespace ZerodhaDatafeedAdapter.Services
             }
         }
 
-        private void ProcessGoingLive(TBSExecutionState state, TBSExecutionStatus oldStatus)
-        {
-            if (oldStatus != TBSExecutionStatus.Monitoring || state.Status != TBSExecutionStatus.Live)
-                return;
-
-            if (state.SkippedDueToProfitCondition)
-            {
-                state.Status = TBSExecutionStatus.Skipped;
-            }
-            else
-            {
-                TBSLogger.Info($"Tranche #{state.TrancheId} Going Live - locking strike");
-                LockStrikeAndEnter(state);
-            }
-        }
-
         private void ProcessStoxxoReconciliation(TBSExecutionState state)
         {
             if (state.Status != TBSExecutionStatus.Live || !state.StoxxoOrderPlaced || state.StoxxoReconciled)

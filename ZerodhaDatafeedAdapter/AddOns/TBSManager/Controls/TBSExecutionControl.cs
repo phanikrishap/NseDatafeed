@@ -30,7 +30,6 @@ namespace ZerodhaDatafeedAdapter.AddOns.TBSManager.Controls
         private DispatcherTimer _rebuildDebounceTimer;
         private bool _rebuildPending;
         private bool _isRebuilding;
-        private HashSet<string> _activeFilters = new HashSet<string>();
 
         public TBSExecutionControl(TBSViewModel viewModel)
         {
