@@ -583,7 +583,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 if (age.TotalMinutes > 10)
                 {
                     HistoricalTickLogger.Warn($"[INST-QUEUE] Skipping stale request for {symbol} (age={age.TotalMinutes:F1}min)");
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(symbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
                         State = TickDataState.Failed,
@@ -611,7 +611,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                     }
 
                     HistoricalTickLogger.Info($"[INST-QUEUE] CACHE HIT: {symbol} has {totalTicks} ticks across {daysToFetch.Dates.Count} day(s)");
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(symbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
                         State = TickDataState.Ready,
@@ -625,7 +625,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 }
 
                 // Update status to downloading
-                statusSubject.OnNext(new InstrumentTickDataStatus
+                UpdateInstrumentStatus(symbol, new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = symbol,
                     State = TickDataState.Downloading,
@@ -637,7 +637,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 if (parsedInfo == null)
                 {
                     HistoricalTickLogger.Warn($"[INST-QUEUE] Cannot parse symbol: {symbol}");
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(symbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
                         State = TickDataState.Failed,
@@ -725,7 +725,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 if (totalFiltered > 0)
                 {
                     HistoricalTickLogger.Info($"[INST-QUEUE] {symbol}: COMPLETE - {totalFiltered} ticks across {daysToFetch.Dates.Count} day(s)");
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(symbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
                         State = TickDataState.Ready,
@@ -739,7 +739,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 else
                 {
                     HistoricalTickLogger.Warn($"[INST-QUEUE] {symbol}: No data after filtering (downloaded {totalDownloaded})");
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(symbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = symbol,
                         State = TickDataState.NoData,
@@ -751,7 +751,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             catch (Exception ex)
             {
                 HistoricalTickLogger.Error($"[INST-QUEUE] Error processing {symbol}: {ex.Message}");
-                statusSubject.OnNext(new InstrumentTickDataStatus
+                UpdateInstrumentStatus(symbol, new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = symbol,
                     State = TickDataState.Failed,

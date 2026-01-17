@@ -408,7 +408,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 if (age.TotalMinutes > 10)
                 {
                     HistoricalTickLogger.Warn($"[NEW-ARCH] Skipping stale request for {zerodhaSymbol} (age={age.TotalMinutes:F1}min)");
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Failed,
@@ -439,7 +439,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                     await _nt8Adapter.TriggerBarsRequestAsync(zerodhaSymbol, cached);
 
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Ready,
@@ -450,7 +450,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 }
 
                 // Update status to downloading
-                statusSubject.OnNext(new InstrumentTickDataStatus
+                UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = zerodhaSymbol,
                     State = TickDataState.Downloading,
@@ -494,7 +494,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 {
                     await _nt8Adapter.TriggerBarsRequestAsync(zerodhaSymbol, allTicks);
 
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Ready,
@@ -506,7 +506,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 }
                 else
                 {
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.NoData,
@@ -518,7 +518,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             catch (Exception ex)
             {
                 HistoricalTickLogger.Error($"[NEW-ARCH] Error processing {zerodhaSymbol}: {ex.Message}", ex);
-                statusSubject.OnNext(new InstrumentTickDataStatus
+                UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = zerodhaSymbol,
                     State = TickDataState.Failed,
@@ -549,7 +549,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 if (age.TotalMinutes > 10)
                 {
                     HistoricalTickLogger.Warn($"[INST-QUEUE] Skipping stale request for {zerodhaSymbol} (age={age.TotalMinutes:F1}min)");
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Failed,
@@ -563,7 +563,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 if (string.IsNullOrEmpty(accelpixSymbol))
                 {
                     HistoricalTickLogger.Warn($"[INST-QUEUE] Cannot map symbol: {zerodhaSymbol}");
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Failed,
@@ -594,7 +594,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
 
                     await _nt8Adapter.TriggerBarsRequestAsync(zerodhaSymbol, cached);
 
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Ready,
@@ -605,7 +605,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 }
 
                 // Update status to downloading
-                statusSubject.OnNext(new InstrumentTickDataStatus
+                UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = zerodhaSymbol,
                     State = TickDataState.Downloading,
@@ -649,7 +649,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 {
                     await _nt8Adapter.TriggerBarsRequestAsync(zerodhaSymbol, allTicks);
 
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.Ready,
@@ -661,7 +661,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
                 }
                 else
                 {
-                    statusSubject.OnNext(new InstrumentTickDataStatus
+                    UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                     {
                         ZerodhaSymbol = zerodhaSymbol,
                         State = TickDataState.NoData,
@@ -673,7 +673,7 @@ namespace ZerodhaDatafeedAdapter.Services.Historical
             catch (Exception ex)
             {
                 HistoricalTickLogger.Error($"[INST-QUEUE] Error processing {zerodhaSymbol}: {ex.Message}", ex);
-                statusSubject.OnNext(new InstrumentTickDataStatus
+                UpdateInstrumentStatus(zerodhaSymbol, new InstrumentTickDataStatus
                 {
                     ZerodhaSymbol = zerodhaSymbol,
                     State = TickDataState.Failed,

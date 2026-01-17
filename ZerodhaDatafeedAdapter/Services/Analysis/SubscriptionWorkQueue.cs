@@ -154,6 +154,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
             Logger.Info("[SubscriptionWorkQueue] ProcessQueue(): Started processing");
             // Note: _isProcessing is already set to 1 by TryStartProcessing via CompareExchange
 
+            bool shouldFireCompletion = false;
+
             try
             {
                 while (true)
@@ -189,22 +191,26 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                     // Double-check: if queue is still empty, we're done
                     if (_subscriptionQueue.IsEmpty)
                     {
+                        // We truly finished - queue is empty and we released the lock
+                        shouldFireCompletion = true;
                         break;
                     }
 
                     // Items were added after we exited the loop - try to reclaim processing
                     if (Interlocked.CompareExchange(ref _isProcessing, 1, 0) != 0)
                     {
-                        // Another processor started, let it handle the work
+                        // Another processor started, let it handle the work and completion
+                        shouldFireCompletion = false;
                         break;
                     }
                     // We reclaimed processing, continue the outer loop
                 }
 
-                Logger.Info($"[SubscriptionWorkQueue] Completed all {_processedCount} instruments");
-
-                // Notify completion
-                QueueProcessingComplete?.Invoke();
+                if (shouldFireCompletion)
+                {
+                    Logger.Info($"[SubscriptionWorkQueue] Completed all {_processedCount} instruments");
+                    QueueProcessingComplete?.Invoke();
+                }
             }
             catch (Exception ex)
             {

@@ -901,7 +901,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         /// <param name="symbol">The NinjaTrader symbol name</param>
         private void SubscribeForPersistence(string symbol)
         {
-            if (_persistenceSubscribedSymbols.ContainsKey(symbol))
+            // Atomically try to reserve this symbol - if TryAdd returns false, another thread is handling it
+            if (!_persistenceSubscribedSymbols.TryAdd(symbol, 0))
             {
                 Logger.Debug($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Already subscribed for persistence");
                 return;
@@ -958,6 +959,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         if (nt == null)
                         {
                             Logger.Warn($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Failed to get/create instrument");
+                            // Remove reservation since we failed
+                            _persistenceSubscribedSymbols.TryRemove(symbol, out _);
                             return;
                         }
 
@@ -965,17 +968,21 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                         if (adapter == null)
                         {
                             Logger.Warn($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Adapter not available");
+                            // Remove reservation since we failed
+                            _persistenceSubscribedSymbols.TryRemove(symbol, out _);
                             return;
                         }
 
                         // Subscribe with empty callback - NinjaTrader will still persist ticks to database
                         adapter.SubscribeMarketData(nt, (t, p, v, time, a5) => { });
-                        _persistenceSubscribedSymbols.TryAdd(symbol, 0);
+                        // Symbol already added via TryAdd at the start
                         Logger.Info($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Successfully subscribed for NT database persistence");
                     }
                     catch (Exception ex)
                     {
                         Logger.Error($"[MarketAnalyzerService] SubscribeForPersistence({symbol}): Exception in dispatcher - {ex.Message}", ex);
+                        // Remove reservation since we failed
+                        _persistenceSubscribedSymbols.TryRemove(symbol, out _);
                     }
                 });
             }
