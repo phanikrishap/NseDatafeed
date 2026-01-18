@@ -136,14 +136,17 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             if (_isFirstBar)
             {
-                // First bar: CDClose = 0 (matches smaCumulativeDelta CurrentBar == 0 case)
+                // First bar: CDClose = BarDelta (session starts with first bar's delta, not 0)
+                // This differs from smaCumulativeDelta (which returns 0 for CurrentBar == 0)
+                // but provides more meaningful values for session-based analysis
                 result.BarDelta = _barDelta;
                 result.MaxDelta = _barMaxDelta;
                 result.MinDelta = _barMinDelta;
-                result.CumulativeDeltaClose = 0;
-                result.CumulativeDeltaHigh = 0;
-                result.CumulativeDeltaLow = 0;
+                result.CumulativeDeltaClose = _barDelta;  // Use bar delta instead of 0
+                result.CumulativeDeltaHigh = _barMaxDelta;
+                result.CumulativeDeltaLow = _barMinDelta;
                 result.IsValid = true;
+                _runningCumulativeDelta = _barDelta;  // Initialize running total with first bar's delta
                 _isFirstBar = false;
             }
             else

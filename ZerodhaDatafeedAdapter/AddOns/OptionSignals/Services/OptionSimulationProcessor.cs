@@ -287,6 +287,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 state.RollingVPEngine.SetClosePrice(bar.ClosePrice);
                 state.RollingVPEngine.ExpireOldData(bar.BarTime);
                 state.SimLastPrice = bar.ClosePrice;
+                state.LastClosePrice = bar.ClosePrice;  // Required for PriceMomoEngine.ProcessBar in RecalculateVP
 
                 // Update ATR display in the temporary Row
                 UpdateAtrDisplay(state, bar.ClosePrice, bar.BarTime);

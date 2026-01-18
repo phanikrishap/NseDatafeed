@@ -871,11 +871,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.SimulationEngine
                 {
                     Logger.Info("[SimulationEngineTabPage] Data loaded successfully");
 
-                    // Load Nifty Futures historical data for the simulation date
-                    // This populates VP engines with 40 days of data ending before simulation date
-                    LoggerFactory.Simulation.Info($"[SimulationEngine] Loading Nifty Futures data for simulation date {_config.SimulationDate:yyyy-MM-dd}");
-                    await NiftyFuturesMetricsService.Instance.StartSimulationAsync(_config.SimulationDate);
-                    Logger.Info("[SimulationEngineTabPage] Nifty Futures VP data loaded for simulation");
+                    // NiftyFuturesMetricsService is now triggered reactively via SimulationStateStream
+                    // when LoadHistoricalBars sets state to Loading - no direct call needed
 
                     // Publish the simulated option chain to MarketDataReactiveHub
                     // This regenerates the Option Chain window with simulation config (underlying, expiry, strikes)

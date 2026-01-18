@@ -260,6 +260,7 @@ namespace ZerodhaDatafeedAdapter.Services
             }
             _initializedStrikeFiles.Clear();
             _lastOptionsWriteTime = DateTime.MinValue;
+            _niftyIHeaderWritten = false;
         }
 
         /// <summary>
@@ -915,6 +916,167 @@ namespace ZerodhaDatafeedAdapter.Services
                     rollVwap, rollStdDev, rollUpper1SD, rollUpper2SD, rollLower1SD, rollLower2SD
                 });
             }
+        }
+
+        #endregion
+
+        #region NIFTY_I.csv
+
+        private const string NiftyICsvFileName = "NIFTY_I.csv";
+        private bool _niftyIHeaderWritten = false;
+        private readonly object _niftyILock = new object();
+
+        /// <summary>
+        /// Writes a row to NIFTY_I.csv with composite metrics, VP metrics, and relative ranks.
+        /// Called on every bar close from NiftyFuturesMetricsService.
+        /// </summary>
+        public void WriteNiftyIRow(NiftyFuturesVPMetrics metrics)
+        {
+            if (!IsEnabled || metrics == null || !metrics.IsValid) return;
+
+            EnsureInitialized();
+
+            lock (_niftyILock)
+            {
+                try
+                {
+                    string filePath = Path.Combine(_todayReportFolderPath, NiftyICsvFileName);
+                    bool needsHeader = !_niftyIHeaderWritten && !File.Exists(filePath);
+
+                    using (var writer = new StreamWriter(filePath, append: true, encoding: Encoding.UTF8))
+                    {
+                        // Write header if new file
+                        if (needsHeader)
+                        {
+                            writer.WriteLine(GetNiftyICsvHeader());
+                            _niftyIHeaderWritten = true;
+                        }
+
+                        // Write data row
+                        writer.WriteLine(FormatNiftyIRow(metrics));
+                    }
+
+                    _log.Debug($"[CsvReportService] Wrote NIFTY_I row at {metrics.LastBarTime:HH:mm:ss}");
+                }
+                catch (Exception ex)
+                {
+                    _log.Error($"[CsvReportService] Error writing NIFTY_I.csv: {ex.Message}");
+                }
+            }
+        }
+
+        private string GetNiftyICsvHeader()
+        {
+            return string.Join(",", new[]
+            {
+                "Time", "LastUpdate",
+                // Session VP
+                "SessPOC", "SessVAH", "SessVAL", "SessVWAP", "SessValueWidth",
+                "SessHvnBuy", "SessHvnSell",
+                // Session Relative/Cumulative
+                "RelHvnBuySess", "RelHvnSellSess", "RelValWidthSess",
+                "CumHvnBuySessRank", "CumHvnSellSessRank", "CumValWidthSessRank",
+                // Rolling VP
+                "RollPOC", "RollVAH", "RollVAL", "RollValueWidth",
+                "RollHvnBuy", "RollHvnSell",
+                // Rolling Relative/Cumulative
+                "RelHvnBuyRoll", "RelHvnSellRoll", "RelValWidthRoll",
+                "CumHvnBuyRollRank", "CumHvnSellRollRank", "CumValWidthRollRank",
+                // Composite metrics
+                "CompPOC1D", "CompVAH1D", "CompVAL1D",
+                "CompPOC3D", "CompVAH3D", "CompVAL3D",
+                "CompPOC5D", "CompVAH5D", "CompVAL5D",
+                "CompPOC10D", "CompVAH10D", "CompVAL10D",
+                // Composite ranges
+                "ADR5", "ADR10", "ADR20",
+                "YearlyHigh", "YearlyLow", "PriorDayHigh", "PriorDayLow", "PriorDayClose",
+                "Range52WHigh", "Range52WLow",
+                // Metadata
+                "BarCount", "Symbol"
+            });
+        }
+
+        private string FormatNiftyIRow(NiftyFuturesVPMetrics m)
+        {
+            string FormatDouble(double value) => double.IsNaN(value) ? "0" : value.ToString("F2", CultureInfo.InvariantCulture);
+            string FormatInt(int value) => value.ToString();
+
+            // Composite metrics (null-safe)
+            var c = m.Composite;
+            string compPoc1D = c != null ? FormatDouble(c.POC_1D) : "0";
+            string compVah1D = c != null ? FormatDouble(c.VAH_1D) : "0";
+            string compVal1D = c != null ? FormatDouble(c.VAL_1D) : "0";
+            string compPoc3D = c != null ? FormatDouble(c.POC_3D) : "0";
+            string compVah3D = c != null ? FormatDouble(c.VAH_3D) : "0";
+            string compVal3D = c != null ? FormatDouble(c.VAL_3D) : "0";
+            string compPoc5D = c != null ? FormatDouble(c.POC_5D) : "0";
+            string compVah5D = c != null ? FormatDouble(c.VAH_5D) : "0";
+            string compVal5D = c != null ? FormatDouble(c.VAL_5D) : "0";
+            string compPoc10D = c != null ? FormatDouble(c.POC_10D) : "0";
+            string compVah10D = c != null ? FormatDouble(c.VAH_10D) : "0";
+            string compVal10D = c != null ? FormatDouble(c.VAL_10D) : "0";
+
+            // ADR metrics from nested ADR object
+            string adr5 = c?.ADR != null ? FormatDouble(c.ADR.Avg5DADR) : "0";
+            string adr10 = c?.ADR != null ? FormatDouble(c.ADR.Avg10DADR) : "0";
+            string adr20 = "0"; // No 20-day ADR in current model
+            // Yearly extremes from nested YearlyExtremes object
+            string yearlyHigh = c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyHigh) : "0";
+            string yearlyLow = c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyLow) : "0";
+            // Prior day values - use D-1 range (1D composite)
+            string priorDayHigh = c != null ? FormatDouble(c.CompRange_1D) : "0";  // Using comp range as proxy
+            string priorDayLow = "0";  // Not directly available
+            string priorDayClose = "0";  // Not directly available
+            // 52W range is same as yearly extremes range
+            string range52WHigh = c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyHigh) : "0";
+            string range52WLow = c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyLow) : "0";
+
+            return string.Join(",", new[]
+            {
+                m.LastBarTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                m.LastUpdate.ToString("yyyy-MM-dd HH:mm:ss"),
+                // Session VP
+                FormatDouble(m.POC),
+                FormatDouble(m.VAH),
+                FormatDouble(m.VAL),
+                FormatDouble(m.VWAP),
+                FormatDouble(m.ValueWidth),
+                FormatInt(m.HVNBuyCount),
+                FormatInt(m.HVNSellCount),
+                // Session Relative/Cumulative
+                FormatDouble(m.RelHVNBuy),
+                FormatDouble(m.RelHVNSell),
+                FormatDouble(m.RelValueWidth),
+                FormatDouble(m.CumHVNBuyRank),
+                FormatDouble(m.CumHVNSellRank),
+                FormatDouble(m.CumValueWidthRank),
+                // Rolling VP
+                FormatDouble(m.RollingPOC),
+                FormatDouble(m.RollingVAH),
+                FormatDouble(m.RollingVAL),
+                FormatDouble(m.RollingValueWidth),
+                FormatInt(m.RollingHVNBuyCount),
+                FormatInt(m.RollingHVNSellCount),
+                // Rolling Relative/Cumulative
+                FormatDouble(m.RelHVNBuyRolling),
+                FormatDouble(m.RelHVNSellRolling),
+                FormatDouble(m.RelValueWidthRolling),
+                FormatDouble(m.CumHVNBuyRollingRank),
+                FormatDouble(m.CumHVNSellRollingRank),
+                FormatDouble(m.CumValueWidthRollingRank),
+                // Composite POC/VAH/VAL
+                compPoc1D, compVah1D, compVal1D,
+                compPoc3D, compVah3D, compVal3D,
+                compPoc5D, compVah5D, compVal5D,
+                compPoc10D, compVah10D, compVal10D,
+                // Composite ranges
+                adr5, adr10, adr20,
+                yearlyHigh, yearlyLow, priorDayHigh, priorDayLow, priorDayClose,
+                range52WHigh, range52WLow,
+                // Metadata
+                m.BarCount.ToString(),
+                EscapeCsv(m.Symbol ?? "NIFTY_I")
+            });
         }
 
         #endregion
