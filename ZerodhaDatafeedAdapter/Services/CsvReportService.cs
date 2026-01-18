@@ -1014,7 +1014,8 @@ namespace ZerodhaDatafeedAdapter.Services
         {
             string FormatDouble(double value) => double.IsNaN(value) || double.IsInfinity(value) ? "0" : value.ToString("F2", CultureInfo.InvariantCulture);
             string FormatInt(int value) => value.ToString();
-            string FormatPct(double value) => double.IsNaN(value) || double.IsInfinity(value) ? "0%" : $"{value * 100:F0}%";
+            // Note: CVsAvg, RVsAvg, D2/D3/D4 VsAvg values are already stored as percentages (e.g., 106.14 for 106%)
+            string FormatPct(double value) => double.IsNaN(value) || double.IsInfinity(value) ? "0%" : $"{value:F0}%";
 
             var c = m.Composite;
 
