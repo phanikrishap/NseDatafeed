@@ -16,6 +16,7 @@ using ZerodhaDatafeedAdapter.Helpers;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.Reactive;
+using ZerodhaDatafeedAdapter.Models.Simulation;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Instruments;
 using ZerodhaDatafeedAdapter.Services.Simulation;
@@ -77,6 +78,10 @@ namespace ZerodhaDatafeedAdapter.Services
 
         // Generated option symbols
         private readonly List<string> _optionSymbols = new List<string>();
+
+        // NIFTY_I data loader and pre-loaded data for NiftyFuturesMetricsService
+        private readonly NiftyIDataLoader _niftyIDataLoader = new NiftyIDataLoader();
+        private NiftyISimulationData _niftyISimulationData;
 
         // Playback state
         private DispatcherTimer _playbackTimer;
@@ -182,9 +187,17 @@ namespace ZerodhaDatafeedAdapter.Services
 
         /// <summary>
         /// Gets the current simulation configuration (underlying, expiry, etc.)
-        /// Returns null if not in simulation mode.
+        /// Returns null if not in simulation mode or loading.
+        /// Also available during Loading state so reactive subscribers can access it.
         /// </summary>
-        public SimulationConfig CurrentConfig => IsSimulationMode ? _config : null;
+        public SimulationConfig CurrentConfig => (IsSimulationMode || State == SimulationState.Loading) ? _config : null;
+
+        /// <summary>
+        /// Gets the pre-loaded NIFTY_I simulation data.
+        /// Available after LoadHistoricalBars completes successfully.
+        /// NiftyFuturesMetricsService should use this instead of loading its own data.
+        /// </summary>
+        public NiftyISimulationData NiftyIData => _niftyISimulationData;
 
         /// <summary>
         /// Gets the current time to use for TBS logic.
@@ -257,6 +270,7 @@ namespace ZerodhaDatafeedAdapter.Services
             _loadedTicks.Clear();
             _tickTimeline.Clear();
             _optionSymbols.Clear();
+            _niftyISimulationData = null; // Clear previous NIFTY_I data
             LoadedSymbolCount = 0;
             TotalTickCount = 0;
             PricesInjectedCount = 0;
@@ -270,7 +284,10 @@ namespace ZerodhaDatafeedAdapter.Services
                 _totalSymbolsToLoad = symbols.Count;
                 _log.Info($"[SimulationService] Generated {symbols.Count} option symbols for {config.Underlying}");
 
-                StatusMessage = $"Loading ticks for {symbols.Count} symbols...";
+                // Start loading NIFTY_I data in parallel with option ticks
+                StatusMessage = $"Loading options ({symbols.Count}) and NIFTY_I data...";
+                var niftyILoadTask = _niftyIDataLoader.LoadDataForSimulationAsync(config.SimulationDate);
+                _log.Info("[SimulationService] Started NIFTY_I data loading in parallel with options");
 
                 // Use direct NCD file reading for MUCH faster loading
                 // This bypasses NinjaTrader's slow BarsRequest API and reads directly from the database files
@@ -348,9 +365,27 @@ namespace ZerodhaDatafeedAdapter.Services
                 StatusMessage = "Building tick timeline...";
                 BuildTickTimeline();
 
+                // Wait for NIFTY_I data to finish loading
+                StatusMessage = "Waiting for NIFTY_I data...";
+                _niftyISimulationData = await niftyILoadTask;
+
+                if (_niftyISimulationData == null || !_niftyISimulationData.IsValid)
+                {
+                    _log.Warn($"[SimulationService] NIFTY_I data load failed: {_niftyISimulationData?.ErrorMessage ?? "null result"}");
+                    // Continue anyway - NiftyFuturesMetricsService can fall back to loading its own data
+                    // but this is not ideal and will cause timing issues
+                }
+                else
+                {
+                    _log.Info($"[SimulationService] NIFTY_I data loaded: {_niftyISimulationData}");
+                }
+
                 State = SimulationState.Ready;
-                StatusMessage = $"Ready: {successCount} symbols, {TotalTickCount} ticks loaded";
-                _log.Info($"[SimulationService] Load complete: {successCount} symbols, {TotalTickCount} total ticks");
+                var niftyStatus = _niftyISimulationData?.IsValid == true
+                    ? $", NIFTY_I: {_niftyISimulationData.PriorDayBars.Count + _niftyISimulationData.SimulationDayBars.Count} bars"
+                    : "";
+                StatusMessage = $"Ready: {successCount} symbols, {TotalTickCount} ticks{niftyStatus}";
+                _log.Info($"[SimulationService] Load complete: {successCount} symbols, {TotalTickCount} total ticks, NIFTY_I valid={_niftyISimulationData?.IsValid}");
 
                 return true;
             }
@@ -1013,6 +1048,7 @@ namespace ZerodhaDatafeedAdapter.Services
             _loadedTicks.Clear();
             _tickTimeline.Clear();
             _optionSymbols.Clear();
+            _niftyISimulationData = null; // Clear NIFTY_I data
             LoadedSymbolCount = 0;
             TotalTickCount = 0;
             PricesInjectedCount = 0;

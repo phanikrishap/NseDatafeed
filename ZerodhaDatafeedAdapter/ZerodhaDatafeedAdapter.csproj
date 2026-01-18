@@ -251,6 +251,7 @@
     <Compile Include="Services\SimulationService.cs" />
     <Compile Include="Services\Simulation\NCDFileReader.cs" />
     <Compile Include="Services\Simulation\SimulationTimeHelper.cs" />
+    <Compile Include="Services\Simulation\NiftyIDataLoader.cs" />
     <Compile Include="Services\StoxxoService.cs" />
     <Compile Include="Models\StoxxoModels.cs" />
     <Compile Include="Services\WebSocket\WebSocketManager.cs" />
@@ -292,6 +293,7 @@
     <Compile Include="Models\Reactive\StraddlePriceUpdate.cs" />
     <Compile Include="Models\Reactive\InitializationState.cs" />
     <Compile Include="Models\Reactive\SimulationStateUpdate.cs" />
+    <Compile Include="Models\Simulation\NiftyISimulationData.cs" />
     <Compile Include="Services\Analysis\MarketDataReactiveHub.cs" />
     <!-- Phase 7: Modular components for InstrumentManager -->
     <Compile Include="Services\Instruments\InstrumentDbService.cs" />
