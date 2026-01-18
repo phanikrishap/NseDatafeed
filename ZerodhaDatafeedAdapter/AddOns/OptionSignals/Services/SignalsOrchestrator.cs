@@ -11,6 +11,8 @@ using ZerodhaDatafeedAdapter.Services;
 using ZerodhaDatafeedAdapter.Services.Analysis;
 using ZerodhaDatafeedAdapter.Services.Analysis.Components;
 using ZerodhaDatafeedAdapter.Services.Signals;
+using ZerodhaDatafeedAdapter.Services.Simulation;
+using CsvReportService = ZerodhaDatafeedAdapter.Services.CsvReportService;
 
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 {
@@ -546,12 +548,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// </summary>
         private DateTime GetCurrentTime()
         {
-            if (_isReplayMode && SimulationService.Instance.IsSimulationActive)
-            {
-                var simTime = SimulationService.Instance.CurrentSimTime;
-                return simTime != DateTime.MinValue ? simTime : DateTime.Now;
-            }
-            return DateTime.Now;
+            // Use SimulationTimeHelper for consistent simulation-aware time
+            return SimulationTimeHelper.Now;
         }
 
         /// <summary>
@@ -618,10 +616,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 }
             }
 
-            // Log to terminal periodically
-            if (snapshot.IsValid && (DateTime.Now - _lastUnderlyingLogTime) >= _underlyingLogInterval)
+            // Log to terminal periodically (use simulation-aware time for throttling)
+            if (snapshot.IsValid && (SimulationTimeHelper.Now - _lastUnderlyingLogTime) >= _underlyingLogInterval)
             {
-                _lastUnderlyingLogTime = DateTime.Now;
+                _lastUnderlyingLogTime = SimulationTimeHelper.Now;
                 string trend = snapshot.SessTrend == HvnTrend.Bullish ? "BULL" :
                                snapshot.SessTrend == HvnTrend.Bearish ? "BEAR" : "NEU";
                 string rollTrend = snapshot.RollTrend == HvnTrend.Bullish ? "BULL" :
@@ -654,8 +652,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             UpdateSignalPrice(snapshot.Symbol, snapshot.RangeBarClosePrice);
 
             // In replay mode, evaluate on every update (no throttling)
-            // In real-time mode, throttle strategy evaluations
-            if (_isReplayMode || (DateTime.Now - _lastEvaluationTime) >= _minEvaluationInterval)
+            // In real-time mode, throttle strategy evaluations (use simulation-aware time)
+            if (_isReplayMode || (SimulationTimeHelper.Now - _lastEvaluationTime) >= _minEvaluationInterval)
             {
                 EvaluateStrategies(snapshot.RangeBarCloseTime);
             }
@@ -791,7 +789,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// </summary>
         private void EvaluateStrategies(DateTime currentTime)
         {
-            _lastEvaluationTime = DateTime.Now;
+            _lastEvaluationTime = SimulationTimeHelper.Now;
 
             List<SignalRow> newSignals;
 
@@ -837,8 +835,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             // Add signals on UI thread
             if (newSignals.Count > 0)
             {
-                // Determine if signals are real-time (signal time within 5 seconds of system time)
-                DateTime systemTime = DateTime.Now;
+                // Determine if signals are real-time (signal time within 5 seconds of current time)
+                // Use simulation-aware time so signals are considered "realtime" during simulation
+                DateTime systemTime = SimulationTimeHelper.Now;
                 const int REALTIME_THRESHOLD_SECONDS = 5;
 
                 _dispatcher.InvokeAsync(() =>
@@ -865,6 +864,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                             _log.Info($"[SignalsOrchestrator] Historical signal: {signal.StrategyName} {signal.Direction} {signal.Symbol} @ {signal.EntryPrice:F2} - {signal.SignalReason} (Time: {signal.SignalTime:HH:mm:ss})");
                             TerminalService.Instance.Signal($"[HIST {signal.SignalTime:HH:mm:ss}] {signal.DirectionStr} {signal.Symbol} @ {signal.EntryPrice:F2} | {signal.SignalReason}");
                         }
+
+                        // Write signal to CSV
+                        CsvReportService.Instance.WriteSignal(signal);
                     }
 
                     // Notify subscribers that stats have changed (new signals added)
@@ -965,7 +967,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     // Update signal status
                     signal.Status = SignalStatus.Closed;
                     signal.ExitPrice = exitPrice > 0 ? exitPrice : signal.CurrentPrice;
-                    signal.ExitTime = DateTime.Now;
+                    signal.ExitTime = SimulationTimeHelper.Now;
                 }
                 else
                 {
@@ -1027,6 +1029,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     }
 
                     _log.Info($"[SignalsOrchestrator] Signal closed: {signal.Symbol} @ {exitPrice:F2}, P&L: {signal.RealizedPnL:F2}, Reason: {exitReason ?? "Manual/Opposite signal"}");
+
+                    // Write updated signal to CSV
+                    CsvReportService.Instance.WriteSignal(signal);
 
                     // Notify subscribers that stats have changed (signal closed)
                     SignalStatsChanged?.Invoke(this, EventArgs.Empty);

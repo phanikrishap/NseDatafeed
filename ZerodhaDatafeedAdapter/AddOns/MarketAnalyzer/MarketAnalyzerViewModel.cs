@@ -541,7 +541,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.MarketAnalyzer
                         }
                     }
                 }
-                StatusText = $"Last update: {DateTime.Now:HH:mm:ss}";
+                StatusText = $"Last update: {SimulationTimeHelper.Now:HH:mm:ss}";
             }
             catch(Exception ex)
             {

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Windows.Threading;
+using ZerodhaDatafeedAdapter.Services.Simulation;
 
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 {
@@ -104,7 +105,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         {
             var entry = new TerminalLogEntry
             {
-                Timestamp = DateTime.Now,
+                Timestamp = SimulationTimeHelper.Now,
                 Level = level,
                 Message = message
             };

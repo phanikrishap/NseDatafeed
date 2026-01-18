@@ -304,6 +304,13 @@ namespace ZerodhaDatafeedAdapter.Services
                     break;
 
                 case SimulationState.Playing:
+                    // Mark option chain as ready so status timer processes tranche transitions
+                    // In simulation mode, we don't wait for PriceSyncReady - data is already loaded
+                    if (!_optionChainReady)
+                    {
+                        IsOptionChainReady = true;
+                        TBSLogger.Info("[TBSExecutionService] Option Chain marked ready for simulation");
+                    }
                     TBSLogger.Info("[TBSExecutionService] Simulation playing - processing ticks");
                     break;
 

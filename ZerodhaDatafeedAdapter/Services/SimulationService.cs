@@ -839,26 +839,7 @@ namespace ZerodhaDatafeedAdapter.Services
         }
 
         // Maximum ticks to process per timer callback to prevent UI freeze
-        // Must be high enough to keep up with speed multiplier
-        // With ~100 ticks/sec average and timer at 100ms:
-        //   60x speed = 6 sec sim time per 100ms = ~600 ticks needed per callback
-        //   30x speed = 3 sec sim time per 100ms = ~300 ticks needed per callback
-        private const int MAX_TICKS_BASE = 500;
-        private const int MAX_TICKS_HIGH_SPEED = 1000;   // For speeds >= 30x (3 sec sim = ~300 ticks + buffer)
-        private const int MAX_TICKS_VERY_HIGH_SPEED = 2000;  // For speeds >= 60x (6 sec sim = ~600 ticks + buffer)
-
-        /// <summary>
-        /// Gets adaptive tick limit based on current playback speed.
-        /// Higher speeds need HIGHER limits to keep up with simulation time.
-        /// </summary>
-        private int GetMaxTicksPerCallback()
-        {
-            if (_config == null) return MAX_TICKS_BASE;
-            var speed = _config.SpeedMultiplier;
-            if (speed >= 60) return MAX_TICKS_VERY_HIGH_SPEED;
-            if (speed >= 30) return MAX_TICKS_HIGH_SPEED;
-            return MAX_TICKS_BASE;
-        }
+        private const int MAX_TICKS_PER_CALLBACK = 500;
 
         /// <summary>
         /// Playback timer tick handler - processes ticks based on elapsed wall-clock time.
@@ -888,12 +869,11 @@ namespace ZerodhaDatafeedAdapter.Services
             // Update the target simulation time - this accumulates over each timer tick
             _targetSimTime = _targetSimTime + simTimeElapsed;
 
-            // Process ticks up to _targetSimTime, but limit based on speed to prevent UI freeze
-            int maxTicks = GetMaxTicksPerCallback();
+            // Process ticks up to _targetSimTime, but limit to MAX_TICKS_PER_CALLBACK to prevent UI freeze
             int ticksInjected = 0;
             DateTime lastTickTime = _currentSimTime;
 
-            while (_currentTickIndex < _tickTimeline.Count && ticksInjected < maxTicks)
+            while (_currentTickIndex < _tickTimeline.Count && ticksInjected < MAX_TICKS_PER_CALLBACK)
             {
                 var tick = _tickTimeline[_currentTickIndex];
 
