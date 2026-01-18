@@ -331,6 +331,9 @@
     <!-- Telegram Integration -->
     <Compile Include="Models\TelegramSettings.cs" />
     <Compile Include="Services\Telegram\TelegramAlertService.cs" />
+    <!-- CSV Report Integration -->
+    <Compile Include="Models\CsvReportSettings.cs" />
+    <Compile Include="Services\CsvReportService.cs" />
   </ItemGroup>
   <ItemGroup>
     <Page Include="Controls\CircularProgressBar.xaml">

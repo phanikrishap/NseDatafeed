@@ -129,6 +129,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             double atmStrike = dynamicAtm > 0 ? (double)dynamicAtm : (uniqueStrikes.Count > 0 ? uniqueStrikes[uniqueStrikes.Count / 2] : 0);
             _vpProcessor.SetMarketContext(atmStrike, _strikeStep, expiry, underlying);
 
+            // Pass rows dictionary to VP processor for CSV writing
+            _vpProcessor.SetRowsDictionary(_rowsByStrike);
+
             // Sync historical data for all symbols using the data synchronizer
             // Reduced timeout from 30s to 10s for faster initialization - partial data is OK
             _log.Info($"[ComputeService] Starting historical sync for {allOptions.Count} symbols");

@@ -47,6 +47,9 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         // Telegram settings
         private TelegramSettings _telegramSettings = new TelegramSettings();
 
+        // CSV Report settings
+        private CsvReportSettings _csvReportSettings = new CsvReportSettings();
+
         /// <summary>
         /// Gets the singleton instance of the ConfigurationManager
         /// </summary>
@@ -109,6 +112,11 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
         /// Gets the Telegram settings from config.json
         /// </summary>
         public TelegramSettings TelegramSettings => _telegramSettings;
+
+        /// <summary>
+        /// Gets the CSV Report settings from config.json
+        /// </summary>
+        public CsvReportSettings CsvReportSettings => _csvReportSettings;
 
         /// <summary>
         /// Private constructor to enforce singleton pattern
@@ -250,6 +258,19 @@ namespace ZerodhaDatafeedAdapter.Services.Configuration
                 {
                     _telegramSettings = new TelegramSettings();
                     Logger.Info("[ConfigurationManager] TelegramSettings not found, Telegram integration disabled");
+                }
+
+                // Load CSV Report settings
+                JObject csvReportSettings = _config["CsvReportSettings"] as JObject;
+                if (csvReportSettings != null)
+                {
+                    _csvReportSettings = csvReportSettings.ToObject<CsvReportSettings>() ?? new CsvReportSettings();
+                    Logger.Info($"[ConfigurationManager] CsvReportSettings loaded - WriteToCSV={_csvReportSettings.WriteToCSV}");
+                }
+                else
+                {
+                    _csvReportSettings = new CsvReportSettings();
+                    Logger.Info("[ConfigurationManager] CsvReportSettings not found, CSV reporting disabled");
                 }
 
                 return true;

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using NinjaTrader.Data;
 using ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models;
@@ -33,6 +34,13 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         private DateTime? _selectedExpiry;
         private string _underlying = "NIFTY";
 
+        // Track last CSV write time to avoid writing too frequently
+        private DateTime _lastCsvWriteTime = DateTime.MinValue;
+        private readonly object _csvWriteLock = new object();
+
+        // Reference to rows dictionary for CSV writing
+        private ConcurrentDictionary<string, OptionSignalsRow> _rowsByStrike;
+
         public void SetSimulationProcessor(OptionSimulationProcessor simProcessor)
         {
             _simProcessor = simProcessor;
@@ -44,6 +52,14 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             _strikeStep = strikeStep;
             _selectedExpiry = expiry;
             _underlying = underlying;
+        }
+
+        /// <summary>
+        /// Sets the rows dictionary reference for CSV writing.
+        /// </summary>
+        public void SetRowsDictionary(ConcurrentDictionary<string, OptionSignalsRow> rowsByStrike)
+        {
+            _rowsByStrike = rowsByStrike;
         }
 
         /// <summary>
@@ -241,6 +257,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             // Feed to SignalsOrchestrator
             NotifySignalsOrchestrator(state, sessResult, rollResult, cdMomoResult, priceMomoResult,
                                      sessTrend, rollTrend, sessVwapScore, rollVwapScore, currentTime);
+
+            // Write to CSV if enabled and this is an ATM/ITM1/OTM1 strike
+            TryWriteOptionsSignalsCsv(state, currentTime);
         }
 
         /// <summary>
@@ -511,6 +530,79 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             }
 
             return today;
+        }
+
+        /// <summary>
+        /// Writes to OptionsSignals.csv when an ATM, ITM1, or OTM1 strike bar closes.
+        /// Also handles individual strike CSV writing for qualified symbols.
+        /// Throttles writes to at most once per minute boundary or bar close.
+        /// </summary>
+        private void TryWriteOptionsSignalsCsv(OptionVPState state, DateTime currentTime)
+        {
+            var csvService = CsvReportService.Instance;
+
+            // Check if this is an ATM, ITM1, or OTM1 strike
+            int strike = (int)state.Row.Strike;
+            int atmStrike = (int)_atmStrike;
+            bool isATM = strike == atmStrike;
+            bool isITM1orOTM1 = Math.Abs(strike - atmStrike) == _strikeStep;
+            bool isQualifyingStrike = isATM || isITM1orOTM1;
+
+            // Register qualifying symbols for individual strike tracking
+            if (isQualifyingStrike && csvService.IsIndividualStrikesEnabled)
+            {
+                csvService.RegisterQualifiedSymbol(state.Symbol);
+            }
+
+            // Write individual strike CSV if the symbol is qualified (even if no longer ATM/ITM1/OTM1)
+            if (csvService.IsIndividualStrikesEnabled && csvService.IsSymbolQualified(state.Symbol))
+            {
+                csvService.WriteIndividualStrikeRow(state.Symbol, currentTime, state.Type, state.Row);
+            }
+
+            // For aggregate OptionsSignals.csv, only write for currently qualifying strikes
+            if (!csvService.IsEnabled || !isQualifyingStrike) return;
+
+            // Check if we should write (throttle to prevent excessive writes)
+            lock (_csvWriteLock)
+            {
+                // Write on bar close if at least 1 second has passed since last write
+                // Or write on 1-minute boundaries
+                bool shouldWrite = false;
+
+                // Write if 1 second has passed since last write (bar close throttle)
+                if ((currentTime - _lastCsvWriteTime).TotalSeconds >= 1)
+                {
+                    shouldWrite = true;
+                }
+
+                // Also write on 1-minute boundaries
+                if (currentTime.Second == 0 && (currentTime - _lastCsvWriteTime).TotalSeconds >= 30)
+                {
+                    shouldWrite = true;
+                }
+
+                if (!shouldWrite) return;
+
+                // We have rows dictionary - write CSV
+                if (_rowsByStrike != null && _rowsByStrike.Count > 0)
+                {
+                    // Convert to dictionary with string keys
+                    var rowsDict = new Dictionary<string, OptionSignalsRow>();
+                    foreach (var kvp in _rowsByStrike)
+                    {
+                        rowsDict[kvp.Key] = kvp.Value;
+                    }
+
+                    csvService.WriteOptionsSignalsRow(
+                        currentTime,
+                        _atmStrike,
+                        _strikeStep,
+                        rowsDict);
+
+                    _lastCsvWriteTime = currentTime;
+                }
+            }
         }
 
         #endregion

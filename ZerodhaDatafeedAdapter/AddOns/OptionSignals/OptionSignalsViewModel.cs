@@ -135,8 +135,18 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
             _log.Info("[OptionSignalsViewModel] Starting services - waiting for Market Analyzer to complete");
             var hub = MarketDataReactiveHub.Instance;
 
-            // IMPORTANT: Wait for Market Analyzer to complete (ProjectedOpen ready) before subscribing to options
-            // This ensures we have correct ATM strike before initializing option chain VP
+            // Always subscribe to OptionsGeneratedStream directly
+            // This handles both live mode (after ProjectedOpen) and simulation mode
+            // Using ReplaySubject(1) in MarketDataReactiveHub ensures we don't miss events
+            _subscriptions.Add(hub.OptionsGeneratedStream
+                .ObserveOnDispatcher()
+                .Subscribe(evt =>
+                {
+                    _log.Info($"[OptionSignalsViewModel] OptionsGeneratedStream received: {evt.SelectedUnderlying} ATM={evt.ATMStrike}");
+                    _strikeGenerationTrigger.OnNext(evt);
+                }));
+
+            // For live mode, also handle ProjectedOpen for initial market context
             _subscriptions.Add(hub.ProjectedOpenStream
                 .Where(s => s.IsComplete)
                 .Take(1)
@@ -144,11 +154,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                 .Subscribe(state =>
                 {
                     OnProjectedOpenReady(state);
-
-                    // NOW subscribe to OptionsGeneratedStream after Market Analyzer is ready
-                    _log.Info("[OptionSignalsViewModel] Market Analyzer ready - subscribing to OptionsGeneratedStream");
-                    _subscriptions.Add(hub.OptionsGeneratedStream
-                        .Subscribe(evt => _strikeGenerationTrigger.OnNext(evt)));
+                    _log.Info("[OptionSignalsViewModel] Market Analyzer ready - ProjectedOpen complete");
                 }));
 
             // Price updates can start immediately (they'll be buffered/ignored until options are generated)
@@ -292,6 +298,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals
                             : $"{simUnderlying}_I";
                         _signalsOrchestrator?.ResetUnderlyingHistory(underlyingSymbol);
                     }
+
+                    // Note: CsvReportService handles simulation date changes reactively via SimulationStateStream
 
                     _signalsOrchestrator?.SetReplayMode(true);
                     _log.Info($"[OptionSignalsViewModel] Simulation ready - replay mode enabled for {simUnderlying}");

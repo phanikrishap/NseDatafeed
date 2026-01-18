@@ -12,6 +12,7 @@ using ZerodhaDatafeedAdapter.Services.Zerodha;
 using ZerodhaDatafeedAdapter.ViewModels;
 using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Services.Telegram;
+using ZerodhaDatafeedAdapter.Services;
 using log4net;
 using NinjaTrader.Adapter;
 using NinjaTrader.Cbi;
@@ -201,6 +202,14 @@ namespace ZerodhaDatafeedAdapter
             else
             {
                 StartupLogger.LogConfigurationLoad(true);
+            }
+
+            // Initialize CSV Report service (clears existing CSVs for fresh session)
+            if (_configManager.CsvReportSettings?.WriteToCSV == true)
+            {
+                CsvReportService.Instance.Initialize();
+                Logger.Info("[Connector] CSV Report service initialized");
+                StartupLogger.Info("CSV Report service initialized - reports enabled");
             }
 
             // Initialize Telegram integration (non-blocking)
