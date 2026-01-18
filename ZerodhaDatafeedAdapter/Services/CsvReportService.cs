@@ -969,72 +969,59 @@ namespace ZerodhaDatafeedAdapter.Services
         {
             return string.Join(",", new[]
             {
-                "Time", "LastUpdate",
+                "Time", "BarCount",
                 // Session VP
                 "SessPOC", "SessVAH", "SessVAL", "SessVWAP", "SessValueWidth",
                 "SessHvnBuy", "SessHvnSell",
                 // Session Relative/Cumulative
                 "RelHvnBuySess", "RelHvnSellSess", "RelValWidthSess",
                 "CumHvnBuySessRank", "CumHvnSellSessRank", "CumValWidthSessRank",
-                // Rolling VP
+                // Rolling VP (60-min)
                 "RollPOC", "RollVAH", "RollVAL", "RollValueWidth",
                 "RollHvnBuy", "RollHvnSell",
                 // Rolling Relative/Cumulative
                 "RelHvnBuyRoll", "RelHvnSellRoll", "RelValWidthRoll",
                 "CumHvnBuyRollRank", "CumHvnSellRollRank", "CumValWidthRollRank",
-                // Composite metrics
-                "CompPOC1D", "CompVAH1D", "CompVAL1D",
-                "CompPOC3D", "CompVAH3D", "CompVAL3D",
-                "CompPOC5D", "CompVAH5D", "CompVAL5D",
-                "CompPOC10D", "CompVAH10D", "CompVAL10D",
-                // Composite ranges
-                "ADR5", "ADR10", "ADR20",
-                "YearlyHigh", "YearlyLow", "PriorDayHigh", "PriorDayLow", "PriorDayClose",
-                "Range52WHigh", "Range52WLow",
-                // Metadata
-                "BarCount", "Symbol"
+                // Composite Profile POC/VAH/VAL
+                "POC_1D", "POC_3D", "POC_5D", "POC_10D",
+                "VAH_1D", "VAH_3D", "VAH_5D", "VAH_10D",
+                "VAL_1D", "VAL_3D", "VAL_5D", "VAL_10D",
+                // Comp Rng row
+                "CompRng_1D", "CompRng_3D", "CompRng_5D", "CompRng_10D",
+                // C vs Avg row (% of average)
+                "CVsAvg_1D", "CVsAvg_3D", "CVsAvg_5D", "CVsAvg_10D",
+                // Roll Rng row (rolling range including today)
+                "RollRng_1D", "RollRng_3D", "RollRng_5D", "RollRng_10D",
+                // R vs Avg row (rolling % of average)
+                "RVsAvg_1D", "RVsAvg_3D", "RVsAvg_5D", "RVsAvg_10D",
+                // Prior EOD: D-2 Rng and D-2 %
+                "D2Rng_1D", "D2Rng_3D", "D2Rng_5D", "D2Rng_10D",
+                "D2Pct_1D", "D2Pct_3D", "D2Pct_5D", "D2Pct_10D",
+                // Prior EOD: D-3 Rng and D-3 %
+                "D3Rng_1D", "D3Rng_3D", "D3Rng_5D", "D3Rng_10D",
+                "D3Pct_1D", "D3Pct_3D", "D3Pct_5D", "D3Pct_10D",
+                // Prior EOD: D-4 Rng and D-4 %
+                "D4Rng_1D", "D4Rng_3D", "D4Rng_5D", "D4Rng_10D",
+                "D4Pct_1D", "D4Pct_3D", "D4Pct_5D", "D4Pct_10D",
+                // 52W High/Low
+                "YearlyHigh", "YearlyHighDate", "YearlyLow", "YearlyLowDate",
+                // Control and Migration
+                "Control", "Migration"
             });
         }
 
         private string FormatNiftyIRow(NiftyFuturesVPMetrics m)
         {
-            string FormatDouble(double value) => double.IsNaN(value) ? "0" : value.ToString("F2", CultureInfo.InvariantCulture);
+            string FormatDouble(double value) => double.IsNaN(value) || double.IsInfinity(value) ? "0" : value.ToString("F2", CultureInfo.InvariantCulture);
             string FormatInt(int value) => value.ToString();
+            string FormatPct(double value) => double.IsNaN(value) || double.IsInfinity(value) ? "0%" : $"{value * 100:F0}%";
 
-            // Composite metrics (null-safe)
             var c = m.Composite;
-            string compPoc1D = c != null ? FormatDouble(c.POC_1D) : "0";
-            string compVah1D = c != null ? FormatDouble(c.VAH_1D) : "0";
-            string compVal1D = c != null ? FormatDouble(c.VAL_1D) : "0";
-            string compPoc3D = c != null ? FormatDouble(c.POC_3D) : "0";
-            string compVah3D = c != null ? FormatDouble(c.VAH_3D) : "0";
-            string compVal3D = c != null ? FormatDouble(c.VAL_3D) : "0";
-            string compPoc5D = c != null ? FormatDouble(c.POC_5D) : "0";
-            string compVah5D = c != null ? FormatDouble(c.VAH_5D) : "0";
-            string compVal5D = c != null ? FormatDouble(c.VAL_5D) : "0";
-            string compPoc10D = c != null ? FormatDouble(c.POC_10D) : "0";
-            string compVah10D = c != null ? FormatDouble(c.VAH_10D) : "0";
-            string compVal10D = c != null ? FormatDouble(c.VAL_10D) : "0";
-
-            // ADR metrics from nested ADR object
-            string adr5 = c?.ADR != null ? FormatDouble(c.ADR.Avg5DADR) : "0";
-            string adr10 = c?.ADR != null ? FormatDouble(c.ADR.Avg10DADR) : "0";
-            string adr20 = "0"; // No 20-day ADR in current model
-            // Yearly extremes from nested YearlyExtremes object
-            string yearlyHigh = c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyHigh) : "0";
-            string yearlyLow = c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyLow) : "0";
-            // Prior day values - use D-1 range (1D composite)
-            string priorDayHigh = c != null ? FormatDouble(c.CompRange_1D) : "0";  // Using comp range as proxy
-            string priorDayLow = "0";  // Not directly available
-            string priorDayClose = "0";  // Not directly available
-            // 52W range is same as yearly extremes range
-            string range52WHigh = c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyHigh) : "0";
-            string range52WLow = c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyLow) : "0";
 
             return string.Join(",", new[]
             {
                 m.LastBarTime.ToString("yyyy-MM-dd HH:mm:ss"),
-                m.LastUpdate.ToString("yyyy-MM-dd HH:mm:ss"),
+                m.BarCount.ToString(),
                 // Session VP
                 FormatDouble(m.POC),
                 FormatDouble(m.VAH),
@@ -1050,7 +1037,7 @@ namespace ZerodhaDatafeedAdapter.Services
                 FormatDouble(m.CumHVNBuyRank),
                 FormatDouble(m.CumHVNSellRank),
                 FormatDouble(m.CumValueWidthRank),
-                // Rolling VP
+                // Rolling VP (60-min)
                 FormatDouble(m.RollingPOC),
                 FormatDouble(m.RollingVAH),
                 FormatDouble(m.RollingVAL),
@@ -1064,18 +1051,79 @@ namespace ZerodhaDatafeedAdapter.Services
                 FormatDouble(m.CumHVNBuyRollingRank),
                 FormatDouble(m.CumHVNSellRollingRank),
                 FormatDouble(m.CumValueWidthRollingRank),
-                // Composite POC/VAH/VAL
-                compPoc1D, compVah1D, compVal1D,
-                compPoc3D, compVah3D, compVal3D,
-                compPoc5D, compVah5D, compVal5D,
-                compPoc10D, compVah10D, compVal10D,
-                // Composite ranges
-                adr5, adr10, adr20,
-                yearlyHigh, yearlyLow, priorDayHigh, priorDayLow, priorDayClose,
-                range52WHigh, range52WLow,
-                // Metadata
-                m.BarCount.ToString(),
-                EscapeCsv(m.Symbol ?? "NIFTY_I")
+                // Composite POC row
+                c != null ? FormatDouble(c.POC_1D) : "0",
+                c != null ? FormatDouble(c.POC_3D) : "0",
+                c != null ? FormatDouble(c.POC_5D) : "0",
+                c != null ? FormatDouble(c.POC_10D) : "0",
+                // Composite VAH row
+                c != null ? FormatDouble(c.VAH_1D) : "0",
+                c != null ? FormatDouble(c.VAH_3D) : "0",
+                c != null ? FormatDouble(c.VAH_5D) : "0",
+                c != null ? FormatDouble(c.VAH_10D) : "0",
+                // Composite VAL row
+                c != null ? FormatDouble(c.VAL_1D) : "0",
+                c != null ? FormatDouble(c.VAL_3D) : "0",
+                c != null ? FormatDouble(c.VAL_5D) : "0",
+                c != null ? FormatDouble(c.VAL_10D) : "0",
+                // Comp Rng row
+                c != null ? FormatDouble(c.CompRange_1D) : "0",
+                c != null ? FormatDouble(c.CompRange_3D) : "0",
+                c != null ? FormatDouble(c.CompRange_5D) : "0",
+                c != null ? FormatDouble(c.CompRange_10D) : "0",
+                // C vs Avg row
+                c != null ? FormatPct(c.CVsAvg_1D) : "0%",
+                c != null ? FormatPct(c.CVsAvg_3D) : "0%",
+                c != null ? FormatPct(c.CVsAvg_5D) : "0%",
+                c != null ? FormatPct(c.CVsAvg_10D) : "0%",
+                // Roll Rng row
+                c != null ? FormatDouble(c.RollRange_1D) : "0",
+                c != null ? FormatDouble(c.RollRange_3D) : "0",
+                c != null ? FormatDouble(c.RollRange_5D) : "0",
+                c != null ? FormatDouble(c.RollRange_10D) : "0",
+                // R vs Avg row
+                c != null ? FormatPct(c.RVsAvg_1D) : "0%",
+                c != null ? FormatPct(c.RVsAvg_3D) : "0%",
+                c != null ? FormatPct(c.RVsAvg_5D) : "0%",
+                c != null ? FormatPct(c.RVsAvg_10D) : "0%",
+                // D-2 Rng row
+                c != null ? FormatDouble(c.D2_1DRange) : "0",
+                c != null ? FormatDouble(c.D2_3DRange) : "0",
+                c != null ? FormatDouble(c.D2_5DRange) : "0",
+                c != null ? FormatDouble(c.D2_10DRange) : "0",
+                // D-2 % row
+                c != null ? FormatPct(c.D2_1DVsAvg) : "0%",
+                c != null ? FormatPct(c.D2_3DVsAvg) : "0%",
+                c != null ? FormatPct(c.D2_5DVsAvg) : "0%",
+                c != null ? FormatPct(c.D2_10DVsAvg) : "0%",
+                // D-3 Rng row
+                c != null ? FormatDouble(c.D3_1DRange) : "0",
+                c != null ? FormatDouble(c.D3_3DRange) : "0",
+                c != null ? FormatDouble(c.D3_5DRange) : "0",
+                c != null ? FormatDouble(c.D3_10DRange) : "0",
+                // D-3 % row
+                c != null ? FormatPct(c.D3_1DVsAvg) : "0%",
+                c != null ? FormatPct(c.D3_3DVsAvg) : "0%",
+                c != null ? FormatPct(c.D3_5DVsAvg) : "0%",
+                c != null ? FormatPct(c.D3_10DVsAvg) : "0%",
+                // D-4 Rng row
+                c != null ? FormatDouble(c.D4_1DRange) : "0",
+                c != null ? FormatDouble(c.D4_3DRange) : "0",
+                c != null ? FormatDouble(c.D4_5DRange) : "0",
+                c != null ? FormatDouble(c.D4_10DRange) : "0",
+                // D-4 % row
+                c != null ? FormatPct(c.D4_1DVsAvg) : "0%",
+                c != null ? FormatPct(c.D4_3DVsAvg) : "0%",
+                c != null ? FormatPct(c.D4_5DVsAvg) : "0%",
+                c != null ? FormatPct(c.D4_10DVsAvg) : "0%",
+                // 52W High/Low
+                c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyHigh) : "0",
+                c?.YearlyExtremes != null ? c.YearlyExtremes.YearlyHighDate.ToString("dd-MMM") : "",
+                c?.YearlyExtremes != null ? FormatDouble(c.YearlyExtremes.YearlyLow) : "0",
+                c?.YearlyExtremes != null ? c.YearlyExtremes.YearlyLowDate.ToString("dd-MMM") : "",
+                // Control and Migration
+                EscapeCsv(c?.Control ?? ""),
+                EscapeCsv(c?.Migration ?? "")
             });
         }
 
