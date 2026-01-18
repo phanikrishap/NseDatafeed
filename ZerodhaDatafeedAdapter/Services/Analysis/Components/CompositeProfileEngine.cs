@@ -177,9 +177,43 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                 if (price < _currentDayLow) _currentDayLow = price;
 
                 _currentSession.High = _currentDayHigh;
+            }
+        }
+
+        /// <summary>
+        /// Adds a tick with explicit buy/sell volume split (NinjaTrader 50/50 rule for equal prices).
+        /// </summary>
+        public void AddTickSplit(double price, long totalVolume, long buyVolume, long sellVolume, DateTime time)
+        {
+            lock (_lock)
+            {
+                if (_currentSession == null || time.Date != _currentSessionDate)
+                {
+                    StartSession(time);
+                }
+
+                // Feed tick to internal VP engine with split volumes
+                _sessionVpEngine.AddTickSplit(price, totalVolume, buyVolume, sellVolume);
+
+                // Also maintain our price ladder for composite aggregation
+                double roundedPrice = Math.Round(price / COMPOSITE_PRICE_INTERVAL) * COMPOSITE_PRICE_INTERVAL;
+
+                if (!_currentSession.PriceLadder.ContainsKey(roundedPrice))
+                {
+                    _currentSession.PriceLadder[roundedPrice] = (0, 0);
+                }
+
+                var (buyVol, sellVol) = _currentSession.PriceLadder[roundedPrice];
+                _currentSession.PriceLadder[roundedPrice] = (buyVol + buyVolume, sellVol + sellVolume);
+
+                // Track high/low
+                if (price > _currentDayHigh) _currentDayHigh = price;
+                if (price < _currentDayLow) _currentDayLow = price;
+
+                _currentSession.High = _currentDayHigh;
                 _currentSession.Low = _currentDayLow;
                 _currentSession.Close = price;
-                _currentSession.TotalVolume += volume;
+                _currentSession.TotalVolume += totalVolume;
             }
         }
 

@@ -173,6 +173,31 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             _sumSquaredPriceVolume += price * price * volume;  // For StdDev
         }
 
+        /// <summary>
+        /// Adds a tick with explicit buy/sell volume split.
+        /// Used for NinjaTrader-style 50/50 split when price equals prior price.
+        /// </summary>
+        public void AddTickSplit(double price, long totalVolume, long buyVolume, long sellVolume)
+        {
+            if (price <= 0 || totalVolume <= 0) return;
+
+            double roundedPrice = Math.Round(price / _priceInterval) * _priceInterval;
+
+            if (!_volumeAtPrice.ContainsKey(roundedPrice))
+            {
+                _volumeAtPrice[roundedPrice] = new VolumePriceLevel { Price = roundedPrice };
+            }
+
+            var level = _volumeAtPrice[roundedPrice];
+            level.Volume += totalVolume;
+            level.BuyVolume += buyVolume;
+            level.SellVolume += sellVolume;
+
+            _totalVolume += totalVolume;
+            _sumPriceVolume += price * totalVolume;
+            _sumSquaredPriceVolume += price * price * totalVolume;
+        }
+
         // Track last close price for HVN classification
         private double _lastClosePrice = 0;
 

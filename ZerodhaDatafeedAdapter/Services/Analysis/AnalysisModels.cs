@@ -28,6 +28,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public double Price { get; set; }
         public long Volume { get; set; }
         public bool IsBuy { get; set; }
+        /// <summary>Buy volume (for NinjaTrader 50/50 split when price unchanged)</summary>
+        public long BuyVolume { get; set; }
+        /// <summary>Sell volume (for NinjaTrader 50/50 split when price unchanged)</summary>
+        public long SellVolume { get; set; }
     }
 
     /// <summary>
@@ -39,6 +43,10 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         public double Price { get; set; }
         public long Volume { get; set; }
         public bool IsBuy { get; set; }
+        /// <summary>Buy volume (for NinjaTrader 50/50 split when price unchanged)</summary>
+        public long BuyVolume { get; set; }
+        /// <summary>Sell volume (for NinjaTrader 50/50 split when price unchanged)</summary>
+        public long SellVolume { get; set; }
     }
 
     /// <summary>

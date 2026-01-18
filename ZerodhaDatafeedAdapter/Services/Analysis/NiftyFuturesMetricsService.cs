@@ -593,17 +593,17 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 foreach (var bar in sessionBars)
                 {
-                    // Use optimized tick processing
-                    VolumeProfileLogic.ProcessTicksOptimized(
+                    // Use optimized tick processing with 50/50 split for equal prices
+                    VolumeProfileLogic.ProcessTicksOptimizedSplit(
                         _historicalTicks,
                         ref searchStartTickIndex,
                         prevBarTime,
                         bar.Time,
                         bar.Close,
-                        (price, volume, isBuy, tickTime) =>
+                        (price, totalVolume, buyVolume, sellVolume, tickTime) =>
                         {
-                            _vpEngine.AddTick(price, volume, isBuy);
-                            _rollingVpEngine.AddTick(price, volume, isBuy, tickTime);
+                            _vpEngine.AddTickSplit(price, totalVolume, buyVolume, sellVolume);
+                            _rollingVpEngine.AddTickSplit(price, totalVolume, buyVolume, sellVolume, tickTime);
                         });
 
                     _rollingVpEngine.ExpireOldData(bar.Time);
@@ -670,17 +670,17 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 foreach (var bar in sessionBars)
                 {
-                    VolumeProfileLogic.ProcessTicksOptimized(
+                    VolumeProfileLogic.ProcessTicksOptimizedSplit(
                         _historicalTicks,
                         ref compositeSearchStart,
                         prevBarTime,
                         bar.Time,
                         0,
-                        (price, volume, isBuy, tickTime) =>
+                        (price, totalVol, buyVol, sellVol, tickTime) =>
                         {
-                            _compositeEngine.AddTick(price, volume, isBuy, tickTime);
+                            _compositeEngine.AddTickSplit(price, totalVol, buyVol, sellVol, tickTime);
                         });
-                    
+
                     prevBarTime = bar.Time;
                 }
 
@@ -750,17 +750,17 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 // Process ticks for this bar
                 DateTime prevBarTime = precomputeLastBarTime;
 
-                VolumeProfileLogic.ProcessTicksOptimized(
+                VolumeProfileLogic.ProcessTicksOptimizedSplit(
                     _historicalTicks,
                     ref precomputeTickIndex,
                     prevBarTime,
                     bar.BarTime,
                     bar.ClosePrice,
-                    (price, volume, isBuy, tTime) =>
+                    (price, totalVol, buyVol, sellVol, tTime) =>
                     {
-                        _vpEngine.AddTick(price, volume, isBuy);
-                        _rollingVpEngine.AddTick(price, volume, isBuy, tTime);
-                        _compositeEngine.AddTick(price, volume, isBuy, tTime);
+                        _vpEngine.AddTickSplit(price, totalVol, buyVol, sellVol);
+                        _rollingVpEngine.AddTickSplit(price, totalVol, buyVol, sellVol, tTime);
+                        _compositeEngine.AddTickSplit(price, totalVol, buyVol, sellVol, tTime);
 
                         if (price > _currentDayHigh) _currentDayHigh = price;
                         if (price < _currentDayLow) _currentDayLow = price;
@@ -988,18 +988,18 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
                 foreach (var bar in sessionBars)
                 {
                     double lastPrice = bar.Close; // Fallback if no ticks
-                    
-                    // Use optimized tick processing
-                    double updatedPrice = VolumeProfileLogic.ProcessTicksOptimized(
+
+                    // Use optimized tick processing with 50/50 split for equal prices
+                    double updatedPrice = VolumeProfileLogic.ProcessTicksOptimizedSplit(
                         _historicalTicks,
                         ref searchStartTickIndex,
                         prevBarTime,
                         bar.Time,
                         _lastPrice, // Use class-level last price or tracked price? Re-using bar.Close/Open might be safer if gaps.
-                        (price, volume, isBuy, tickTime) =>
+                        (price, totalVol, buyVol, sellVol, tickTime) =>
                         {
-                            _vpEngine.AddTick(price, volume, isBuy);
-                            _rollingVpEngine.AddTick(price, volume, isBuy, tickTime);
+                            _vpEngine.AddTickSplit(price, totalVol, buyVol, sellVol);
+                            _rollingVpEngine.AddTickSplit(price, totalVol, buyVol, sellVol, tickTime);
                         });
 
                     _rollingVpEngine.ExpireOldData(bar.Time);
@@ -1077,19 +1077,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
                 foreach (var bar in sessionBars)
                 {
-                    // Use optimized tick processing
-                    VolumeProfileLogic.ProcessTicksOptimized(
+                    // Use optimized tick processing with 50/50 split for equal prices
+                    VolumeProfileLogic.ProcessTicksOptimizedSplit(
                         _historicalTicks,
                         ref compositeSearchStart,
                         prevBarTime,
                         bar.Time,
                         0, // Price doesn't matter for counting ticks here, but we pass 0
-                        (price, volume, isBuy, tickTime) =>
+                        (price, totalVol, buyVol, sellVol, tickTime) =>
                         {
-                            _compositeEngine.AddTick(price, volume, isBuy, tickTime);
+                            _compositeEngine.AddTickSplit(price, totalVol, buyVol, sellVol, tickTime);
                             ticksProcessed++;
                         });
-                    
+
                     prevBarTime = bar.Time;
                 }
 
@@ -1154,19 +1154,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             foreach (var bar in targetSessionBars)
             {
-               VolumeProfileLogic.ProcessTicksOptimized(
+                VolumeProfileLogic.ProcessTicksOptimizedSplit(
                     _historicalTicks,
                     ref targetSearchStart,
                     prevTargetBarTime,
                     bar.Time,
                     _lastPrice,
-                    (price, volume, isBuy, tickTime) =>
+                    (price, totalVol, buyVol, sellVol, tickTime) =>
                     {
-                        _vpEngine.AddTick(price, volume, isBuy);
-                        _rollingVpEngine.AddTick(price, volume, isBuy, tickTime);
+                        _vpEngine.AddTickSplit(price, totalVol, buyVol, sellVol);
+                        _rollingVpEngine.AddTickSplit(price, totalVol, buyVol, sellVol, tickTime);
 
                         // Also feed to composite engine (for today's current session)
-                        _compositeEngine.AddTick(price, volume, isBuy, tickTime);
+                        _compositeEngine.AddTickSplit(price, totalVol, buyVol, sellVol, tickTime);
 
                         // Track current day high/low
                         if (price > _currentDayHigh) _currentDayHigh = price;
@@ -1419,11 +1419,11 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
 
             foreach (var tick in ticks)
             {
-                _vpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy);
-                _rollingVpEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+                _vpEngine.AddTickSplit(tick.Price, tick.Volume, tick.BuyVolume, tick.SellVolume);
+                _rollingVpEngine.AddTickSplit(tick.Price, tick.Volume, tick.BuyVolume, tick.SellVolume, tick.Time);
 
                 // Feed ticks to composite engine (uses 5 rupee interval)
-                _compositeEngine.AddTick(tick.Price, tick.Volume, tick.IsBuy, tick.Time);
+                _compositeEngine.AddTickSplit(tick.Price, tick.Volume, tick.BuyVolume, tick.SellVolume, tick.Time);
 
                 // Track current day high/low and last price
                 if (tick.Price > _currentDayHigh) _currentDayHigh = tick.Price;
@@ -1436,10 +1436,28 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis
         private void DetermineBuySellDirection(List<LiveTick> ticks)
         {
             if (ticks.Count == 0) return;
-            double lastPrice = ticks[0].Price;
+            double lastPrice = _lastPrice > 0 ? _lastPrice : ticks[0].Price;
             foreach (var tick in ticks)
             {
-                tick.IsBuy = tick.Price >= lastPrice;
+                // NinjaTrader uptick/downtick rule with 50/50 split for equal prices
+                if (tick.Price > lastPrice)
+                {
+                    tick.IsBuy = true;
+                    tick.BuyVolume = tick.Volume;
+                    tick.SellVolume = 0;
+                }
+                else if (tick.Price < lastPrice)
+                {
+                    tick.IsBuy = false;
+                    tick.BuyVolume = 0;
+                    tick.SellVolume = tick.Volume;
+                }
+                else // price == lastPrice: 50/50 split
+                {
+                    tick.IsBuy = true; // Majority to buy for backward compat
+                    tick.BuyVolume = tick.Volume / 2;
+                    tick.SellVolume = tick.Volume - tick.BuyVolume;
+                }
                 lastPrice = tick.Price;
             }
         }

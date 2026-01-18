@@ -47,6 +47,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         public double RoundedPrice { get; set; }
         public long Volume { get; set; }
         public bool IsBuy { get; set; }
+        public long BuyVolume { get; set; }   // For split volume support (50/50 when price unchanged)
+        public long SellVolume { get; set; }  // For split volume support
         public DateTime Time { get; set; }
         public double PriceSquaredVolume { get; set; }  // For StdDev calculation on expiration
     }
@@ -126,6 +128,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                 RoundedPrice = roundedPrice,
                 Volume = volume,
                 IsBuy = isBuy,
+                BuyVolume = isBuy ? volume : 0,
+                SellVolume = isBuy ? 0 : volume,
                 Time = tickTime,
                 PriceSquaredVolume = priceSquaredVol
             });
@@ -145,6 +149,50 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             _totalVolume += volume;
             _sumPriceVolume += price * volume;
+            _sumSquaredPriceVolume += priceSquaredVol;
+        }
+
+        /// <summary>
+        /// Adds a tick with explicit buy/sell volume split.
+        /// Used for NinjaTrader-style 50/50 split when price equals prior price.
+        /// </summary>
+        public void AddTickSplit(double price, long totalVolume, long buyVolume, long sellVolume, DateTime tickTime)
+        {
+            if (price <= 0 || totalVolume <= 0) return;
+
+            double interval = _useDynamicInterval
+                ? TickIntervalHelper.GetTickInterval(price, false)
+                : _priceInterval;
+
+            double roundedPrice = Math.Round(price / interval) * interval;
+            double priceSquaredVol = price * price * totalVolume;
+
+            // Store update for rolling window management
+            _updates.Enqueue(new RollingVolumeUpdate
+            {
+                Price = price,
+                RoundedPrice = roundedPrice,
+                Volume = totalVolume,
+                IsBuy = buyVolume >= sellVolume,  // For backward compat, not used in RemoveVolume when split
+                BuyVolume = buyVolume,
+                SellVolume = sellVolume,
+                Time = tickTime,
+                PriceSquaredVolume = priceSquaredVol
+            });
+
+            // Add to volume profile
+            if (!_volumeAtPrice.ContainsKey(roundedPrice))
+            {
+                _volumeAtPrice[roundedPrice] = new VolumePriceLevel { Price = roundedPrice };
+            }
+
+            var level = _volumeAtPrice[roundedPrice];
+            level.Volume += totalVolume;
+            level.BuyVolume += buyVolume;
+            level.SellVolume += sellVolume;
+
+            _totalVolume += totalVolume;
+            _sumPriceVolume += price * totalVolume;
             _sumSquaredPriceVolume += priceSquaredVol;
         }
 
@@ -169,10 +217,9 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
 
             var level = _volumeAtPrice[update.RoundedPrice];
             level.Volume -= update.Volume;
-            if (update.IsBuy)
-                level.BuyVolume -= update.Volume;
-            else
-                level.SellVolume -= update.Volume;
+            // Use stored buy/sell volumes to handle 50/50 split correctly
+            level.BuyVolume -= update.BuyVolume;
+            level.SellVolume -= update.SellVolume;
 
             _totalVolume -= update.Volume;
             _sumPriceVolume -= update.Price * update.Volume; // Use original price for VWAP
@@ -329,6 +376,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                     RoundedPrice = update.RoundedPrice,
                     Volume = update.Volume,
                     IsBuy = update.IsBuy,
+                    BuyVolume = update.BuyVolume,
+                    SellVolume = update.SellVolume,
                     Time = update.Time,
                     PriceSquaredVolume = update.PriceSquaredVolume
                 });
@@ -368,6 +417,8 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
                     RoundedPrice = update.RoundedPrice,
                     Volume = update.Volume,
                     IsBuy = update.IsBuy,
+                    BuyVolume = update.BuyVolume,
+                    SellVolume = update.SellVolume,
                     Time = update.Time,
                     PriceSquaredVolume = update.PriceSquaredVolume
                 });

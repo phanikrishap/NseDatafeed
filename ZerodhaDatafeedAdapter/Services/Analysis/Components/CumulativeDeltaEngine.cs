@@ -125,6 +125,23 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         }
 
         /// <summary>
+        /// Adds a tick with explicit buy/sell volume split.
+        /// Used for NinjaTrader-style 50/50 split when price equals prior price.
+        /// Delta = buyVolume - sellVolume
+        /// </summary>
+        public void AddTickSplit(double price, long totalVolume, long buyVolume, long sellVolume, DateTime tickTime)
+        {
+            if (price <= 0 || totalVolume <= 0) return;
+
+            long tickDelta = buyVolume - sellVolume;
+            _barDelta += tickDelta;
+            _barMaxDelta = Math.Max(_barMaxDelta, _barDelta);
+            _barMinDelta = Math.Min(_barMinDelta, _barDelta);
+
+            _lastPrice = price;
+        }
+
+        /// <summary>
         /// Closes the current bar and returns cumulative delta result.
         /// Call after all ticks for the bar have been processed.
         /// Matches smaCumulativeDelta: if CurrentBar == 0: CDClose = 0, else CDClose = CDClose[1] + BarDelta
@@ -252,6 +269,22 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
             if (price <= 0 || volume <= 0) return;
 
             long tickDelta = isBuy ? volume : -volume;
+            _barDelta += tickDelta;
+            _barMaxDelta = Math.Max(_barMaxDelta, _barDelta);
+            _barMinDelta = Math.Min(_barMinDelta, _barDelta);
+
+            _lastPrice = price;
+        }
+
+        /// <summary>
+        /// Adds a tick with explicit buy/sell volume split.
+        /// Used for NinjaTrader-style 50/50 split when price equals prior price.
+        /// </summary>
+        public void AddTickSplit(double price, long totalVolume, long buyVolume, long sellVolume, DateTime tickTime)
+        {
+            if (price <= 0 || totalVolume <= 0) return;
+
+            long tickDelta = buyVolume - sellVolume;
             _barDelta += tickDelta;
             _barMaxDelta = Math.Max(_barMaxDelta, _barDelta);
             _barMinDelta = Math.Min(_barMinDelta, _barDelta);

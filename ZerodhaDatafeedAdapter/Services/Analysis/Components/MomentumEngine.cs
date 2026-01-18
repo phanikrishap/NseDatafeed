@@ -486,6 +486,14 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         }
 
         /// <summary>
+        /// Adds a tick with explicit buy/sell volume split (NinjaTrader 50/50 rule for equal prices).
+        /// </summary>
+        public void AddTickSplit(double price, long totalVolume, long buyVolume, long sellVolume, DateTime tickTime)
+        {
+            _deltaEngine.AddTickSplit(price, totalVolume, buyVolume, sellVolume, tickTime);
+        }
+
+        /// <summary>
         /// Closes the current bar and computes CD momentum.
         /// </summary>
         public MomentumResult CloseBar(DateTime barTime)

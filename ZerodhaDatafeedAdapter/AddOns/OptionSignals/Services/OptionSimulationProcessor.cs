@@ -432,23 +432,43 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
                     double tickPrice = tickBars.GetClose(tickIdx);
                     long volume = tickBars.GetVolume(tickIdx);
-                    bool isBuy = tickPrice >= lastPrice;
+
+                    // NinjaTrader uptick/downtick rule:
+                    // price > lastPrice: ALL to buy
+                    // price < lastPrice: ALL to sell
+                    // price == lastPrice: 50% to each
+                    long tickBuyVol, tickSellVol;
+                    if (tickPrice > lastPrice)
+                    {
+                        tickBuyVol = volume;
+                        tickSellVol = 0;
+                    }
+                    else if (tickPrice < lastPrice)
+                    {
+                        tickBuyVol = 0;
+                        tickSellVol = volume;
+                    }
+                    else // price == lastPrice: 50/50 split
+                    {
+                        tickBuyVol = volume / 2;
+                        tickSellVol = volume - tickBuyVol; // Handles odd volumes
+                    }
 
                     // Track volumes for all bars (for CSV)
                     barTotalVolume += volume;
-                    if (isBuy) barBuyVolume += volume;
-                    else barSellVolume += volume;
+                    barBuyVolume += tickBuyVol;
+                    barSellVolume += tickSellVol;
                     barTickCount++;
 
                     // DEBUG: Log individual ticks for specific symbol (first 5 bars only)
                     if (state.Symbol == DEBUG_SYMBOL && barsProcessed < 5 && barTickCount <= 3)
                     {
-                        _log.Info($"[DEBUG-TICK] {state.Symbol} Bar#{barsProcessed} Tick#{barTickCount}: Price={tickPrice:F2}, Vol={volume}, isBuy={isBuy}, tickIdx={tickIdx}");
+                        _log.Info($"[DEBUG-TICK] {state.Symbol} Bar#{barsProcessed} Tick#{barTickCount}: Price={tickPrice:F2}, Vol={volume}, Buy={tickBuyVol}, Sell={tickSellVol}, tickIdx={tickIdx}");
                     }
 
-                    state.SessionVPEngine.AddTick(tickPrice, volume, isBuy);
-                    state.RollingVPEngine.AddTick(tickPrice, volume, isBuy, tickTime);
-                    state.CDMomoEngine.AddTick(tickPrice, volume, isBuy, tickTime);
+                    state.SessionVPEngine.AddTickSplit(tickPrice, volume, tickBuyVol, tickSellVol);
+                    state.RollingVPEngine.AddTickSplit(tickPrice, volume, tickBuyVol, tickSellVol, tickTime);
+                    state.CDMomoEngine.AddTickSplit(tickPrice, volume, tickBuyVol, tickSellVol, tickTime);
 
                     lastPrice = tickPrice;
                     tickSearchStart++;
@@ -664,16 +684,36 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
                 double tPrice = tickBars.GetClose(tIdx);
                 long tVolume = tickBars.GetVolume(tIdx);
-                bool isBuy = tPrice >= state.SimLastPrice;
+
+                // NinjaTrader uptick/downtick rule:
+                // price > lastPrice: ALL to buy
+                // price < lastPrice: ALL to sell
+                // price == lastPrice: 50% to each
+                long tickBuyVol, tickSellVol;
+                if (tPrice > state.SimLastPrice)
+                {
+                    tickBuyVol = tVolume;
+                    tickSellVol = 0;
+                }
+                else if (tPrice < state.SimLastPrice)
+                {
+                    tickBuyVol = 0;
+                    tickSellVol = tVolume;
+                }
+                else // price == lastPrice: 50/50 split
+                {
+                    tickBuyVol = tVolume / 2;
+                    tickSellVol = tVolume - tickBuyVol;
+                }
 
                 // Track volume breakdown
                 barVolume += tVolume;
-                if (isBuy) barBuyVolume += tVolume;
-                else barSellVolume += tVolume;
+                barBuyVolume += tickBuyVol;
+                barSellVolume += tickSellVol;
 
-                state.SessionVPEngine.AddTick(tPrice, tVolume, isBuy);
-                state.RollingVPEngine.AddTick(tPrice, tVolume, isBuy, tTime);
-                state.CDMomoEngine.AddTick(tPrice, tVolume, isBuy, tTime);
+                state.SessionVPEngine.AddTickSplit(tPrice, tVolume, tickBuyVol, tickSellVol);
+                state.RollingVPEngine.AddTickSplit(tPrice, tVolume, tickBuyVol, tickSellVol, tTime);
+                state.CDMomoEngine.AddTickSplit(tPrice, tVolume, tickBuyVol, tickSellVol, tTime);
 
                 state.SimLastPrice = tPrice;
                 state.SimReplayTickIndex++;
