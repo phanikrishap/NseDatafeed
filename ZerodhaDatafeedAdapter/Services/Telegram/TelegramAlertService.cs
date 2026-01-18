@@ -12,6 +12,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Services.Configuration;
+using ZerodhaDatafeedAdapter.Services.Simulation;
 
 namespace ZerodhaDatafeedAdapter.Services.Telegram
 {
@@ -534,6 +535,13 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
         {
             if (!IsReady) return;
 
+            // Suppress alerts during simulation mode to avoid flooding the channel
+            if (SimulationTimeHelper.IsSimulationActive)
+            {
+                Logger.Debug($"[TelegramAlertService] Alert suppressed (simulation mode): {alert.Message}");
+                return;
+            }
+
             // Check if this alert type should be sent based on settings
             if (!ShouldSendAlertType(alert.Type)) return;
 
@@ -548,6 +556,13 @@ namespace ZerodhaDatafeedAdapter.Services.Telegram
             if (!IsReady)
             {
                 Logger.Debug($"[TelegramAlertService] Not ready, skipping alert: {alert.Message}");
+                return;
+            }
+
+            // Suppress alerts during simulation mode to avoid flooding the channel
+            if (SimulationTimeHelper.IsSimulationActive)
+            {
+                Logger.Debug($"[TelegramAlertService] Alert suppressed (simulation mode): {alert.Message}");
                 return;
             }
 

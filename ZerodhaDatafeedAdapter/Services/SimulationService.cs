@@ -838,15 +838,23 @@ namespace ZerodhaDatafeedAdapter.Services
             _log.Info($"[SimulationService] Speed set to {multiplier}x");
         }
 
-        // Maximum ticks to process per timer callback to prevent UI freeze
-        private const int MAX_TICKS_PER_CALLBACK = 500;
+        // Ticks to process per batch before yielding to UI thread
+        // Allows higher throughput while keeping UI responsive (TBS timer can fire between batches)
+        private const int TICKS_PER_BATCH = 300;
+
+        // Flag to prevent re-entrancy during async tick processing
+        private bool _isProcessingTicks = false;
 
         /// <summary>
-        /// Playback timer tick handler - processes ticks based on elapsed wall-clock time.
-        /// Limits ticks per callback to prevent UI thread starvation at high speeds.
+        /// Playback timer tick handler - processes ticks in batches with UI thread yields.
+        /// Uses async/await with Dispatcher.Yield() to allow TBS timer and other UI operations.
         /// </summary>
-        private void OnPlaybackTick(object sender, EventArgs e)
+        private async void OnPlaybackTick(object sender, EventArgs e)
         {
+            // Prevent re-entrancy - if still processing from last tick, skip
+            if (_isProcessingTicks)
+                return;
+
             if (State != SimulationState.Playing || _config == null || _tickTimeline.Count == 0)
                 return;
 
@@ -860,65 +868,103 @@ namespace ZerodhaDatafeedAdapter.Services
                 return;
             }
 
-            // Calculate how much simulation time has passed based on wall clock and speed
-            // We track total elapsed simulation time since playback started, not incremental
-            var now = DateTime.Now;
-            var wallClockElapsed = now - _lastTickTime;
-            var simTimeElapsed = TimeSpan.FromTicks((long)(wallClockElapsed.Ticks * _config.SpeedMultiplier));
+            _isProcessingTicks = true;
 
-            // Update the target simulation time - this accumulates over each timer tick
-            _targetSimTime = _targetSimTime + simTimeElapsed;
-
-            // Process ticks up to _targetSimTime, but limit to MAX_TICKS_PER_CALLBACK to prevent UI freeze
-            int ticksInjected = 0;
-            DateTime lastTickTime = _currentSimTime;
-
-            while (_currentTickIndex < _tickTimeline.Count && ticksInjected < MAX_TICKS_PER_CALLBACK)
+            try
             {
-                var tick = _tickTimeline[_currentTickIndex];
+                // Calculate how much simulation time has passed based on wall clock and speed
+                var now = DateTime.Now;
+                var wallClockElapsed = now - _lastTickTime;
+                var simTimeElapsed = TimeSpan.FromTicks((long)(wallClockElapsed.Ticks * _config.SpeedMultiplier));
 
-                if (tick.Time <= _targetSimTime)
-                {
-                    // Inject this tick - these are fast dictionary updates
-                    MarketAnalyzerLogic.Instance.UpdateOptionPrice(tick.Symbol, (decimal)tick.Price, tick.Time);
-                    SubscriptionManager.Instance.InjectSimulatedPrice(tick.Symbol, tick.Price, tick.Time);
+                // Update the target simulation time - this accumulates over each timer tick
+                _targetSimTime = _targetSimTime + simTimeElapsed;
 
-                    _currentTickIndex++;
-                    ticksInjected++;
-                    lastTickTime = tick.Time;
-                }
-                else
+                // Process ticks in batches, yielding between batches for UI responsiveness
+                int totalTicksInjected = 0;
+                DateTime lastTickTime = _currentSimTime;
+
+                while (_currentTickIndex < _tickTimeline.Count && State == SimulationState.Playing)
                 {
-                    // Next tick is in the future, wait
-                    break;
+                    int batchCount = 0;
+
+                    // Process one batch
+                    while (_currentTickIndex < _tickTimeline.Count && batchCount < TICKS_PER_BATCH)
+                    {
+                        var tick = _tickTimeline[_currentTickIndex];
+
+                        if (tick.Time <= _targetSimTime)
+                        {
+                            // Inject this tick
+                            MarketAnalyzerLogic.Instance.UpdateOptionPrice(tick.Symbol, (decimal)tick.Price, tick.Time);
+                            SubscriptionManager.Instance.InjectSimulatedPrice(tick.Symbol, tick.Price, tick.Time);
+
+                            _currentTickIndex++;
+                            batchCount++;
+                            totalTicksInjected++;
+                            lastTickTime = tick.Time;
+                        }
+                        else
+                        {
+                            // Next tick is in the future
+                            break;
+                        }
+                    }
+
+                    // If we processed a full batch and more ticks are available within target time, yield then continue
+                    if (batchCount >= TICKS_PER_BATCH && _currentTickIndex < _tickTimeline.Count)
+                    {
+                        var nextTick = _tickTimeline[_currentTickIndex];
+                        if (nextTick.Time <= _targetSimTime)
+                        {
+                            // Update sim time before yielding so other modules see correct time
+                            _currentSimTime = lastTickTime;
+
+                            // Yield to UI thread - allows TBS status timer and other operations
+                            await System.Windows.Threading.Dispatcher.Yield();
+
+                            // Check if still playing after yield
+                            if (State != SimulationState.Playing)
+                                break;
+                        }
+                        else
+                        {
+                            break; // Next tick is in future
+                        }
+                    }
+                    else
+                    {
+                        break; // Batch wasn't full or no more ticks
+                    }
                 }
+
+                if (totalTicksInjected > 0)
+                {
+                    // Update backing fields
+                    _currentSimTime = lastTickTime;
+                    _pricesInjectedCount += totalTicksInjected;
+
+                    // Update ATM every second of simulation time
+                    if ((lastTickTime - _lastAtmUpdateSimTime).TotalSeconds >= 1)
+                    {
+                        UpdateATMStrike();
+                        _lastAtmUpdateSimTime = lastTickTime;
+                    }
+
+                    // Single UI update
+                    OnPropertyChanged(nameof(CurrentSimTime));
+                    OnPropertyChanged(nameof(CurrentSimTimeDisplay));
+                    OnPropertyChanged(nameof(PricesInjectedCount));
+                    OnPropertyChanged(nameof(Progress));
+                    PublishStateUpdate();
+                }
+
+                _lastTickTime = now;
             }
-
-            if (ticksInjected > 0)
+            finally
             {
-                // Update backing fields directly to avoid triggering PublishStateUpdate() per tick
-                // This prevents thousands of Rx emissions per second
-                _currentSimTime = lastTickTime;
-                _pricesInjectedCount += ticksInjected;
-
-                // Update ATM every second of simulation time (not tick count)
-                // This is more meaningful in simulation since market conditions change over time
-                if ((lastTickTime - _lastAtmUpdateSimTime).TotalSeconds >= 1)
-                {
-                    UpdateATMStrike();
-                    _lastAtmUpdateSimTime = lastTickTime;
-                }
-
-                // Single UI update at the end of processing this batch
-                // This replaces multiple property notifications with one consolidated update
-                OnPropertyChanged(nameof(CurrentSimTime));
-                OnPropertyChanged(nameof(CurrentSimTimeDisplay));
-                OnPropertyChanged(nameof(PricesInjectedCount));
-                OnPropertyChanged(nameof(Progress));
-                PublishStateUpdate();
+                _isProcessingTicks = false;
             }
-
-            _lastTickTime = now;
         }
 
         /// <summary>
