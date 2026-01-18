@@ -8,6 +8,25 @@ using ZerodhaDatafeedAdapter.Services.Analysis.Components;
 namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
 {
     /// <summary>
+    /// Pre-computed bar data for simulation playback.
+    /// Stores both the row state and raw values needed for CSV writing.
+    /// </summary>
+    public class SimBarData
+    {
+        public DateTime BarTime { get; set; }
+        public OptionSignalsRow Row { get; set; }
+        public long CumulativeDelta { get; set; }
+        public VPResult SessResult { get; set; }
+        public VPResult RollResult { get; set; }
+
+        // Bar volume breakdown for CSV
+        public long BarVolume { get; set; }
+        public long BarBuyVolume { get; set; }
+        public long BarSellVolume { get; set; }
+        public long BarDelta { get; set; }
+    }
+
+    /// <summary>
     /// Tracks VP state for a single option symbol (CE or PE at a strike).
     /// VP is computed at RangeATR bar close using ticks from that bar's time range.
     /// Owned by OptionSignalsComputeService, NOT by ViewModel.
@@ -52,6 +71,36 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
         public DateTime? SessionTrendOnsetTime { get; set; }
         public DateTime? RollingTrendOnsetTime { get; set; }
 
+        // Current bar volume tracking (for live mode CSV)
+        public long CurrentBarVolume { get; set; }
+        public long CurrentBarBuyVolume { get; set; }
+        public long CurrentBarSellVolume { get; set; }
+
+        /// <summary>
+        /// Resets current bar volume accumulators. Call at start of new bar.
+        /// </summary>
+        public void ResetBarVolume()
+        {
+            CurrentBarVolume = 0;
+            CurrentBarBuyVolume = 0;
+            CurrentBarSellVolume = 0;
+        }
+
+        /// <summary>
+        /// Adds tick volume to current bar accumulators.
+        /// </summary>
+        public void AddTickVolume(long volume, bool isBuy)
+        {
+            CurrentBarVolume += volume;
+            if (isBuy) CurrentBarBuyVolume += volume;
+            else CurrentBarSellVolume += volume;
+        }
+
+        /// <summary>
+        /// Gets the current bar delta (buy - sell volume).
+        /// </summary>
+        public long CurrentBarDelta => CurrentBarBuyVolume - CurrentBarSellVolume;
+
         // Bar history for signal orchestrator - stores 256 bar snapshots
         public OptionBarHistory BarHistory { get; set; }
 
@@ -64,6 +113,13 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
         public double SimLastPrice { get; set; }
         public bool SimDataReady { get; set; } = false;
         public List<OptionSignalsRow> SimPrecomputedRows { get; set; } = new List<OptionSignalsRow>();
+
+        // Pre-computed bar data with raw values for CSV writing during simulation playback
+        public List<SimBarData> SimPrecomputedBars { get; set; } = new List<SimBarData>();
+        public int SimCsvBarIndex { get; set; } = 0;
+
+        // Flag to indicate pre-computation phase - prevents CSV writing during pre-computation
+        public bool IsPrecomputing { get; set; } = false;
 
         public OptionVPState()
         {

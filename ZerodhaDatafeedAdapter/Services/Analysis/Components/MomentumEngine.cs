@@ -497,7 +497,19 @@ namespace ZerodhaDatafeedAdapter.Services.Analysis.Components
         }
 
         /// <summary>
-        /// Gets the cumulative delta.
+        /// Closes the current bar and returns both momentum result and cumulative delta.
+        /// Use this when you need the accurate post-bar cumulative delta for CSV writing.
+        /// </summary>
+        public (MomentumResult MomoResult, long CumulativeDelta) CloseBarWithDelta(DateTime barTime)
+        {
+            var deltaResult = _deltaEngine.CloseBar(barTime);
+            var momoResult = _momentumEngine.ProcessBar(deltaResult.CumulativeDeltaClose, barTime);
+            return (momoResult, deltaResult.CumulativeDeltaClose);
+        }
+
+        /// <summary>
+        /// Gets the current cumulative delta (running + bar delta).
+        /// NOTE: After CloseBar, this will double-count the bar delta. Use CloseBarWithDelta for accurate post-bar values.
         /// </summary>
         public long CurrentCumulativeDelta => _deltaEngine.CurrentCumulativeDelta;
 

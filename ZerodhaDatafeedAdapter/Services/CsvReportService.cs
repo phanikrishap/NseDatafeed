@@ -12,6 +12,7 @@ using ZerodhaDatafeedAdapter.Logging;
 using ZerodhaDatafeedAdapter.Models;
 using ZerodhaDatafeedAdapter.Models.Reactive;
 using ZerodhaDatafeedAdapter.Services.Analysis;
+using ZerodhaDatafeedAdapter.Services.Analysis.Components;
 using ZerodhaDatafeedAdapter.Services.Configuration;
 using ZerodhaDatafeedAdapter.Services.Simulation;
 
@@ -207,10 +208,15 @@ namespace ZerodhaDatafeedAdapter.Services
 
             _todayReportFolderPath = newFolderPath;
 
-            // Create folder if needed
+            // Create folder if needed, or clear existing CSV files for fresh start
             if (!Directory.Exists(_todayReportFolderPath))
             {
                 Directory.CreateDirectory(_todayReportFolderPath);
+            }
+            else
+            {
+                // Clear all existing CSV files in the folder for a fresh simulation run
+                ClearCsvFilesInFolder(_todayReportFolderPath);
             }
 
             // Clear tracking for fresh start
@@ -254,6 +260,41 @@ namespace ZerodhaDatafeedAdapter.Services
             }
             _initializedStrikeFiles.Clear();
             _lastOptionsWriteTime = DateTime.MinValue;
+        }
+
+        /// <summary>
+        /// Clears all CSV files in the specified folder.
+        /// Called at simulation start to ensure fresh data.
+        /// </summary>
+        private void ClearCsvFilesInFolder(string folderPath)
+        {
+            try
+            {
+                var csvFiles = Directory.GetFiles(folderPath, "*.csv");
+                int deletedCount = 0;
+
+                foreach (var file in csvFiles)
+                {
+                    try
+                    {
+                        File.Delete(file);
+                        deletedCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Warn($"[CsvReportService] Failed to delete CSV file {Path.GetFileName(file)}: {ex.Message}");
+                    }
+                }
+
+                if (deletedCount > 0)
+                {
+                    _log.Info($"[CsvReportService] Cleared {deletedCount} CSV files from {folderPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"[CsvReportService] Error clearing CSV files: {ex.Message}");
+            }
         }
 
         private void EnsureInitialized()
@@ -705,7 +746,16 @@ namespace ZerodhaDatafeedAdapter.Services
         /// <param name="currentTime">Current time (system or simulation)</param>
         /// <param name="optionType">CE or PE</param>
         /// <param name="row">The OptionSignalsRow containing current metrics</param>
-        public void WriteIndividualStrikeRow(string symbol, DateTime currentTime, string optionType, OptionSignalsRow row)
+        /// <param name="cumulativeDelta">Raw cumulative delta value</param>
+        /// <param name="sessResult">Session VP result with VWAP and SD bands</param>
+        /// <param name="rollResult">Rolling VP result with VWAP and SD bands</param>
+        /// <param name="barVolume">Total volume for this bar</param>
+        /// <param name="barBuyVolume">Buy volume for this bar</param>
+        /// <param name="barSellVolume">Sell volume for this bar</param>
+        /// <param name="barDelta">Delta for this bar (buy - sell)</param>
+        public void WriteIndividualStrikeRow(string symbol, DateTime currentTime, string optionType, OptionSignalsRow row,
+            long cumulativeDelta, VPResult sessResult, VPResult rollResult,
+            long barVolume = 0, long barBuyVolume = 0, long barSellVolume = 0, long barDelta = 0)
         {
             if (!IsIndividualStrikesEnabled || string.IsNullOrEmpty(symbol) || row == null) return;
 
@@ -732,7 +782,8 @@ namespace ZerodhaDatafeedAdapter.Services
                     }
 
                     // Write data row
-                    writer.WriteLine(FormatIndividualStrikeRow(currentTime, optionType, row));
+                    writer.WriteLine(FormatIndividualStrikeRow(currentTime, optionType, row, cumulativeDelta, sessResult, rollResult,
+                        barVolume, barBuyVolume, barSellVolume, barDelta));
                 }
 
                 _log.Debug($"[CsvReportService] Wrote individual strike row: {symbol} at {currentTime:HH:mm:ss}");
@@ -752,12 +803,41 @@ namespace ZerodhaDatafeedAdapter.Services
                 "HvnBSess", "HvnSSess", "TrendSess", "TrendSessTime",
                 "HvnBRoll", "HvnSRoll", "TrendRoll", "TrendRollTime",
                 "CDMomo", "CDSmooth", "PriceMomo", "PriceSmooth",
-                "VwapScoreSess", "VwapScoreRoll"
+                "VwapScoreSess", "VwapScoreRoll",
+                // Cumulative Delta
+                "CumulativeDelta",
+                // Bar Volume breakdown
+                "BarVolume", "BarBuyVolume", "BarSellVolume", "BarDelta",
+                // Session VWAP and SD Bands
+                "SessVWAP", "SessStdDev", "SessUpper1SD", "SessUpper2SD", "SessLower1SD", "SessLower2SD",
+                // Rolling VWAP and SD Bands
+                "RollVWAP", "RollStdDev", "RollUpper1SD", "RollUpper2SD", "RollLower1SD", "RollLower2SD"
             });
         }
 
-        private string FormatIndividualStrikeRow(DateTime time, string optionType, OptionSignalsRow row)
+        private string FormatIndividualStrikeRow(DateTime time, string optionType, OptionSignalsRow row,
+            long cumulativeDelta, VPResult sessResult, VPResult rollResult,
+            long barVolume, long barBuyVolume, long barSellVolume, long barDelta)
         {
+            // Format SD band values with proper handling of null/invalid results
+            string FormatDouble(double value) => double.IsNaN(value) ? "0" : value.ToString("F2", CultureInfo.InvariantCulture);
+
+            // Session VP data
+            string sessVwap = sessResult?.IsValid == true ? FormatDouble(sessResult.VWAP) : "0";
+            string sessStdDev = sessResult?.IsValid == true ? FormatDouble(sessResult.StdDev) : "0";
+            string sessUpper1SD = sessResult?.IsValid == true ? FormatDouble(sessResult.Upper1SD) : "0";
+            string sessUpper2SD = sessResult?.IsValid == true ? FormatDouble(sessResult.Upper2SD) : "0";
+            string sessLower1SD = sessResult?.IsValid == true ? FormatDouble(sessResult.Lower1SD) : "0";
+            string sessLower2SD = sessResult?.IsValid == true ? FormatDouble(sessResult.Lower2SD) : "0";
+
+            // Rolling VP data
+            string rollVwap = rollResult?.IsValid == true ? FormatDouble(rollResult.VWAP) : "0";
+            string rollStdDev = rollResult?.IsValid == true ? FormatDouble(rollResult.StdDev) : "0";
+            string rollUpper1SD = rollResult?.IsValid == true ? FormatDouble(rollResult.Upper1SD) : "0";
+            string rollUpper2SD = rollResult?.IsValid == true ? FormatDouble(rollResult.Upper2SD) : "0";
+            string rollLower1SD = rollResult?.IsValid == true ? FormatDouble(rollResult.Lower1SD) : "0";
+            string rollLower2SD = rollResult?.IsValid == true ? FormatDouble(rollResult.Lower2SD) : "0";
+
             // Extract data based on option type (CE or PE)
             if (optionType == "CE")
             {
@@ -783,7 +863,18 @@ namespace ZerodhaDatafeedAdapter.Services
                     row.CEPriceMomo ?? "0",
                     row.CEPriceSmooth ?? "0",
                     row.CEVwapScoreSess.ToString(),
-                    row.CEVwapScoreRoll.ToString()
+                    row.CEVwapScoreRoll.ToString(),
+                    // Cumulative Delta
+                    cumulativeDelta.ToString(),
+                    // Bar Volume breakdown
+                    barVolume.ToString(),
+                    barBuyVolume.ToString(),
+                    barSellVolume.ToString(),
+                    barDelta.ToString(),
+                    // Session VWAP and SD Bands
+                    sessVwap, sessStdDev, sessUpper1SD, sessUpper2SD, sessLower1SD, sessLower2SD,
+                    // Rolling VWAP and SD Bands
+                    rollVwap, rollStdDev, rollUpper1SD, rollUpper2SD, rollLower1SD, rollLower2SD
                 });
             }
             else // PE
@@ -810,7 +901,18 @@ namespace ZerodhaDatafeedAdapter.Services
                     row.PEPriceMomo ?? "0",
                     row.PEPriceSmooth ?? "0",
                     row.PEVwapScoreSess.ToString(),
-                    row.PEVwapScoreRoll.ToString()
+                    row.PEVwapScoreRoll.ToString(),
+                    // Cumulative Delta
+                    cumulativeDelta.ToString(),
+                    // Bar Volume breakdown
+                    barVolume.ToString(),
+                    barBuyVolume.ToString(),
+                    barSellVolume.ToString(),
+                    barDelta.ToString(),
+                    // Session VWAP and SD Bands
+                    sessVwap, sessStdDev, sessUpper1SD, sessUpper2SD, sessLower1SD, sessLower2SD,
+                    // Rolling VWAP and SD Bands
+                    rollVwap, rollStdDev, rollUpper1SD, rollUpper2SD, rollLower1SD, rollLower2SD
                 });
             }
         }

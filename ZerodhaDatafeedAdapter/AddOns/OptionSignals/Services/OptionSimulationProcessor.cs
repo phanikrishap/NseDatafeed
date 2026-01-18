@@ -17,6 +17,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         private const double VALUE_AREA_PERCENT = 0.70;
         private const double HVN_RATIO = 0.25;
 
+        // Debug symbol for detailed logging
+        private const string DEBUG_SYMBOL = "SENSEX2611483300CE";
+
         private static readonly ILoggerService _log = LoggerFactory.OpSignals;
 
         private readonly OptionVPProcessor _vpProcessor;
@@ -78,16 +81,37 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 _log.Warn($"[SimProcessor] {state.Symbol} no prior day tick data found for {priorWorkingDay:yyyy-MM-dd}");
             }
 
-            // Step 2: Reset session VP for simulation day (fresh session at 9:15)
-            state.SessionVPEngine.Reset(0.50);
+            // Step 2: Reset session VP and momentum engines for simulation day (fresh session at 9:15)
+            // CRITICAL: All session-based engines must be reset to avoid carrying over prior day values
 
-            // Update row to reflect session reset
+            // DEBUG: Log state before reset
+            if (state.Symbol == DEBUG_SYMBOL)
+            {
+                _log.Info($"[DEBUG-RESET] {state.Symbol} BEFORE RESET: CD={state.CDMomoEngine.CurrentCumulativeDelta}, PriceSmooth={state.PriceMomoEngine.CurrentSmooth:F2}");
+            }
+
+            state.SessionVPEngine.Reset(0.50);
+            state.CDMomoEngine.Reset();       // Reset cumulative delta - must start at 0 for new session
+            state.PriceMomoEngine.Reset();    // Reset price momentum for fresh session calculations
+
+            // DEBUG: Log state after reset
+            if (state.Symbol == DEBUG_SYMBOL)
+            {
+                _log.Info($"[DEBUG-RESET] {state.Symbol} AFTER RESET: CD={state.CDMomoEngine.CurrentCumulativeDelta}, PriceSmooth={state.PriceMomoEngine.CurrentSmooth:F2}");
+            }
+
+            // Update row to reflect session reset (all session-based metrics start fresh)
             if (state.Type == "CE")
             {
                 state.Row.CEHvnBSess = "0";
                 state.Row.CEHvnSSess = "0";
                 state.Row.CETrendSess = HvnTrend.Neutral;
                 state.Row.CETrendSessTime = "";
+                state.Row.CECDMomo = "0";
+                state.Row.CECDSmooth = "0";
+                state.Row.CEPriceMomo = "0";
+                state.Row.CEPriceSmooth = "0";
+                state.Row.CEVwapScoreSess = 0;
             }
             else
             {
@@ -95,6 +119,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 state.Row.PEHvnSSess = "0";
                 state.Row.PETrendSess = HvnTrend.Neutral;
                 state.Row.PETrendSessTime = "";
+                state.Row.PECDMomo = "0";
+                state.Row.PECDSmooth = "0";
+                state.Row.PEPriceMomo = "0";
+                state.Row.PEPriceSmooth = "0";
+                state.Row.PEVwapScoreSess = 0;
             }
 
             // Reset session trend tracking for new day
@@ -129,20 +158,20 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
             // Find the latest pre-computed row that is applicable for the current tickTime
             OptionSignalsRow applicableRow = null;
-            
+
             // Optimization: since bars are sorted by time, we can track an index
             while (state.SimReplayBarIndex < state.SimPrecomputedRows.Count)
             {
                 var row = state.SimPrecomputedRows[state.SimReplayBarIndex];
                 string timeStr = state.Type == "CE" ? row.CEAtrTime : row.PEAtrTime;
-                
+
                 DateTime barTime;
                 if (!DateTime.TryParse(timeStr, out barTime))
                 {
                     state.SimReplayBarIndex++;
                     continue;
                 }
-                
+
                 // For simplicity during simulation of a single day, we can just compare times
                 if (barTime.TimeOfDay <= tickTime.TimeOfDay)
                 {
@@ -159,13 +188,63 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             {
                 // Update the actual row in the state
                 CopyRowData(applicableRow, state.Row);
-                
+
                 // Track last bar time for signals
                 string closedTimeStr = state.Type == "CE" ? applicableRow.CEAtrTime : applicableRow.PEAtrTime;
                 DateTime closedTime;
                 if (DateTime.TryParse(closedTimeStr, out closedTime))
                 {
                     state.LastBarCloseTime = tickTime.Date.Add(closedTime.TimeOfDay);
+                }
+            }
+
+            // Write to CSV for any bars that have been passed during this tick
+            WriteSimulationBarsToCSV(state, tickTime);
+        }
+
+        /// <summary>
+        /// Writes pre-computed simulation bars to CSV as they are passed during playback.
+        /// </summary>
+        private void WriteSimulationBarsToCSV(OptionVPState state, DateTime tickTime)
+        {
+            if (state.SimPrecomputedBars == null || state.SimPrecomputedBars.Count == 0)
+                return;
+
+            var csvService = CsvReportService.Instance;
+            if (!csvService.IsIndividualStrikesEnabled)
+                return;
+
+            // Register symbol for tracking if not already done
+            csvService.RegisterQualifiedSymbol(state.Symbol);
+
+            // Write all bars that have been passed
+            while (state.SimCsvBarIndex < state.SimPrecomputedBars.Count)
+            {
+                var barData = state.SimPrecomputedBars[state.SimCsvBarIndex];
+
+                // Check if this bar's time has been passed
+                if (barData.BarTime.TimeOfDay <= tickTime.TimeOfDay)
+                {
+                    // Write this bar to CSV with simulation date
+                    DateTime csvTime = tickTime.Date.Add(barData.BarTime.TimeOfDay);
+                    csvService.WriteIndividualStrikeRow(
+                        state.Symbol,
+                        csvTime,
+                        state.Type,
+                        barData.Row,
+                        barData.CumulativeDelta,
+                        barData.SessResult,
+                        barData.RollResult,
+                        barData.BarVolume,
+                        barData.BarBuyVolume,
+                        barData.BarSellVolume,
+                        barData.BarDelta);
+
+                    state.SimCsvBarIndex++;
+                }
+                else
+                {
+                    break;
                 }
             }
         }
@@ -178,6 +257,10 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
             _log.Info($"[SimProcessor] {state.Symbol} Pre-computing {state.SimReplayBars.Count} metrics for {targetDate:yyyy-MM-dd}");
             state.SimPrecomputedRows.Clear();
+            state.SimPrecomputedBars.Clear();
+
+            // Mark as pre-computing to prevent CSV writing during this phase
+            state.IsPrecomputing = true;
 
             // Save current state (engines)
             var savedSessVp = state.SessionVPEngine.Clone();
@@ -196,8 +279,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 // Start new bar for momentum
                 state.CDMomoEngine.StartNewBar();
 
-                // Process ticks for this bar
-                ProcessBarTicks(state, bar, tickBars);
+                // Process ticks for this bar and get volume breakdown
+                var (barVolume, barBuyVolume, barSellVolume, barDelta) = ProcessBarTicks(state, bar, tickBars);
 
                 // Update VP engines
                 state.SessionVPEngine.SetClosePrice(bar.ClosePrice);
@@ -208,11 +291,30 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 // Update ATR display in the temporary Row
                 UpdateAtrDisplay(state, bar.ClosePrice, bar.BarTime);
 
-                // Recalculate metrics (this updates state.Row)
-                _vpProcessor.RecalculateVP(state, bar.BarTime);
+                // Calculate VP results BEFORE RecalculateVP (which closes the CD bar)
+                var sessResult = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+                var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
 
-                // Store a copy of the row state
+                // Recalculate metrics (this updates state.Row and closes CD momentum bar)
+                // RecalculateVP now returns the accurate cumulative delta from CloseBarWithDelta
+                long cumulativeDelta = _vpProcessor.RecalculateVP(state, bar.BarTime);
+
+                // Store a copy of the row state (for backward compatibility)
                 state.SimPrecomputedRows.Add(state.Row.Clone());
+
+                // Store full bar data for CSV writing during playback
+                state.SimPrecomputedBars.Add(new SimBarData
+                {
+                    BarTime = bar.BarTime,
+                    Row = state.Row.Clone(),
+                    CumulativeDelta = cumulativeDelta,
+                    SessResult = sessResult,
+                    RollResult = rollResult,
+                    BarVolume = barVolume,
+                    BarBuyVolume = barBuyVolume,
+                    BarSellVolume = barSellVolume,
+                    BarDelta = barDelta
+                });
             }
 
             // Restore state
@@ -225,8 +327,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             state.LastSessionTrend = savedSessTrend;
             state.LastRollingTrend = savedRollTrend;
 
-            // Reset replay index for playback
+            // Pre-computation complete - allow CSV writing again
+            state.IsPrecomputing = false;
+
+            // Reset replay indices for playback
             state.SimReplayBarIndex = 0;
+            state.SimCsvBarIndex = 0;
         }
 
         private void CopyRowData(OptionSignalsRow source, OptionSignalsRow target)
@@ -279,6 +385,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             DateTime prevBarTime = DateTime.MinValue;
             int tickSearchStart = 0;
 
+            // Get CSV service for writing prior day data
+            var csvService = CsvReportService.Instance;
+            bool writeToCSV = csvService.IsIndividualStrikesEnabled;
+
+            // Register the symbol for CSV tracking if writing is enabled
+            if (writeToCSV)
+            {
+                csvService.RegisterQualifiedSymbol(state.Symbol);
+            }
+
             for (int barIdx = 0; barIdx < rangeBars.Count; barIdx++)
             {
                 DateTime barTime = rangeBars.GetTime(barIdx);
@@ -293,6 +409,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
                 // Start new bar for CD momentum
                 state.CDMomoEngine.StartNewBar();
+
+                // Track bar volume breakdown for CSV
+                long barTotalVolume = 0;
+                long barBuyVolume = 0;
+                long barSellVolume = 0;
+                int barTickCount = 0;
 
                 // Process ticks for this bar
                 while (tickSearchStart < priorDayTickTimes.Count)
@@ -311,6 +433,18 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     long volume = tickBars.GetVolume(tickIdx);
                     bool isBuy = tickPrice >= lastPrice;
 
+                    // Track volumes for all bars (for CSV)
+                    barTotalVolume += volume;
+                    if (isBuy) barBuyVolume += volume;
+                    else barSellVolume += volume;
+                    barTickCount++;
+
+                    // DEBUG: Log individual ticks for specific symbol (first 5 bars only)
+                    if (state.Symbol == DEBUG_SYMBOL && barsProcessed < 5 && barTickCount <= 3)
+                    {
+                        _log.Info($"[DEBUG-TICK] {state.Symbol} Bar#{barsProcessed} Tick#{barTickCount}: Price={tickPrice:F2}, Vol={volume}, isBuy={isBuy}, tickIdx={tickIdx}");
+                    }
+
                     state.SessionVPEngine.AddTick(tickPrice, volume, isBuy);
                     state.RollingVPEngine.AddTick(tickPrice, volume, isBuy, tickTime);
                     state.CDMomoEngine.AddTick(tickPrice, volume, isBuy, tickTime);
@@ -325,10 +459,33 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 state.RollingVPEngine.ExpireOldData(barTime);
 
                 // Process Price Momentum
-                state.PriceMomoEngine.ProcessBar(closePrice, barTime);
+                var priceMomoResult = state.PriceMomoEngine.ProcessBar(closePrice, barTime);
 
-                // Close CD momentum bar
-                state.CDMomoEngine.CloseBar(barTime);
+                // Close CD momentum bar - use CloseBarWithDelta to get accurate cumulative delta
+                // (CloseBar adds _barDelta to _runningCumulativeDelta but doesn't reset _barDelta,
+                // so CurrentCumulativeDelta would double-count if read after CloseBar)
+                var (cdMomoResult, cumulativeDelta) = state.CDMomoEngine.CloseBarWithDelta(barTime);
+
+                state.LastClosePrice = closePrice;
+
+                // DEBUG: Log detailed state for specific symbol
+                if (state.Symbol == DEBUG_SYMBOL && barsProcessed < 5)
+                {
+                    var sessVP = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+                    long barDelta = barBuyVolume - barSellVolume;
+                    _log.Info($"[DEBUG-PRIOR] {state.Symbol} Bar#{barsProcessed} Time={barTime:HH:mm:ss} Close={closePrice:F2}");
+                    _log.Info($"[DEBUG-PRIOR]   Volume: Total={barTotalVolume}, Buy={barBuyVolume}, Sell={barSellVolume}, Delta={barDelta}, Ticks={barTickCount}");
+                    _log.Info($"[DEBUG-PRIOR]   CD: CumDelta={cumulativeDelta}, Momo={cdMomoResult.Momentum:F1}, Smooth={cdMomoResult.Smooth:F1}");
+                    _log.Info($"[DEBUG-PRIOR]   Price: Momo={priceMomoResult.Momentum:F2}, Smooth={priceMomoResult.Smooth:F2}");
+                    _log.Info($"[DEBUG-PRIOR]   VP: VWAP={sessVP.VWAP:F2}, Valid={sessVP.IsValid}");
+                }
+
+                // Write prior day bar data to CSV if enabled
+                if (writeToCSV)
+                {
+                    long barDelta = barBuyVolume - barSellVolume;
+                    WritePriorDayBarToCSV(state, barTime, closePrice, cumulativeDelta, barTotalVolume, barBuyVolume, barSellVolume, barDelta);
+                }
 
                 prevBarTime = barTime;
                 lastPrice = closePrice;
@@ -372,6 +529,92 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             return lastPrice;
         }
 
+        /// <summary>
+        /// Writes a single prior day bar's data to the individual strike CSV.
+        /// Calculates VP metrics for the bar and writes them to CSV.
+        /// </summary>
+        /// <param name="cumulativeDelta">Cumulative delta value captured from CloseBar result</param>
+        /// <param name="barVolume">Total volume for this bar</param>
+        /// <param name="barBuyVolume">Buy volume for this bar</param>
+        /// <param name="barSellVolume">Sell volume for this bar</param>
+        /// <param name="barDelta">Delta for this bar (buy - sell)</param>
+        private void WritePriorDayBarToCSV(OptionVPState state, DateTime barTime, double closePrice, long cumulativeDelta,
+            long barVolume, long barBuyVolume, long barSellVolume, long barDelta)
+        {
+            var csvService = CsvReportService.Instance;
+            if (!csvService.IsIndividualStrikesEnabled) return;
+
+            // Calculate VP metrics for this bar
+            var sessResult = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+            var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
+
+            // Determine trends
+            HvnTrend sessTrend = DetermineTrend(sessResult);
+            HvnTrend rollTrend = DetermineTrend(rollResult);
+
+            // Calculate VWAP scores
+            int sessVwapScore = VWAPScoreCalculator.CalculateScore(closePrice, sessResult);
+            int rollVwapScore = VWAPScoreCalculator.CalculateScore(closePrice, rollResult);
+
+            // Update the row with current bar's metrics (for CSV writing)
+            UpdateRowForCSV(state, sessResult, rollResult, sessTrend, rollTrend, sessVwapScore, rollVwapScore, barTime, closePrice);
+
+            // Write to CSV - cumulativeDelta and volume data passed in from processing
+            csvService.WriteIndividualStrikeRow(state.Symbol, barTime, state.Type, state.Row,
+                cumulativeDelta, sessResult, rollResult, barVolume, barBuyVolume, barSellVolume, barDelta);
+        }
+
+        /// <summary>
+        /// Updates the row metrics for CSV writing during prior day processing.
+        /// </summary>
+        private void UpdateRowForCSV(OptionVPState state, VPResult sessResult, VPResult rollResult,
+            HvnTrend sessTrend, HvnTrend rollTrend, int sessVwapScore, int rollVwapScore,
+            DateTime barTime, double closePrice)
+        {
+            // Get momentum values (these were already processed in the main loop)
+            double cdMomo = state.CDMomoEngine.CurrentCumulativeDelta;  // This is the raw CD value
+            double priceSmooth = state.PriceMomoEngine.CurrentSmooth;
+
+            string timeStr = barTime.ToString("HH:mm:ss");
+
+            if (state.Type == "CE")
+            {
+                state.Row.CEAtrTime = timeStr;
+                state.Row.CEAtrLTP = closePrice.ToString("F2");
+                state.Row.CEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
+                state.Row.CEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
+                state.Row.CETrendSess = sessTrend;
+                state.Row.CEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
+                state.Row.CEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
+                state.Row.CETrendRoll = rollTrend;
+                state.Row.CEVwapScoreSess = sessVwapScore;
+                state.Row.CEVwapScoreRoll = rollVwapScore;
+                // Note: CDMomo/CDSmooth/PriceMomo/PriceSmooth are formatted by _vpProcessor.RecalculateVP
+                // For prior day, we'll set them to basic values
+                state.Row.CECDMomo = "0";  // These will be more accurate once we integrate with RecalculateVP
+                state.Row.CECDSmooth = "0";
+                state.Row.CEPriceMomo = "0";
+                state.Row.CEPriceSmooth = priceSmooth.ToString("F1");
+            }
+            else
+            {
+                state.Row.PEAtrTime = timeStr;
+                state.Row.PEAtrLTP = closePrice.ToString("F2");
+                state.Row.PEHvnBSess = sessResult.IsValid ? sessResult.HVNBuyCount.ToString() : "0";
+                state.Row.PEHvnSSess = sessResult.IsValid ? sessResult.HVNSellCount.ToString() : "0";
+                state.Row.PETrendSess = sessTrend;
+                state.Row.PEHvnBRoll = rollResult.IsValid ? rollResult.HVNBuyCount.ToString() : "0";
+                state.Row.PEHvnSRoll = rollResult.IsValid ? rollResult.HVNSellCount.ToString() : "0";
+                state.Row.PETrendRoll = rollTrend;
+                state.Row.PEVwapScoreSess = sessVwapScore;
+                state.Row.PEVwapScoreRoll = rollVwapScore;
+                state.Row.PECDMomo = "0";
+                state.Row.PECDSmooth = "0";
+                state.Row.PEPriceMomo = "0";
+                state.Row.PEPriceSmooth = priceSmooth.ToString("F1");
+            }
+        }
+
         private List<(DateTime BarTime, double ClosePrice, DateTime PrevBarTime)> BuildReplayBarList(Bars rangeBars, DateTime targetDate)
         {
             var replayBars = new List<(DateTime BarTime, double ClosePrice, DateTime PrevBarTime)>();
@@ -395,8 +638,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             return replayBars;
         }
 
-        private void ProcessBarTicks(OptionVPState state, (DateTime BarTime, double ClosePrice, DateTime PrevBarTime) bar, Bars tickBars)
+        /// <summary>
+        /// Processes ticks for a bar and returns volume breakdown.
+        /// </summary>
+        private (long BarVolume, long BarBuyVolume, long BarSellVolume, long BarDelta) ProcessBarTicks(
+            OptionVPState state, (DateTime BarTime, double ClosePrice, DateTime PrevBarTime) bar, Bars tickBars)
         {
+            long barVolume = 0;
+            long barBuyVolume = 0;
+            long barSellVolume = 0;
+
             while (state.SimReplayTickIndex < state.SimTickTimes.Count)
             {
                 var (tTime, tIdx) = state.SimTickTimes[state.SimReplayTickIndex];
@@ -414,6 +665,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 long tVolume = tickBars.GetVolume(tIdx);
                 bool isBuy = tPrice >= state.SimLastPrice;
 
+                // Track volume breakdown
+                barVolume += tVolume;
+                if (isBuy) barBuyVolume += tVolume;
+                else barSellVolume += tVolume;
+
                 state.SessionVPEngine.AddTick(tPrice, tVolume, isBuy);
                 state.RollingVPEngine.AddTick(tPrice, tVolume, isBuy, tTime);
                 state.CDMomoEngine.AddTick(tPrice, tVolume, isBuy, tTime);
@@ -421,6 +677,8 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 state.SimLastPrice = tPrice;
                 state.SimReplayTickIndex++;
             }
+
+            return (barVolume, barBuyVolume, barSellVolume, barBuyVolume - barSellVolume);
         }
 
         private void UpdateAtrDisplay(OptionVPState state, double close, DateTime barTime)

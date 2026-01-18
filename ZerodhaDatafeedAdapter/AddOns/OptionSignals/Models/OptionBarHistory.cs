@@ -35,6 +35,23 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Models
         public int VwapScoreRoll;
         public double SessionVWAP;
         public double RollingVWAP;
+
+        // Cumulative Delta (raw value)
+        public long CumulativeDelta;
+
+        // Session SD Bands
+        public double SessStdDev;
+        public double SessUpper1SD;
+        public double SessUpper2SD;
+        public double SessLower1SD;
+        public double SessLower2SD;
+
+        // Rolling SD Bands
+        public double RollStdDev;
+        public double RollUpper1SD;
+        public double RollUpper2SD;
+        public double RollLower1SD;
+        public double RollLower2SD;
     }
 
     /// <summary>

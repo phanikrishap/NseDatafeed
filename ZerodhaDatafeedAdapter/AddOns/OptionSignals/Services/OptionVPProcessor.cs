@@ -207,15 +207,16 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
         /// <summary>
         /// Recalculate VP metrics and update row.
+        /// Returns the accurate cumulative delta value from CloseBar.
         /// </summary>
-        public void RecalculateVP(OptionVPState state, DateTime currentTime)
+        public long RecalculateVP(OptionVPState state, DateTime currentTime)
         {
             // Calculate Session VP
             var sessResult = state.SessionVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
             var rollResult = state.RollingVPEngine.Calculate(VALUE_AREA_PERCENT, HVN_RATIO);
 
-            // Get momentum results
-            var cdMomoResult = state.CDMomoEngine.CloseBar(currentTime);
+            // Get momentum results - use CloseBarWithDelta to get accurate cumulative delta
+            var (cdMomoResult, cumulativeDelta) = state.CDMomoEngine.CloseBarWithDelta(currentTime);
             var priceMomoResult = state.PriceMomoEngine.ProcessBar(state.LastClosePrice, currentTime);
 
             // Determine trends
@@ -259,7 +260,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                                      sessTrend, rollTrend, sessVwapScore, rollVwapScore, currentTime);
 
             // Write to CSV if enabled and this is an ATM/ITM1/OTM1 strike
-            TryWriteOptionsSignalsCsv(state, currentTime);
+            TryWriteOptionsSignalsCsv(state, currentTime, sessResult, rollResult);
+
+            return cumulativeDelta;
         }
 
         /// <summary>
@@ -284,8 +287,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             List<(DateTime time, int index)> tickTimes, ref int searchStart,
             DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
         {
-            // Start new bar for CD momentum engine
+            // Start new bar for CD momentum engine and reset volume tracking
             state.CDMomoEngine.StartNewBar();
+            state.ResetBarVolume();
 
             double updatedPrice = VolumeProfileLogic.ProcessTicksOptimized(
                 tickBars, tickTimes, ref searchStart, prevBarTime, currentBarTime, lastPrice,
@@ -294,6 +298,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     state.SessionVPEngine.AddTick(price, volume, isBuy);
                     state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
                     state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
+                    state.AddTickVolume(volume, isBuy);
                 });
 
             state.LastVPTickIndex = searchStart > 0 ? tickTimes[searchStart - 1].index : -1;
@@ -302,7 +307,9 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
 
         private void ProcessTicksInWindow(OptionVPState state, Bars tickBars, DateTime prevBarTime, DateTime currentBarTime, double lastPrice)
         {
+            // Start new bar for CD momentum engine and reset volume tracking
             state.CDMomoEngine.StartNewBar();
+            state.ResetBarVolume();
 
             int lastIndex;
             double updatedPrice = VolumeProfileLogic.ProcessTicksInWindow(
@@ -312,6 +319,7 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                     state.SessionVPEngine.AddTick(price, volume, isBuy);
                     state.RollingVPEngine.AddTick(price, volume, isBuy, tickTime);
                     state.CDMomoEngine.AddTick(price, volume, isBuy, tickTime);
+                    state.AddTickVolume(volume, isBuy);
                 },
                 out lastIndex);
 
@@ -410,7 +418,24 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
                 VwapScoreSess = sessVwapScore,
                 VwapScoreRoll = rollVwapScore,
                 SessionVWAP = sessResult.VWAP,
-                RollingVWAP = rollResult.VWAP
+                RollingVWAP = rollResult.VWAP,
+
+                // Cumulative Delta (raw value from CD engine)
+                CumulativeDelta = state.CDMomoEngine.CurrentCumulativeDelta,
+
+                // Session SD Bands
+                SessStdDev = sessResult.IsValid ? sessResult.StdDev : 0,
+                SessUpper1SD = sessResult.IsValid ? sessResult.Upper1SD : 0,
+                SessUpper2SD = sessResult.IsValid ? sessResult.Upper2SD : 0,
+                SessLower1SD = sessResult.IsValid ? sessResult.Lower1SD : 0,
+                SessLower2SD = sessResult.IsValid ? sessResult.Lower2SD : 0,
+
+                // Rolling SD Bands
+                RollStdDev = rollResult.IsValid ? rollResult.StdDev : 0,
+                RollUpper1SD = rollResult.IsValid ? rollResult.Upper1SD : 0,
+                RollUpper2SD = rollResult.IsValid ? rollResult.Upper2SD : 0,
+                RollLower1SD = rollResult.IsValid ? rollResult.Lower1SD : 0,
+                RollLower2SD = rollResult.IsValid ? rollResult.Lower2SD : 0
             };
 
             state.BarHistory.AddBar(snapshot);
@@ -537,8 +562,12 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
         /// Also handles individual strike CSV writing for qualified symbols.
         /// Throttles writes to at most once per minute boundary or bar close.
         /// </summary>
-        private void TryWriteOptionsSignalsCsv(OptionVPState state, DateTime currentTime)
+        private void TryWriteOptionsSignalsCsv(OptionVPState state, DateTime currentTime, VPResult sessResult, VPResult rollResult)
         {
+            // Skip CSV writing during pre-computation phase - pre-computation generates row states,
+            // actual CSV writing happens during prior day processing and simulation playback
+            if (state.IsPrecomputing) return;
+
             var csvService = CsvReportService.Instance;
 
             // Check if this is an ATM, ITM1, or OTM1 strike
@@ -557,7 +586,11 @@ namespace ZerodhaDatafeedAdapter.AddOns.OptionSignals.Services
             // Write individual strike CSV if the symbol is qualified (even if no longer ATM/ITM1/OTM1)
             if (csvService.IsIndividualStrikesEnabled && csvService.IsSymbolQualified(state.Symbol))
             {
-                csvService.WriteIndividualStrikeRow(state.Symbol, currentTime, state.Type, state.Row);
+                // Get cumulative delta from the CD momentum engine
+                long cumulativeDelta = state.CDMomoEngine.CurrentCumulativeDelta;
+                csvService.WriteIndividualStrikeRow(state.Symbol, currentTime, state.Type, state.Row,
+                    cumulativeDelta, sessResult, rollResult,
+                    state.CurrentBarVolume, state.CurrentBarBuyVolume, state.CurrentBarSellVolume, state.CurrentBarDelta);
             }
 
             // For aggregate OptionsSignals.csv, only write for currently qualifying strikes
